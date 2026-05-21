@@ -1,0 +1,4 @@
+[submodule "tuta-repo"]
+	path = tuta-repo
+	url = https://github.com/spartanz51/tutanota.git
+	branch = feat/rust-sdk-blob-read

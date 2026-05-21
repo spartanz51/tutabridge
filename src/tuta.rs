@@ -85,7 +85,7 @@ impl TutaSession {
         mail: &Mail,
     ) -> Result<Option<MailDetailsBlob>, ApiCallError> {
         if mail.mailDetails.is_some() {
-            let blob = self.logged_in.load_mail_details_blob(mail).await?;
+            let blob = self.logged_in.mail_facade().load_mail_details_blob(mail).await?;
             Ok(Some(blob))
         } else {
             Ok(None)
