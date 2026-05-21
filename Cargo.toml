@@ -1,0 +1,44 @@
+[package]
+name = "tutabridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84.0"
+
+[dependencies]
+# Tuta SDK with native HTTP client
+tuta-sdk = { path = "tuta-repo/tuta-sdk/rust/sdk", features = ["net"] }
+
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+async-trait = "0.1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# TLS
+tokio-rustls = { version = "0.26", features = ["ring"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+
+# Crypto primitives for key generation
+crypto-primitives = { path = "tuta-repo/tuta-sdk/rust/crypto-primitives" }
+
+# Credentials storage
+keyring = { version = "3", features = ["apple-native"] }
+
+# Misc
+thiserror = "2.0"
+base64 = "0.22"
+dirs = "6"
+anyhow = "1"
+rpassword = "7"
+rand_core = "0.6"
+
+[dev-dependencies]
+tuta-sdk = { path = "tuta-repo/tuta-sdk/rust/sdk", features = ["net", "logging", "testing"] }
