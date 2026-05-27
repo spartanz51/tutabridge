@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use base64::Engine;
 use log::{info, error, debug};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -18,7 +19,20 @@ enum SmtpState {
     Quit,
 }
 
-pub async fn serve(port: u16, tuta: Arc<dyn MailBackend>, tls: TlsAcceptor) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+#[derive(Debug)]
+enum AuthStep {
+    None,
+    WaitPlainData,
+    WaitLoginUser,
+    WaitLoginPass,
+}
+
+pub async fn serve(
+    port: u16,
+    tuta: Arc<dyn MailBackend>,
+    tls: TlsAcceptor,
+    password_hash: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     info!("SMTP server listening on 127.0.0.1:{} (TLS)", port);
 
@@ -27,11 +41,12 @@ pub async fn serve(port: u16, tuta: Arc<dyn MailBackend>, tls: TlsAcceptor) -> R
         debug!("SMTP connection from {}", addr);
         let tuta = tuta.clone();
         let tls = tls.clone();
+        let pw_hash = password_hash.clone();
 
         tokio::spawn(async move {
             match tls.accept(stream).await {
                 Ok(tls_stream) => {
-                    if let Err(e) = handle_connection(tls_stream, tuta).await {
+                    if let Err(e) = handle_connection(tls_stream, tuta, pw_hash).await {
                         error!("SMTP connection error: {}", e);
                     }
                 }
@@ -46,6 +61,7 @@ pub async fn serve(port: u16, tuta: Arc<dyn MailBackend>, tls: TlsAcceptor) -> R
 async fn handle_connection(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     tuta: Arc<dyn MailBackend>,
+    password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
@@ -56,6 +72,7 @@ async fn handle_connection(
     let mut line = String::new();
     let mut data_buf = String::new();
     let mut in_data = false;
+    let mut auth_step = AuthStep::None;
 
     loop {
         line.clear();
@@ -66,6 +83,32 @@ async fn handle_connection(
 
         let trimmed = line.trim_end();
         debug!("SMTP C: {}", trimmed);
+
+        if !matches!(auth_step, AuthStep::None) {
+            let response = match auth_step {
+                AuthStep::WaitPlainData => {
+                    auth_step = AuthStep::None;
+                    verify_smtp_plain_data(trimmed, &password_hash)
+                }
+                AuthStep::WaitLoginUser => {
+                    auth_step = AuthStep::WaitLoginPass;
+                    "334 UGFzc3dvcmQ6\r\n".to_string()
+                }
+                AuthStep::WaitLoginPass => {
+                    auth_step = AuthStep::None;
+                    let password = base64::engine::general_purpose::STANDARD
+                        .decode(trimmed.trim())
+                        .ok()
+                        .and_then(|b| String::from_utf8(b).ok())
+                        .unwrap_or_default();
+                    verify_smtp_password(&password, &password_hash)
+                }
+                AuthStep::None => unreachable!(),
+            };
+            debug!("SMTP S: {}", response.trim_end());
+            writer.write_all(response.as_bytes()).await?;
+            continue;
+        }
 
         if in_data {
             if trimmed == "." {
@@ -122,7 +165,23 @@ async fn handle_connection(
                     .to_string()
             }
             "AUTH" => {
-                "235 2.7.0 Authentication successful\r\n".to_string()
+                let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+                let auth_type = parts.get(1).unwrap_or(&"").to_uppercase();
+                match auth_type.as_str() {
+                    "PLAIN" => {
+                        if let Some(data) = parts.get(2) {
+                            verify_smtp_plain_data(data, &password_hash)
+                        } else {
+                            auth_step = AuthStep::WaitPlainData;
+                            "334 \r\n".to_string()
+                        }
+                    }
+                    "LOGIN" => {
+                        auth_step = AuthStep::WaitLoginUser;
+                        "334 VXNlcm5hbWU6\r\n".to_string()
+                    }
+                    _ => "504 Unrecognized auth type\r\n".to_string(),
+                }
             }
             "MAIL" => {
                 let from = extract_address(trimmed);
@@ -198,6 +257,30 @@ fn extract_address(line: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+fn verify_smtp_plain_data(data: &str, expected: &Option<String>) -> String {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .unwrap_or_default();
+    // AUTH PLAIN format: \0username\0password
+    let parts: Vec<&[u8]> = decoded.splitn(3, |b| *b == 0).collect();
+    let password = if parts.len() >= 3 {
+        String::from_utf8_lossy(parts[2]).to_string()
+    } else {
+        String::new()
+    };
+    verify_smtp_password(&password, expected)
+}
+
+fn verify_smtp_password(password: &str, expected: &Option<String>) -> String {
+    match expected {
+        Some(expected_pw) if password == expected_pw => {
+            "235 2.7.0 Authentication successful\r\n".to_string()
+        }
+        Some(_) => "535 5.7.8 Authentication failed\r\n".to_string(),
+        None => "235 2.7.0 Authentication successful\r\n".to_string(),
+    }
 }
 
 #[cfg(test)]

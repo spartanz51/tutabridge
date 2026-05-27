@@ -1,13 +1,15 @@
+use base64::Engine;
 use std::sync::Arc;
-use crypto_primitives::aes::{Aes256Key, Iv};
+use crypto_primitives::aes::{Aes256Key, Iv, AES_256_KEY_SIZE};
+use crypto_primitives::blake3::blake3_kdf;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use tutasdk::bindings::file_client::{FileClient, FileClientError};
 use tutasdk::bindings::rest_client::RestClient;
 use tutasdk::crypto_entity_client::CryptoEntityClient;
 use tutasdk::entities::generated::tutanota::{
-    DraftCreateData, DraftData, DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob,
-    MailSetEntry, SendDraftData,
+    DraftCreateData, DraftData, DraftRecipient, Mail, MailBox, MailDetails,
+    MailSetEntry, SendDraftData, SendDraftParameters,
 };
 use tutasdk::folder_system::{FolderSystem, MailSetKind};
 use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
@@ -19,7 +21,7 @@ use crate::mail::ParsedMessage;
 
 #[async_trait::async_trait]
 pub trait MailBackend: Send + Sync {
-    async fn load_mail_ids_for_folder(&self, kind: MailSetKind) -> Result<Vec<Mail>, String>;
+    async fn load_mail_ids_for_folder(&self, kind: MailSetKind, limit: usize) -> Result<Vec<Mail>, String>;
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String>;
     async fn load_folder_list(&self) -> Result<Vec<(String, String)>, String>;
     async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String>;
@@ -44,6 +46,22 @@ impl TutaSession {
             .await
     }
 
+    pub async fn derive_storage_key(&self) -> Result<GenericAesKey, String> {
+        let user_group_id = self.logged_in.get_user_group_id();
+        let versioned_key = self
+            .logged_in
+            .get_current_sym_group_key(&user_group_id)
+            .await
+            .map_err(|e| format!("Failed to get user group key: {e}"))?;
+        let derived = blake3_kdf(
+            &[versioned_key.object.as_bytes()],
+            "tutabridge local storage v1",
+            AES_256_KEY_SIZE,
+        );
+        GenericAesKey::from_bytes(&derived)
+            .map_err(|e| format!("Key derivation error: {e:?}"))
+    }
+
     fn crypto_client(&self) -> Arc<CryptoEntityClient> {
         self.logged_in.mail_facade().get_crypto_entity_client()
     }
@@ -51,6 +69,7 @@ impl TutaSession {
     async fn load_mail_ids_for_folder_impl(
         &self,
         folder_kind: MailSetKind,
+        limit: usize,
     ) -> Result<Vec<Mail>, ApiCallError> {
         let mailbox = self.load_mailbox().await?;
         let folders = self.load_folders(&mailbox).await?;
@@ -58,22 +77,38 @@ impl TutaSession {
             .system_folder_by_type(folder_kind)
             .ok_or_else(|| ApiCallError::internal(format!("Folder {:?} not found", folder_kind)))?;
 
+        let count = if limit == 0 { 1000 } else { limit };
         let entries_list_id = &folder.entries;
         let entries: Vec<MailSetEntry> = self
             .crypto_client()
             .load_range(
                 entries_list_id,
                 &CustomId::default(),
-                100,
+                count,
                 ListLoadDirection::DESC,
             )
             .await?;
 
-        let mut mails = Vec::new();
+        // Group entries by list_id for batch loading
+        let mut by_list: std::collections::HashMap<String, Vec<tutasdk::GeneratedId>> =
+            std::collections::HashMap::new();
         for entry in &entries {
-            match self.crypto_client().load::<Mail, _>(&entry.mail).await {
-                Ok(mail) => mails.push(mail),
-                Err(e) => log::warn!("Failed to load mail {:?}: {}", entry.mail, e),
+            by_list
+                .entry(entry.mail.list_id.to_string())
+                .or_default()
+                .push(entry.mail.element_id.clone());
+        }
+
+        let mut mails = Vec::new();
+        for (list_id_str, element_ids) in &by_list {
+            let list_id = tutasdk::GeneratedId(list_id_str.clone());
+            match self
+                .crypto_client()
+                .load_multiple::<Mail>(&list_id, element_ids)
+                .await
+            {
+                Ok(batch) => mails.extend(batch),
+                Err(e) => log::warn!("Failed to batch load mails from list {}: {}", list_id_str, e),
             }
         }
 
@@ -83,10 +118,15 @@ impl TutaSession {
     async fn load_mail_details_impl(
         &self,
         mail: &Mail,
-    ) -> Result<Option<MailDetailsBlob>, ApiCallError> {
+    ) -> Result<Option<MailDetails>, ApiCallError> {
         if mail.mailDetails.is_some() {
-            let blob = self.logged_in.mail_facade().load_mail_details_blob(mail).await?;
-            Ok(Some(blob))
+            match self.logged_in.mail_facade().load_mail_details_blob(mail).await {
+                Ok(details) => Ok(Some(details)),
+                Err(e) => {
+                    log::error!("Failed to load mail details blob: {e}");
+                    Err(e)
+                }
+            }
         } else {
             Ok(None)
         }
@@ -110,54 +150,7 @@ impl TutaSession {
             group_key.object.encrypt_key(&session_key, Iv::generate(&randomizer));
         let owner_key_version = group_key.version as i64;
 
-        let to_recips: Vec<DraftRecipient> = msg
-            .to
-            .iter()
-            .map(|(name, addr)| DraftRecipient {
-                _id: None,
-                name: name.clone(),
-                mailAddress: addr.clone(),
-                _errors: Default::default(),
-            })
-            .collect();
-        let cc_recips: Vec<DraftRecipient> = msg
-            .cc
-            .iter()
-            .map(|(name, addr)| DraftRecipient {
-                _id: None,
-                name: name.clone(),
-                mailAddress: addr.clone(),
-                _errors: Default::default(),
-            })
-            .collect();
-        let bcc_recips: Vec<DraftRecipient> = msg
-            .bcc
-            .iter()
-            .map(|(name, addr)| DraftRecipient {
-                _id: None,
-                name: name.clone(),
-                mailAddress: addr.clone(),
-                _errors: Default::default(),
-            })
-            .collect();
-
-        let draft_data = DraftData {
-            _id: None,
-            subject: msg.subject.clone(),
-            bodyText: msg.body_html.clone(),
-            senderMailAddress: self.email.clone(),
-            senderName: msg.from_name.clone(),
-            confidential: false,
-            method: 0,
-            compressedBodyText: None,
-            toRecipients: to_recips,
-            ccRecipients: cc_recips,
-            bccRecipients: bcc_recips,
-            addedAttachments: vec![],
-            removedAttachments: vec![],
-            replyTos: vec![],
-            _errors: Default::default(),
-        };
+        let draft_data = build_draft_data(msg, &self.email);
 
         let create_data = DraftCreateData {
             _format: 0,
@@ -182,24 +175,12 @@ impl TutaSession {
 
         log::info!("Draft created: {:?}", draft_return.draft);
 
-        let send_data = SendDraftData {
-            _format: 0,
-            language: "en".to_string(),
-            mailSessionKey: Some(session_key.as_bytes().to_vec()),
-            bucketEncMailSessionKey: None,
-            senderNameUnencrypted: None,
-            plaintext: true,
-            calendarMethod: false,
-            sessionEncEncryptionAuthStatus: None,
-            sendAt: None,
-            allowUndo: false,
-            internalRecipientKeyData: vec![],
-            secureExternalRecipientKeyData: vec![],
-            attachmentKeyData: vec![],
-            mail: draft_return.draft,
-            symEncInternalRecipientKeyData: vec![],
-            parameters: None,
-        };
+        let parameters_id = CustomId(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(randomizer.generate_random_array::<4>()),
+        );
+        let send_data =
+            build_send_draft_data(session_key.as_bytes().to_vec(), draft_return.draft, parameters_id);
 
         let send_return = executor
             .post::<SendDraftService>(send_data, ExtraServiceParams::default())
@@ -212,8 +193,8 @@ impl TutaSession {
 
 #[async_trait::async_trait]
 impl MailBackend for TutaSession {
-    async fn load_mail_ids_for_folder(&self, kind: MailSetKind) -> Result<Vec<Mail>, String> {
-        self.load_mail_ids_for_folder_impl(kind)
+    async fn load_mail_ids_for_folder(&self, kind: MailSetKind, limit: usize) -> Result<Vec<Mail>, String> {
+        self.load_mail_ids_for_folder_impl(kind, limit)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -221,7 +202,6 @@ impl MailBackend for TutaSession {
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
         self.load_mail_details_impl(mail)
             .await
-            .map(|opt| opt.map(|blob| blob.details))
             .map_err(|e| format!("{e}"))
     }
 
@@ -302,7 +282,22 @@ impl FileClient for DiskFileClient {
     }
 }
 
-pub async fn login(cfg: &Config) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
+pub enum TwoFactorCallback {
+    Totp(Box<dyn Fn() -> Result<u32, Box<dyn std::error::Error + Send + Sync>> + Send + Sync>),
+}
+
+pub async fn login(
+    cfg: &Config,
+    password: &str,
+) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
+    login_with_2fa(cfg, Some(password), None).await
+}
+
+pub async fn login_with_2fa(
+    cfg: &Config,
+    password: Option<&str>,
+    totp_callback: Option<TwoFactorCallback>,
+) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
     let rest_client: Arc<dyn RestClient> =
         Arc::new(tutasdk::net::native_rest_client::NativeRestClient::try_new()?);
     let file_client: Arc<dyn FileClient> = Arc::new(DiskFileClient::new());
@@ -324,32 +319,37 @@ pub async fn login(cfg: &Config) -> Result<TutaSession, Box<dyn std::error::Erro
         }
     }
 
-    let password = rpassword_prompt(&cfg.email)?;
+    let password = password.ok_or("No saved session and no password provided")?;
 
     log::info!("Authenticating with Tuta servers...");
-    let (session_return, credentials) = sdk
-        .initiate_session(&cfg.email, &password)
+    let session = sdk
+        .initiate_session(&cfg.email, password)
         .await
         .map_err(|e| {
             Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))
         })?;
+    let credentials = session.credentials;
+    let access_token = credentials.access_token.clone();
 
-    if !session_return.challenges.is_empty() {
-        for c in &session_return.challenges {
+    if !session.challenges.is_empty() {
+        for c in &session.challenges {
             log::info!("2FA challenge: type={}, id={:?}", c.r#type, c._id);
         }
 
-        let has_totp = session_return
+        let has_totp = session
             .challenges
             .iter()
-            .any(|c| c.r#type == 1);
+            .any(|c| c.r#type == i64::from(tutasdk::tutanota_constants::SecondFactorType::Totp));
 
         if !has_totp {
             return Err("Account requires U2F/WebAuthn 2FA which is not supported — only TOTP is supported".into());
         }
 
-        let totp_code = totp_prompt()?;
-        sdk.submit_2fa(&session_return.accessToken, totp_code)
+        let totp_code = match &totp_callback {
+            Some(TwoFactorCallback::Totp(cb)) => cb()?,
+            None => return Err("2FA required but no TOTP callback provided".into()),
+        };
+        sdk.authenticate_with_second_factor_totp(&access_token, totp_code)
             .await
             .map_err(|e| {
                 Box::<dyn std::error::Error + Send + Sync>::from(format!("2FA failed: {e}"))
@@ -359,7 +359,7 @@ pub async fn login(cfg: &Config) -> Result<TutaSession, Box<dyn std::error::Erro
         for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let pending = sdk
-                .check_2fa_pending(&session_return.accessToken)
+                .is_second_factor_pending(&access_token)
                 .await
                 .map_err(|e| {
                     Box::<dyn std::error::Error + Send + Sync>::from(format!("2FA poll failed: {e}"))
@@ -388,6 +388,13 @@ pub async fn login(cfg: &Config) -> Result<TutaSession, Box<dyn std::error::Erro
 
 const KEYRING_SERVICE: &str = "tutabridge";
 
+use std::sync::Mutex;
+static CREDENTIALS_CACHE: Mutex<Option<Option<tutasdk::login::Credentials>>> = Mutex::new(None);
+
+pub fn has_saved_session(email: &str) -> bool {
+    load_credentials(email).is_some()
+}
+
 fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
     let data = serde_json::json!({
         "login": creds.login,
@@ -402,6 +409,7 @@ fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
             tutasdk::login::CredentialType::External => "External",
         },
     });
+
     match keyring::Entry::new(KEYRING_SERVICE, email) {
         Ok(entry) => {
             if let Err(e) = entry.set_password(&data.to_string()) {
@@ -412,11 +420,28 @@ fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
         }
         Err(e) => log::warn!("Failed to create keychain entry: {e}"),
     }
+    *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(creds.clone()));
 }
 
 fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
+    let mut cache = CREDENTIALS_CACHE.lock().unwrap();
+    if let Some(cached) = cache.as_ref() {
+
+        return cached.clone();
+    }
+
+
+    let result = load_credentials_from_keyring(email);
+    *cache = Some(result.clone());
+    result
+}
+
+fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credentials> {
+
     let entry = keyring::Entry::new(KEYRING_SERVICE, email).ok()?;
+
     let json_str = entry.get_password().ok()?;
+
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
     Some(tutasdk::login::Credentials {
         login: v["login"].as_str()?.to_string(),
@@ -435,28 +460,183 @@ fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
 }
 
 fn delete_credentials(email: &str) {
+
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, email) {
         let _ = entry.delete_credential();
     }
+    *CREDENTIALS_CACHE.lock().unwrap() = None;
 }
 
-fn rpassword_prompt(email: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Write;
-    print!("Password for {}: ", email);
-    std::io::stdout().flush()?;
-    let password = rpassword::read_password()?;
-    Ok(password)
+
+/// Map SMTP recipients to `DraftRecipient`, falling back to the address when
+/// the display name is empty (Tuta's send service rejects empty names).
+fn build_draft_recipients(recipients: &[(String, String)]) -> Vec<DraftRecipient> {
+    recipients
+        .iter()
+        .map(|(name, addr)| DraftRecipient {
+            _id: None,
+            name: if name.is_empty() {
+                addr.clone()
+            } else {
+                name.clone()
+            },
+            mailAddress: addr.clone(),
+            _errors: Default::default(),
+        })
+        .collect()
 }
 
-fn totp_prompt() -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::{BufRead, Write};
-    print!("TOTP code: ");
-    std::io::stdout().flush()?;
-    let mut code_str = String::new();
-    std::io::stdin().lock().read_line(&mut code_str)?;
-    let code: u32 = code_str
-        .trim()
-        .parse()
-        .map_err(|_| "Invalid TOTP code — must be a number")?;
-    Ok(code)
+/// Build the `DraftData` for a draft creation from a parsed SMTP message.
+///
+/// Mirrors the web client: the body goes into both `bodyText` and
+/// `compressedBodyText`, and empty sender/recipient names fall back to the
+/// address (an empty name makes `SendDraftService` fail).
+fn build_draft_data(msg: &ParsedMessage, sender_email: &str) -> DraftData {
+    DraftData {
+        _id: None,
+        subject: msg.subject.clone(),
+        bodyText: msg.body_html.clone(),
+        senderMailAddress: sender_email.to_string(),
+        senderName: if msg.from_name.is_empty() {
+            sender_email.to_string()
+        } else {
+            msg.from_name.clone()
+        },
+        confidential: false,
+        method: 0,
+        compressedBodyText: Some(msg.body_html.clone()),
+        toRecipients: build_draft_recipients(&msg.to),
+        ccRecipients: build_draft_recipients(&msg.cc),
+        bccRecipients: build_draft_recipients(&msg.bcc),
+        addedAttachments: vec![],
+        removedAttachments: vec![],
+        replyTos: vec![],
+        _errors: Default::default(),
+    }
+}
+
+/// Build the `SendDraftData` for sending a previously created draft.
+///
+/// The session data is mirrored into the nested `parameters` aggregate (with a
+/// generated `_id`), which the current server model reads; `plaintext` is
+/// `false` (it reflects the account's plaintext-only setting, not whether the
+/// mail is encrypted). Recipient key arrays stay empty for a non-confidential
+/// send.
+fn build_send_draft_data(
+    session_key_bytes: Vec<u8>,
+    draft_id: IdTupleGenerated,
+    parameters_id: CustomId,
+) -> SendDraftData {
+    SendDraftData {
+        _format: 0,
+        language: "en".to_string(),
+        mailSessionKey: Some(session_key_bytes.clone()),
+        bucketEncMailSessionKey: None,
+        senderNameUnencrypted: None,
+        plaintext: false,
+        calendarMethod: false,
+        sessionEncEncryptionAuthStatus: None,
+        sendAt: None,
+        allowUndo: false,
+        internalRecipientKeyData: vec![],
+        secureExternalRecipientKeyData: vec![],
+        attachmentKeyData: vec![],
+        mail: draft_id.clone(),
+        symEncInternalRecipientKeyData: vec![],
+        parameters: Some(SendDraftParameters {
+            _id: Some(parameters_id),
+            language: "en".to_string(),
+            mailSessionKey: Some(session_key_bytes),
+            bucketEncMailSessionKey: None,
+            senderNameUnencrypted: None,
+            plaintext: false,
+            calendarMethod: false,
+            sessionEncEncryptionAuthStatus: None,
+            mail: draft_id,
+            internalRecipientKeyData: vec![],
+            secureExternalRecipientKeyData: vec![],
+            symEncInternalRecipientKeyData: vec![],
+            attachmentKeyData: vec![],
+        }),
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn sample_msg() -> ParsedMessage {
+        ParsedMessage {
+            from_address: "me@tuta.io".to_string(),
+            from_name: "Me".to_string(),
+            to: vec![("Bob".to_string(), "bob@example.com".to_string())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hi".to_string(),
+            body_html: "<p>hello</p>".to_string(),
+        }
+    }
+
+    #[test]
+    fn draft_data_puts_body_in_both_fields() {
+        let d = build_draft_data(&sample_msg(), "me@tuta.io");
+        assert_eq!(d.bodyText, "<p>hello</p>");
+        assert_eq!(d.compressedBodyText.as_deref(), Some("<p>hello</p>"));
+        assert!(!d.confidential);
+        assert_eq!(d.method, 0);
+    }
+
+    #[test]
+    fn draft_data_empty_sender_name_falls_back_to_address() {
+        let mut msg = sample_msg();
+        msg.from_name = String::new();
+        let d = build_draft_data(&msg, "me@tuta.io");
+        assert_eq!(d.senderName, "me@tuta.io");
+    }
+
+    #[test]
+    fn draft_data_keeps_non_empty_sender_name() {
+        let d = build_draft_data(&sample_msg(), "me@tuta.io");
+        assert_eq!(d.senderName, "Me");
+    }
+
+    #[test]
+    fn recipient_empty_name_falls_back_to_address() {
+        let recips = build_draft_recipients(&[(String::new(), "x@example.com".to_string())]);
+        assert_eq!(recips[0].name, "x@example.com");
+        assert_eq!(recips[0].mailAddress, "x@example.com");
+    }
+
+    #[test]
+    fn recipient_keeps_non_empty_name() {
+        let recips = build_draft_recipients(&[("Alice".to_string(), "a@example.com".to_string())]);
+        assert_eq!(recips[0].name, "Alice");
+    }
+
+    #[test]
+    fn send_draft_data_mirrors_parameters_and_is_not_plaintext() {
+        let draft_id = IdTupleGenerated::new(
+            tutasdk::GeneratedId("list".to_string()),
+            tutasdk::GeneratedId("elem".to_string()),
+        );
+        let pid = CustomId("aggId".to_string());
+        let sk = vec![1u8, 2, 3, 4];
+        let sd = build_send_draft_data(sk.clone(), draft_id.clone(), pid.clone());
+
+        // top-level
+        assert!(!sd.plaintext);
+        assert_eq!(sd.mailSessionKey.as_deref(), Some(sk.as_slice()));
+        assert!(sd.bucketEncMailSessionKey.is_none());
+        assert!(sd.internalRecipientKeyData.is_empty());
+        assert!(sd.secureExternalRecipientKeyData.is_empty());
+        assert!(sd.symEncInternalRecipientKeyData.is_empty());
+        assert_eq!(sd.mail, draft_id);
+
+        // nested parameters must be populated (None causes a 500 server-side)
+        let p = sd.parameters.expect("parameters must be set");
+        assert_eq!(p._id, Some(pid));
+        assert!(!p.plaintext);
+        assert_eq!(p.mailSessionKey.as_deref(), Some(sk.as_slice()));
+        assert_eq!(p.mail, draft_id);
+    }
 }

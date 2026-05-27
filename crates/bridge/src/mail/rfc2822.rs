@@ -52,7 +52,7 @@ pub fn mail_to_rfc2822(mail: &Mail, details: Option<&MailDetails>) -> String {
     msg.push_str("\r\n");
 
     let body_text = details
-        .and_then(|d| d.body.text.as_deref().or(d.body.compressedText.as_deref()))
+        .and_then(|d| d.body.compressedText.as_deref().or(d.body.text.as_deref()))
         .unwrap_or("<p>(No body available)</p>");
 
     let encoded = base64_encode_body(body_text.as_bytes());
