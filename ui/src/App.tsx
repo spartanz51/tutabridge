@@ -86,7 +86,9 @@ function App() {
           <ConfigPanel
             config={bridge.config}
             status={bridge.status}
+            loading={bridge.loading}
             onSave={bridge.saveConfig}
+            onRestart={bridge.restartBridge}
           />
         )}
         {tab === "logs" && (

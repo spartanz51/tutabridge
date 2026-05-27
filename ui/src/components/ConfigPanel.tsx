@@ -4,10 +4,12 @@ import type { Config, BridgeStatus } from "../types";
 interface Props {
   config: Config | null;
   status: BridgeStatus | null;
+  loading: boolean;
   onSave: (config: Config) => Promise<void>;
+  onRestart: () => Promise<void>;
 }
 
-export function ConfigPanel({ config, status, onSave }: Props) {
+export function ConfigPanel({ config, status, loading, onSave, onRestart }: Props) {
   const [email, setEmail] = useState("");
   const [imapPort, setImapPort] = useState(1143);
   const [smtpPort, setSmtpPort] = useState(1025);
@@ -50,7 +52,6 @@ export function ConfigPanel({ config, status, onSave }: Props) {
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          disabled={isRunning}
           placeholder="your@tuta.com"
         />
       </div>
@@ -61,7 +62,6 @@ export function ConfigPanel({ config, status, onSave }: Props) {
             type="number"
             value={imapPort}
             onChange={(e) => setImapPort(Number(e.target.value))}
-            disabled={isRunning}
           />
         </div>
         <div className="form-group">
@@ -70,7 +70,6 @@ export function ConfigPanel({ config, status, onSave }: Props) {
             type="number"
             value={smtpPort}
             onChange={(e) => setSmtpPort(Number(e.target.value))}
-            disabled={isRunning}
           />
         </div>
       </div>
@@ -80,37 +79,45 @@ export function ConfigPanel({ config, status, onSave }: Props) {
           type="url"
           value={apiUrl}
           onChange={(e) => setApiUrl(e.target.value)}
-          disabled={isRunning}
         />
       </div>
       <div className="form-group">
         <label>Mail to sync</label>
-        <label style={{ fontWeight: "normal" }}>
+        <label className="checkbox-field">
           <input
             type="checkbox"
             checked={fetchAll}
             onChange={(e) => setFetchAll(e.target.checked)}
-            disabled={isRunning}
-          />{" "}
-          Fetch all mail (entire account, kept locally)
+          />
+          <span>Fetch all mail (entire account, kept locally)</span>
         </label>
-        {!fetchAll && (
+        {fetchAll ? (
+          <small className="field-hint">
+            Downloads every mail from the start — can be slow on large accounts.
+          </small>
+        ) : (
           <input
             type="number"
             min={1}
             value={syncLimit}
             onChange={(e) => setSyncLimit(Math.max(1, Number(e.target.value)))}
-            disabled={isRunning}
             placeholder="Max mails per folder"
           />
         )}
-        {fetchAll && (
-          <small>Downloads every mail from the start — can be slow on large accounts.</small>
+      </div>
+      {isRunning && (
+        <small className="field-hint">Changes apply after a restart.</small>
+      )}
+      <div className="form-actions">
+        <button className="primary" onClick={handleSave} disabled={loading || !email}>
+          {saved ? "Saved!" : "Save"}
+        </button>
+        {isRunning && (
+          <button onClick={onRestart} disabled={loading}>
+            {loading ? "Restarting…" : "Restart"}
+          </button>
         )}
       </div>
-      <button onClick={handleSave} disabled={isRunning || !email}>
-        {saved ? "Saved!" : "Save"}
-      </button>
     </div>
   );
 }

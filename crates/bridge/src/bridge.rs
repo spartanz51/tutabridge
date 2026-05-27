@@ -27,6 +27,7 @@ pub struct BridgeHandle {
     log_tx: broadcast::Sender<String>,
     started_at: Option<std::time::Instant>,
     store: Option<Arc<MailStore>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl BridgeHandle {
@@ -38,6 +39,7 @@ impl BridgeHandle {
             log_tx,
             started_at: None,
             store: None,
+            task: None,
         }
     }
 
@@ -140,7 +142,7 @@ impl BridgeHandle {
         let sync_limit = config.sync_limit;
         let pw = config.bridge_password.clone();
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let imap_tls = tls_acceptor.clone();
             let smtp_tls = tls_acceptor;
 
@@ -154,37 +156,52 @@ impl BridgeHandle {
                 sync_limit,
                 shutdown_sync_rx,
             ));
-            let imap_handle = tokio::spawn(imap::serve(
+            let mut imap_handle = tokio::spawn(imap::serve(
                 imap_port,
                 store.clone(),
                 backend.clone(),
                 imap_tls,
                 pw.clone(),
             ));
-            let smtp_handle = tokio::spawn(smtp::serve(smtp_port, backend.clone(), smtp_tls, pw));
+            let mut smtp_handle = tokio::spawn(smtp::serve(smtp_port, backend.clone(), smtp_tls, pw));
 
             tokio::select! {
                 _ = rx => {
                     let _ = log_tx.send("Bridge shutting down...".to_string());
                     let _ = shutdown_sync_tx.send(true);
                 }
-                r = imap_handle => {
+                r = &mut imap_handle => {
                     if let Err(e) = r {
                         let _ = log_tx.send(format!("IMAP server error: {e}"));
                     }
                 }
-                r = smtp_handle => {
+                r = &mut smtp_handle => {
                     if let Err(e) = r {
                         let _ = log_tx.send(format!("SMTP server error: {e}"));
                     }
                 }
             }
 
+            // Tear everything down and wait for it, so ports are released before
+            // a subsequent start rebinds them. Skip awaiting a handle that already
+            // resolved in the select above (re-polling it would panic).
             syncer_handle.abort();
+            imap_handle.abort();
+            smtp_handle.abort();
+            if !syncer_handle.is_finished() {
+                let _ = syncer_handle.await;
+            }
+            if !imap_handle.is_finished() {
+                let _ = imap_handle.await;
+            }
+            if !smtp_handle.is_finished() {
+                let _ = smtp_handle.await;
+            }
             *status.write().await = BridgeStatus::Stopped;
             let _ = log_tx.send("Bridge stopped".to_string());
         });
 
+        self.task = Some(task);
         *self.status.write().await = BridgeStatus::Running;
         self.emit_log("Bridge is running");
         Ok(())
@@ -193,6 +210,9 @@ impl BridgeHandle {
     pub async fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
         }
         self.started_at = None;
     }

@@ -435,6 +435,46 @@
   flex: 1;
 }
 
+.form-group label.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.form-group label.checkbox-field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex: none;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.form-group label.checkbox-field span {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--on-surface);
+  line-height: 1;
+}
+
+.field-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--on-surface-variant);
+  margin-top: 6px;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 /* ── Buttons ── */
 button {
   padding: 9px 18px;
