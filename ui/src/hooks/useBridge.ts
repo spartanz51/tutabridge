@@ -75,6 +75,19 @@ export function useBridge() {
     }
   }, [refresh]);
 
+  const restartBridge = useCallback(async () => {
+    setLoading(true);
+    try {
+      await invoke("stop_bridge");
+      await invoke("start_bridge", { password: null });
+      refresh();
+    } catch (e) {
+      setStatus({ Error: String(e) });
+    } finally {
+      setLoading(false);
+    }
+  }, [refresh]);
+
   const clearLogs = useCallback(() => setLogs([]), []);
 
   const regenerateBridgePassword = useCallback(async () => {
@@ -94,6 +107,7 @@ export function useBridge() {
     saveConfig,
     startBridge,
     stopBridge,
+    restartBridge,
     clearLogs,
     regenerateBridgePassword,
   };
