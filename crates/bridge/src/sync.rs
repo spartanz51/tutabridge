@@ -22,6 +22,8 @@ pub struct StoredMail {
     pub mail: Mail,
     pub details: Option<MailDetails>,
     pub rfc2822: Option<String>,
+    /// Stable IMAP UID within the folder, persisted across restarts.
+    pub uid: u32,
 }
 
 pub struct MailStore {
@@ -309,6 +311,7 @@ async fn load_cached_folder(
             mail,
             details: None,
             rfc2822,
+            uid: meta.uid as u32,
         });
     }
 
@@ -335,16 +338,42 @@ async fn sync_folder(
         })
         .collect();
 
+    // Allocate stable UIDs for mails we haven't seen before. `new_mails` is
+    // newest-first; reverse the new ones so the oldest gets the lowest UID.
+    let new_element_ids: Vec<String> = new_mails
+        .iter()
+        .rev()
+        .filter_map(|m| m._id.as_ref().map(|id| id.element_id.to_string()))
+        .filter(|eid| !existing_map.contains_key(eid))
+        .collect();
+    let new_uids = if new_element_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let refs: Vec<&str> = new_element_ids.iter().map(|s| s.as_str()).collect();
+        local_store
+            .allocate_folder_uids(&folder.id, &refs)
+            .unwrap_or_else(|e| {
+                warn!("Failed to allocate UIDs for {}: {}", folder.imap_path, e);
+                std::collections::HashMap::new()
+            })
+    };
+
     let mut updated = Vec::with_capacity(new_mails.len());
     let mut metas_to_upsert = Vec::with_capacity(new_mails.len());
 
     for mail in &new_mails {
         let elem_id = mail._id.as_ref().map(|id| id.element_id.to_string());
+        let uid = elem_id
+            .as_ref()
+            .and_then(|id| existing_map.get(id).map(|m| m.uid).or_else(|| new_uids.get(id).copied()))
+            .unwrap_or(0);
+
         if let Some(existing) = elem_id.as_ref().and_then(|id| existing_map.get(id)) {
             updated.push(StoredMail {
                 mail: mail.clone(),
                 details: existing.details.clone(),
                 rfc2822: existing.rfc2822.clone(),
+                uid,
             });
         } else {
             let rfc2822 = mail_to_rfc2822(mail, None);
@@ -352,10 +381,11 @@ async fn sync_folder(
                 mail: mail.clone(),
                 details: None,
                 rfc2822: Some(rfc2822),
+                uid,
             });
         }
 
-        metas_to_upsert.push(mail_to_metadata(mail, &folder.id));
+        metas_to_upsert.push(mail_to_metadata(mail, &folder.id, uid));
     }
 
     if let Err(e) = local_store.upsert_mail_metadata_batch(&metas_to_upsert) {
@@ -474,7 +504,7 @@ where
     unreachable!()
 }
 
-fn mail_to_metadata(mail: &Mail, folder_id: &str) -> MailMetadata {
+fn mail_to_metadata(mail: &Mail, folder_id: &str, uid: u32) -> MailMetadata {
     let (list_id, element_id) = mail
         ._id
         .as_ref()
@@ -493,6 +523,7 @@ fn mail_to_metadata(mail: &Mail, folder_id: &str) -> MailMetadata {
         received_date_ms: mail.receivedDate.as_millis() as i64,
         unread: mail.unread,
         has_details: false,
+        uid: uid as i64,
         mail_json,
     }
 }

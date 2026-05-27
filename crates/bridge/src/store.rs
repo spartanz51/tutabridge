@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Bumped when the on-disk schema changes. A mismatch drops the cached tables
 /// (mails + sync_state) and triggers a full re-sync; encrypted .eml files are
 /// keyed by element id and survive the migration.
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -35,6 +35,8 @@ pub struct MailMetadata {
     pub received_date_ms: i64,
     pub unread: bool,
     pub has_details: bool,
+    /// Stable IMAP UID within the folder (0 = not yet assigned).
+    pub uid: i64,
     pub mail_json: String,
 }
 
@@ -94,13 +96,15 @@ impl LocalStore {
                 received_date_ms INTEGER NOT NULL,
                 unread          INTEGER NOT NULL DEFAULT 1,
                 has_details     INTEGER NOT NULL DEFAULT 0,
+                uid             INTEGER NOT NULL DEFAULT 0,
                 mail_json       TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_mails_folder
                 ON mails(folder_id, received_date_ms DESC);
             CREATE TABLE IF NOT EXISTS sync_state (
                 folder_id     TEXT PRIMARY KEY,
-                last_sync_ms  INTEGER NOT NULL DEFAULT 0
+                last_sync_ms  INTEGER NOT NULL DEFAULT 0,
+                next_uid      INTEGER NOT NULL DEFAULT 1
             );
             INSERT OR REPLACE INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
@@ -150,7 +154,7 @@ impl LocalStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT element_id, list_id, folder_id, subject, sender_name, sender_address,
-                    received_date_ms, unread, has_details, mail_json
+                    received_date_ms, unread, has_details, uid, mail_json
              FROM mails WHERE folder_id = ?1
              ORDER BY received_date_ms DESC",
         )?;
@@ -165,7 +169,8 @@ impl LocalStore {
                 received_date_ms: row.get(6)?,
                 unread: row.get::<_, i64>(7)? != 0,
                 has_details: row.get::<_, i64>(8)? != 0,
-                mail_json: row.get(9)?,
+                uid: row.get(9)?,
+                mail_json: row.get(10)?,
             })
         })?;
 
@@ -180,8 +185,8 @@ impl LocalStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO mails (element_id, list_id, folder_id, subject, sender_name,
-                                sender_address, received_date_ms, unread, has_details, mail_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                sender_address, received_date_ms, unread, has_details, uid, mail_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(element_id) DO UPDATE SET
                 folder_id = excluded.folder_id,
                 subject = excluded.subject,
@@ -201,6 +206,7 @@ impl LocalStore {
                 meta.received_date_ms,
                 meta.unread as i64,
                 meta.has_details as i64,
+                meta.uid,
                 meta.mail_json,
             ],
         )?;
@@ -213,8 +219,8 @@ impl LocalStore {
         {
             let mut stmt = conn.prepare_cached(
                 "INSERT INTO mails (element_id, list_id, folder_id, subject, sender_name,
-                                    sender_address, received_date_ms, unread, has_details, mail_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                    sender_address, received_date_ms, unread, has_details, uid, mail_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(element_id) DO UPDATE SET
                     folder_id = excluded.folder_id,
                     subject = excluded.subject,
@@ -236,12 +242,46 @@ impl LocalStore {
                     meta.received_date_ms,
                     meta.unread as i64,
                     meta.has_details as i64,
+                    meta.uid,
                     meta.mail_json,
                 ])?;
             }
         }
         conn.execute_batch("COMMIT")?;
         Ok(())
+    }
+
+    /// Assign stable, monotonic UIDs to the given (new) element ids in a folder.
+    /// UIDs are never reused — the per-folder counter only advances — so an IMAP
+    /// client's `(UIDVALIDITY, UID)` cache stays valid across bridge restarts.
+    /// Ids should be supplied oldest-first so newer mail gets higher UIDs.
+    pub fn allocate_folder_uids(
+        &self,
+        folder_id: &str,
+        new_element_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, u32>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut next: i64 = conn
+            .query_row(
+                "SELECT next_uid FROM sync_state WHERE folder_id = ?1",
+                [folder_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(1);
+
+        let mut map = std::collections::HashMap::with_capacity(new_element_ids.len());
+        for eid in new_element_ids {
+            map.insert((*eid).to_string(), next as u32);
+            next += 1;
+        }
+
+        conn.execute(
+            "INSERT INTO sync_state(folder_id, next_uid) VALUES (?1, ?2)
+             ON CONFLICT(folder_id) DO UPDATE SET next_uid = excluded.next_uid",
+            rusqlite::params![folder_id, next],
+        )?;
+        Ok(map)
     }
 
     pub fn delete_mails_not_in(
@@ -384,8 +424,23 @@ mod tests {
             received_date_ms: received,
             unread: true,
             has_details: false,
+            uid: 0,
             mail_json: "{}".into(),
         }
+    }
+
+    #[test]
+    fn allocate_uids_are_monotonic_and_per_folder() {
+        let store = open_memory_store();
+        let m1 = store.allocate_folder_uids("inbox", &["a", "b"]).unwrap();
+        assert_eq!(m1["a"], 1);
+        assert_eq!(m1["b"], 2);
+        // Continues, never reuses, even if "a"/"b" were deleted.
+        let m2 = store.allocate_folder_uids("inbox", &["c"]).unwrap();
+        assert_eq!(m2["c"], 3);
+        // Each folder has its own counter.
+        let m3 = store.allocate_folder_uids("custom", &["x"]).unwrap();
+        assert_eq!(m3["x"], 1);
     }
 
     #[test]

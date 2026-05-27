@@ -577,30 +577,31 @@ impl ImapSession {
     async fn refresh_mails(&mut self, folder_id: &str) -> Result<(), String> {
         let stored = self.store.get_folder(folder_id).await;
 
-        let old_cache: std::collections::HashMap<String, (u32, Option<MailDetails>, Option<String>)> =
+        // Carry over already-loaded details/rfc for this session.
+        let old_cache: std::collections::HashMap<String, (Option<MailDetails>, Option<String>)> =
             self.mails
                 .iter()
                 .filter_map(|m| {
                     let eid = m.mail._id.as_ref()?.element_id.to_string();
-                    Some((eid, (m.uid, m.details.clone(), m.rfc2822.clone())))
+                    Some((eid, (m.details.clone(), m.rfc2822.clone())))
                 })
                 .collect();
 
         self.mails.clear();
+        // UIDs are stable and assigned by the store; sort ascending so message
+        // sequence order matches UID order, as IMAP clients expect.
+        let mut stored = stored;
+        stored.sort_by_key(|m| m.uid);
 
         for sm in stored {
             let elem_id = sm.mail._id.as_ref().map(|id| id.element_id.to_string());
-
-            let (uid, old_details, old_rfc) = elem_id
+            let (old_details, old_rfc) = elem_id
                 .as_ref()
                 .and_then(|eid| old_cache.get(eid))
                 .cloned()
-                .unwrap_or_else(|| {
-                    let uid = self.uid_next;
-                    self.uid_next += 1;
-                    (uid, None, None)
-                });
+                .unwrap_or((None, None));
 
+            let uid = sm.uid;
             if uid >= self.uid_next {
                 self.uid_next = uid + 1;
             }
@@ -1339,8 +1340,8 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: m1, details: None, rfc2822: None },
-                    StoredMail { mail: m2, details: None, rfc2822: None },
+                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 },
+                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2 },
                 ],
             )
             .await;
@@ -1372,10 +1373,12 @@ mod tests {
         store.set_folder_list(vec![inbox_folder()]).await;
         let stored: Vec<StoredMail> = mails
             .iter()
-            .map(|m| StoredMail {
+            .enumerate()
+            .map(|(i, m)| StoredMail {
                 mail: m.clone(),
                 details: None,
                 rfc2822: None,
+                uid: (i + 1) as u32,
             })
             .collect();
         store.set_folder("inbox", stored).await;
@@ -1520,8 +1523,8 @@ mod tests {
         let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2));
         store.set_folder_list(vec![inbox_folder()]).await;
         store.set_folder("inbox", vec![
-            StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1) },
-            StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2) },
+            StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1), uid: 1 },
+            StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2), uid: 2 },
         ]).await;
         let mut session = ImapSession::new(store, backend, None);
 
