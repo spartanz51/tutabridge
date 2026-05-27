@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use log::{info, debug};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails};
-use tutasdk::folder_system::MailSetKind;
 
 use crate::mail::rfc2822::{extract_headers, format_internal_date};
 use crate::mail::mail_to_rfc2822;
 use crate::sync::MailStore;
-use crate::tuta::MailBackend;
+use crate::tuta::{FolderInfo, MailBackend};
 
 #[derive(Debug, Clone, PartialEq)]
 enum State {
@@ -28,7 +27,7 @@ pub struct ImapSession {
     store: Arc<MailStore>,
     backend: Arc<dyn MailBackend>,
     state: State,
-    selected_folder: Option<MailSetKind>,
+    selected_folder: Option<FolderInfo>,
     mails: Vec<CachedMail>,
     uid_next: u32,
     idle_tag: Option<String>,
@@ -122,13 +121,13 @@ impl ImapSession {
     }
 
     pub async fn check_new_mail(&mut self) -> Vec<String> {
-        let kind = match self.selected_folder {
-            Some(k) => k,
+        let folder = match self.selected_folder.clone() {
+            Some(f) => f,
             None => return vec![],
         };
-        let store_count = self.store.folder_count(kind).await;
+        let store_count = self.store.folder_count(&folder.id).await;
         if store_count != self.mails.len() {
-            if self.refresh_mails(kind).await.is_ok() {
+            if self.refresh_mails(&folder.id).await.is_ok() {
                 return vec![format!("* {} EXISTS\r\n", self.mails.len())];
             }
         }
@@ -217,8 +216,12 @@ impl ImapSession {
             return responses;
         }
 
-        for (name, flags) in &self.folder_list() {
-            responses.push(format!("* LIST ({}) \"/\" \"{}\"\r\n", flags, name));
+        for folder in self.store.list_folders().await {
+            let flags = folder.special_use.as_deref().unwrap_or("");
+            responses.push(format!(
+                "* LIST ({}) \"/\" \"{}\"\r\n",
+                flags, folder.imap_path
+            ));
         }
         responses.push(format!("{} OK LIST completed\r\n", tag));
 
@@ -231,11 +234,17 @@ impl ImapSession {
         }
 
         let folder_name = args.trim().trim_matches('"');
-        let kind = folder_name_to_kind(folder_name);
-        self.selected_folder = Some(kind);
+        let folder = match self.store.folder_by_imap_path(folder_name).await {
+            Some(f) => f,
+            None => {
+                return vec![format!("{} NO [NONEXISTENT] Mailbox does not exist\r\n", tag)];
+            }
+        };
+        let folder_id = folder.id.clone();
+        self.selected_folder = Some(folder);
         self.state = State::Selected;
 
-        match self.refresh_mails(kind).await {
+        match self.refresh_mails(&folder_id).await {
             Ok(()) => {
                 let count = self.mails.len();
                 let first_unseen = self
@@ -260,7 +269,7 @@ impl ImapSession {
                 resp
             }
             Err(e) => {
-                log::error!("Failed to load mails for {:?}: {}", kind, e);
+                log::error!("Failed to load mails for {}: {}", folder_name, e);
                 vec![
                     "* 0 EXISTS\r\n".to_string(),
                     "* 0 RECENT\r\n".to_string(),
@@ -275,9 +284,10 @@ impl ImapSession {
             return vec![format!("{} NO Not authenticated\r\n", tag)];
         }
         let folder_name = args.split_whitespace().next().unwrap_or("").trim_matches('"');
-        let kind = folder_name_to_kind(folder_name);
-
-        let stored = self.store.get_folder(kind).await;
+        let stored = match self.store.folder_by_imap_path(folder_name).await {
+            Some(folder) => self.store.get_folder(&folder.id).await,
+            None => Vec::new(),
+        };
         let count = stored.len();
         let unseen = stored.iter().filter(|m| m.mail.unread).count();
         vec![
@@ -310,13 +320,10 @@ impl ImapSession {
                     ._id
                     .as_ref()
                     .map(|id| id.element_id.to_string());
-                let kind = self.selected_folder.unwrap_or(MailSetKind::Inbox);
-
                 // Check store — syncer may have loaded details since our snapshot
-                let from_store = if let Some(ref eid) = elem_id {
-                    self.store.get_details(kind, eid).await
-                } else {
-                    None
+                let from_store = match (&elem_id, &self.selected_folder) {
+                    (Some(eid), Some(folder)) => self.store.get_details(&folder.id, eid).await,
+                    _ => None,
                 };
 
                 if let Some((details, rfc)) = from_store {
@@ -491,8 +498,8 @@ impl ImapSession {
         responses
     }
 
-    async fn refresh_mails(&mut self, kind: MailSetKind) -> Result<(), String> {
-        let stored = self.store.get_folder(kind).await;
+    async fn refresh_mails(&mut self, folder_id: &str) -> Result<(), String> {
+        let stored = self.store.get_folder(folder_id).await;
 
         let old_cache: std::collections::HashMap<String, (u32, Option<MailDetails>, Option<String>)> =
             self.mails
@@ -536,7 +543,7 @@ impl ImapSession {
             });
         }
 
-        debug!("Refreshed {} mails for {:?} from store", self.mails.len(), kind);
+        debug!("Refreshed {} mails for {} from store", self.mails.len(), folder_id);
         Ok(())
     }
 
@@ -581,16 +588,6 @@ impl ImapSession {
         }
     }
 
-    fn folder_list(&self) -> Vec<(String, String)> {
-        vec![
-            ("INBOX".into(), "".into()),
-            ("Sent".into(), "\\Sent".into()),
-            ("Drafts".into(), "\\Drafts".into()),
-            ("Trash".into(), "\\Trash".into()),
-            ("Archive".into(), "\\Archive".into()),
-            ("Spam".into(), "\\Junk".into()),
-        ]
-    }
 }
 
 fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: bool) -> String {
@@ -747,18 +744,6 @@ fn needs_body(items: &str) -> bool {
         }
     }
     false
-}
-
-fn folder_name_to_kind(name: &str) -> MailSetKind {
-    match name.to_uppercase().as_str() {
-        "INBOX" => MailSetKind::Inbox,
-        "SENT" => MailSetKind::Sent,
-        "DRAFTS" => MailSetKind::Draft,
-        "TRASH" => MailSetKind::Trash,
-        "ARCHIVE" => MailSetKind::Archive,
-        "SPAM" | "JUNK" => MailSetKind::Spam,
-        _ => MailSetKind::Inbox,
-    }
 }
 
 fn parse_login_args(args: &str) -> (String, String) {
@@ -961,21 +946,6 @@ mod tests {
     #[test]
     fn test_parse_seq_num_zero() {
         assert_eq!(parse_seq_num("0", 100), 0);
-    }
-
-    // --- folder_name_to_kind ---
-
-    #[test]
-    fn test_folder_name_to_kind() {
-        assert_eq!(folder_name_to_kind("INBOX"), MailSetKind::Inbox);
-        assert_eq!(folder_name_to_kind("inbox"), MailSetKind::Inbox);
-        assert_eq!(folder_name_to_kind("Sent"), MailSetKind::Sent);
-        assert_eq!(folder_name_to_kind("Drafts"), MailSetKind::Draft);
-        assert_eq!(folder_name_to_kind("Trash"), MailSetKind::Trash);
-        assert_eq!(folder_name_to_kind("Archive"), MailSetKind::Archive);
-        assert_eq!(folder_name_to_kind("Spam"), MailSetKind::Spam);
-        assert_eq!(folder_name_to_kind("Junk"), MailSetKind::Spam);
-        assert_eq!(folder_name_to_kind("Unknown"), MailSetKind::Inbox);
     }
 
     // --- needs_body ---
@@ -1258,8 +1228,21 @@ mod tests {
     }
 
     use crate::sync::StoredMail;
+    use crate::tuta::FolderInfo;
+    use tutasdk::folder_system::MailSetKind;
+
+    fn inbox_folder() -> FolderInfo {
+        FolderInfo {
+            id: "inbox".to_string(),
+            entries_list_id: "inbox_entries".to_string(),
+            kind: MailSetKind::Inbox,
+            imap_path: "INBOX".to_string(),
+            special_use: None,
+        }
+    }
 
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
+        store.set_folder_list(vec![inbox_folder()]).await;
         let stored: Vec<StoredMail> = mails
             .iter()
             .map(|m| StoredMail {
@@ -1268,7 +1251,7 @@ mod tests {
                 rfc2822: None,
             })
             .collect();
-        store.set_folder(MailSetKind::Inbox, stored).await;
+        store.set_folder("inbox", stored).await;
     }
 
     async fn make_session(backend: Arc<MockBackend>) -> (Arc<MailStore>, ImapSession) {
@@ -1281,19 +1264,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MailBackend for MockBackend {
-        async fn load_mail_ids_for_folder(&self, _kind: MailSetKind, _limit: usize) -> Result<Vec<Mail>, String> {
+        async fn load_mail_ids_for_folder(&self, _folder: &FolderInfo, _limit: usize) -> Result<Vec<Mail>, String> {
             Ok(self.mails.lock().unwrap().clone())
         }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
             let key = mail._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
             Ok(self.details.lock().unwrap().get(&key).cloned())
         }
-        async fn load_folder_list(&self) -> Result<Vec<(String, String)>, String> {
-            Ok(vec![
-                ("INBOX".to_string(), String::new()),
-                ("Sent".to_string(), "\\Sent".to_string()),
-                ("Trash".to_string(), "\\Trash".to_string()),
-            ])
+        async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
+            Ok(vec![inbox_folder()])
         }
         async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String> {
             self.unread_calls.lock().unwrap().push((mail_ids, unread));
@@ -1408,7 +1387,8 @@ mod tests {
         let store = MailStore::new();
         let rfc1 = crate::mail::mail_to_rfc2822(&m1, Some(&d1));
         let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2));
-        store.set_folder(MailSetKind::Inbox, vec![
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store.set_folder("inbox", vec![
             StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1) },
             StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2) },
         ]).await;

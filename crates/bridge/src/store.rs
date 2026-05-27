@@ -5,8 +5,12 @@ use crypto_primitives::aes::Iv;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use log::{debug, warn};
-use rusqlite::Connection;
-use tutasdk::folder_system::MailSetKind;
+use rusqlite::{Connection, OptionalExtension};
+
+/// Bumped when the on-disk schema changes. A mismatch drops the cached tables
+/// (mails + sync_state) and triggers a full re-sync; encrypted .eml files are
+/// keyed by element id and survive the migration.
+const SCHEMA_VERSION: &str = "2";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -23,7 +27,8 @@ pub enum StoreError {
 pub struct MailMetadata {
     pub list_id: String,
     pub element_id: String,
-    pub folder_kind: i64,
+    /// Stable folder id (Tuta `MailSet` element id).
+    pub folder_id: String,
     pub subject: String,
     pub sender_name: String,
     pub sender_address: String,
@@ -56,11 +61,33 @@ impl LocalStore {
         conn.pragma_update(None, "key", format!("x'{hex_key}'"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
+        // Migrate: if the stored schema version differs, drop the cache tables.
         conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS store_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )?;
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM store_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if version.as_deref() != Some(SCHEMA_VERSION) {
+            warn!(
+                "Local store schema {:?} != {SCHEMA_VERSION}, dropping cache tables",
+                version
+            );
+            conn.execute_batch("DROP TABLE IF EXISTS mails; DROP TABLE IF EXISTS sync_state;")?;
+        }
+
+        conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS mails (
                 element_id      TEXT PRIMARY KEY,
                 list_id         TEXT NOT NULL,
-                folder_kind     INTEGER NOT NULL,
+                folder_id       TEXT NOT NULL,
                 subject         TEXT NOT NULL,
                 sender_name     TEXT NOT NULL DEFAULT '',
                 sender_address  TEXT NOT NULL DEFAULT '',
@@ -70,17 +97,13 @@ impl LocalStore {
                 mail_json       TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_mails_folder
-                ON mails(folder_kind, received_date_ms DESC);
+                ON mails(folder_id, received_date_ms DESC);
             CREATE TABLE IF NOT EXISTS sync_state (
-                folder_kind   INTEGER PRIMARY KEY,
+                folder_id     TEXT PRIMARY KEY,
                 last_sync_ms  INTEGER NOT NULL DEFAULT 0
             );
-            CREATE TABLE IF NOT EXISTS store_meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO store_meta(key, value) VALUES ('schema_version', '1');",
-        )?;
+            INSERT OR REPLACE INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
+        ))?;
 
         debug!("LocalStore opened at {}", db_path.display());
 
@@ -104,12 +127,12 @@ impl LocalStore {
     pub fn reset(&self) -> Result<(), StoreError> {
         warn!("Resetting local store — all cached data will be deleted");
         let conn = self.conn.lock().unwrap();
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "DELETE FROM mails;
              DELETE FROM sync_state;
              DELETE FROM store_meta;
-             INSERT INTO store_meta(key, value) VALUES ('schema_version', '1');",
-        )?;
+             INSERT INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
+        ))?;
         drop(conn);
 
         if self.mails_dir.exists() {
@@ -123,19 +146,19 @@ impl LocalStore {
         Ok(())
     }
 
-    pub fn load_folder_metadata(&self, kind: MailSetKind) -> Result<Vec<MailMetadata>, StoreError> {
+    pub fn load_folder_metadata(&self, folder_id: &str) -> Result<Vec<MailMetadata>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT element_id, list_id, folder_kind, subject, sender_name, sender_address,
+            "SELECT element_id, list_id, folder_id, subject, sender_name, sender_address,
                     received_date_ms, unread, has_details, mail_json
-             FROM mails WHERE folder_kind = ?1
+             FROM mails WHERE folder_id = ?1
              ORDER BY received_date_ms DESC",
         )?;
-        let rows = stmt.query_map([kind_to_i64(kind)], |row| {
+        let rows = stmt.query_map([folder_id], |row| {
             Ok(MailMetadata {
                 element_id: row.get(0)?,
                 list_id: row.get(1)?,
-                folder_kind: row.get(2)?,
+                folder_id: row.get(2)?,
                 subject: row.get(3)?,
                 sender_name: row.get(4)?,
                 sender_address: row.get(5)?,
@@ -156,11 +179,11 @@ impl LocalStore {
     pub fn upsert_mail_metadata(&self, meta: &MailMetadata) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO mails (element_id, list_id, folder_kind, subject, sender_name,
+            "INSERT INTO mails (element_id, list_id, folder_id, subject, sender_name,
                                 sender_address, received_date_ms, unread, has_details, mail_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(element_id) DO UPDATE SET
-                folder_kind = excluded.folder_kind,
+                folder_id = excluded.folder_id,
                 subject = excluded.subject,
                 sender_name = excluded.sender_name,
                 sender_address = excluded.sender_address,
@@ -171,7 +194,7 @@ impl LocalStore {
             rusqlite::params![
                 meta.element_id,
                 meta.list_id,
-                meta.folder_kind,
+                meta.folder_id,
                 meta.subject,
                 meta.sender_name,
                 meta.sender_address,
@@ -189,11 +212,11 @@ impl LocalStore {
         conn.execute_batch("BEGIN IMMEDIATE")?;
         {
             let mut stmt = conn.prepare_cached(
-                "INSERT INTO mails (element_id, list_id, folder_kind, subject, sender_name,
+                "INSERT INTO mails (element_id, list_id, folder_id, subject, sender_name,
                                     sender_address, received_date_ms, unread, has_details, mail_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(element_id) DO UPDATE SET
-                    folder_kind = excluded.folder_kind,
+                    folder_id = excluded.folder_id,
                     subject = excluded.subject,
                     sender_name = excluded.sender_name,
                     sender_address = excluded.sender_address,
@@ -206,7 +229,7 @@ impl LocalStore {
                 stmt.execute(rusqlite::params![
                     meta.element_id,
                     meta.list_id,
-                    meta.folder_kind,
+                    meta.folder_id,
                     meta.subject,
                     meta.sender_name,
                     meta.sender_address,
@@ -223,23 +246,20 @@ impl LocalStore {
 
     pub fn delete_mails_not_in(
         &self,
-        kind: MailSetKind,
+        folder_id: &str,
         element_ids: &[&str],
     ) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
 
         let mut deleted = Vec::new();
         {
-            let mut stmt = conn.prepare(
-                "SELECT element_id FROM mails WHERE folder_kind = ?1",
-            )?;
+            let mut stmt = conn.prepare("SELECT element_id FROM mails WHERE folder_id = ?1")?;
             let existing: Vec<String> = stmt
-                .query_map([kind_to_i64(kind)], |row| row.get(0))?
+                .query_map([folder_id], |row| row.get(0))?
                 .filter_map(|r| r.ok())
                 .collect();
 
-            let keep: std::collections::HashSet<&str> =
-                element_ids.iter().copied().collect();
+            let keep: std::collections::HashSet<&str> = element_ids.iter().copied().collect();
 
             for eid in existing {
                 if !keep.contains(eid.as_str()) {
@@ -316,11 +336,11 @@ impl LocalStore {
         Ok(())
     }
 
-    pub fn mail_count(&self, kind: MailSetKind) -> Result<usize, StoreError> {
+    pub fn mail_count(&self, folder_id: &str) -> Result<usize, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM mails WHERE folder_kind = ?1",
-            [kind_to_i64(kind)],
+            "SELECT COUNT(*) FROM mails WHERE folder_id = ?1",
+            [folder_id],
             |row| row.get(0),
         )?;
         Ok(count as usize)
@@ -334,26 +354,10 @@ impl LocalStore {
     }
 }
 
-fn kind_to_i64(kind: MailSetKind) -> i64 {
-    kind as i64
-}
-
-pub fn kind_from_i64(v: i64) -> MailSetKind {
-    match v {
-        0 => MailSetKind::Inbox,
-        1 => MailSetKind::Sent,
-        2 => MailSetKind::Trash,
-        3 => MailSetKind::Archive,
-        4 => MailSetKind::Spam,
-        5 => MailSetKind::Draft,
-        _ => MailSetKind::Inbox,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_primitives::aes::{Aes256Key, AES_256_KEY_SIZE};
+    use crypto_primitives::aes::Aes256Key;
 
     fn test_key() -> GenericAesKey {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
@@ -369,6 +373,21 @@ mod tests {
         LocalStore::open(&db_path, &mails_dir, key).unwrap()
     }
 
+    fn meta(element_id: &str, folder_id: &str, received: i64) -> MailMetadata {
+        MailMetadata {
+            element_id: element_id.into(),
+            list_id: "list1".into(),
+            folder_id: folder_id.into(),
+            subject: format!("Subject {element_id}"),
+            sender_name: "Alice".into(),
+            sender_address: "alice@example.com".into(),
+            received_date_ms: received,
+            unread: true,
+            has_details: false,
+            mail_json: "{}".into(),
+        }
+    }
+
     #[test]
     fn test_open_and_verify() {
         let store = open_memory_store();
@@ -378,50 +397,37 @@ mod tests {
     #[test]
     fn test_upsert_and_load_metadata() {
         let store = open_memory_store();
-        let meta = MailMetadata {
-            element_id: "abc123".into(),
-            list_id: "list1".into(),
-            folder_kind: kind_to_i64(MailSetKind::Inbox),
-            subject: "Test email".into(),
-            sender_name: "Alice".into(),
-            sender_address: "alice@example.com".into(),
-            received_date_ms: 1700000000000,
-            unread: true,
-            has_details: false,
-            mail_json: "{}".into(),
-        };
-        store.upsert_mail_metadata(&meta).unwrap();
+        store.upsert_mail_metadata(&meta("abc123", "inbox", 1700000000000)).unwrap();
 
-        let loaded = store.load_folder_metadata(MailSetKind::Inbox).unwrap();
+        let loaded = store.load_folder_metadata("inbox").unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].element_id, "abc123");
-        assert_eq!(loaded[0].subject, "Test email");
+        assert_eq!(loaded[0].folder_id, "inbox");
         assert!(loaded[0].unread);
         assert!(!loaded[0].has_details);
+    }
+
+    #[test]
+    fn test_metadata_is_per_folder() {
+        let store = open_memory_store();
+        store.upsert_mail_metadata(&meta("a", "inbox", 1)).unwrap();
+        store.upsert_mail_metadata(&meta("b", "custom1", 2)).unwrap();
+
+        assert_eq!(store.load_folder_metadata("inbox").unwrap().len(), 1);
+        assert_eq!(store.load_folder_metadata("custom1").unwrap().len(), 1);
+        assert_eq!(store.load_folder_metadata("missing").unwrap().len(), 0);
     }
 
     #[test]
     fn test_batch_upsert() {
         let store = open_memory_store();
         let metas: Vec<MailMetadata> = (0..100)
-            .map(|i| MailMetadata {
-                element_id: format!("mail_{i}"),
-                list_id: "list1".into(),
-                folder_kind: kind_to_i64(MailSetKind::Inbox),
-                subject: format!("Subject {i}"),
-                sender_name: "Test".into(),
-                sender_address: "test@test.com".into(),
-                received_date_ms: 1700000000000 + i,
-                unread: i % 2 == 0,
-                has_details: false,
-                mail_json: "{}".into(),
-            })
+            .map(|i| meta(&format!("mail_{i}"), "inbox", 1700000000000 + i))
             .collect();
         store.upsert_mail_metadata_batch(&metas).unwrap();
 
-        let loaded = store.load_folder_metadata(MailSetKind::Inbox).unwrap();
-        assert_eq!(loaded.len(), 100);
-        assert_eq!(store.mail_count(MailSetKind::Inbox).unwrap(), 100);
+        assert_eq!(store.load_folder_metadata("inbox").unwrap().len(), 100);
+        assert_eq!(store.mail_count("inbox").unwrap(), 100);
         assert_eq!(store.total_count().unwrap(), 100);
     }
 
@@ -429,28 +435,16 @@ mod tests {
     fn test_delete_mails_not_in() {
         let store = open_memory_store();
         let metas: Vec<MailMetadata> = (0..5)
-            .map(|i| MailMetadata {
-                element_id: format!("mail_{i}"),
-                list_id: "list1".into(),
-                folder_kind: kind_to_i64(MailSetKind::Inbox),
-                subject: format!("Subject {i}"),
-                sender_name: "Test".into(),
-                sender_address: "test@test.com".into(),
-                received_date_ms: 1700000000000 + i,
-                unread: false,
-                has_details: false,
-                mail_json: "{}".into(),
-            })
+            .map(|i| meta(&format!("mail_{i}"), "inbox", 1700000000000 + i))
             .collect();
         store.upsert_mail_metadata_batch(&metas).unwrap();
 
         let keep = vec!["mail_0", "mail_2", "mail_4"];
-        let deleted = store.delete_mails_not_in(MailSetKind::Inbox, &keep).unwrap();
+        let deleted = store.delete_mails_not_in("inbox", &keep).unwrap();
         assert_eq!(deleted.len(), 2);
         assert!(deleted.contains(&"mail_1".to_string()));
         assert!(deleted.contains(&"mail_3".to_string()));
-
-        assert_eq!(store.mail_count(MailSetKind::Inbox).unwrap(), 3);
+        assert_eq!(store.mail_count("inbox").unwrap(), 3);
     }
 
     #[test]
@@ -458,16 +452,13 @@ mod tests {
         let store = open_memory_store();
         let rfc2822 = "From: test@example.com\r\nSubject: Hello\r\n\r\nBody text here";
         store.write_eml("test_mail", rfc2822).unwrap();
-
-        let read_back = store.read_eml("test_mail").unwrap();
-        assert_eq!(read_back, Some(rfc2822.to_string()));
+        assert_eq!(store.read_eml("test_mail").unwrap(), Some(rfc2822.to_string()));
     }
 
     #[test]
     fn test_eml_read_nonexistent() {
         let store = open_memory_store();
-        let result = store.read_eml("nonexistent").unwrap();
-        assert_eq!(result, None);
+        assert_eq!(store.read_eml("nonexistent").unwrap(), None);
     }
 
     #[test]
@@ -475,7 +466,6 @@ mod tests {
         let store = open_memory_store();
         store.write_eml("to_delete", "content").unwrap();
         assert!(store.read_eml("to_delete").unwrap().is_some());
-
         store.delete_eml("to_delete").unwrap();
         assert!(store.read_eml("to_delete").unwrap().is_none());
     }
@@ -483,19 +473,7 @@ mod tests {
     #[test]
     fn test_reset() {
         let store = open_memory_store();
-        let meta = MailMetadata {
-            element_id: "abc".into(),
-            list_id: "list1".into(),
-            folder_kind: kind_to_i64(MailSetKind::Inbox),
-            subject: "Test".into(),
-            sender_name: "".into(),
-            sender_address: "test@test.com".into(),
-            received_date_ms: 0,
-            unread: false,
-            has_details: true,
-            mail_json: "{}".into(),
-        };
-        store.upsert_mail_metadata(&meta).unwrap();
+        store.upsert_mail_metadata(&meta("abc", "inbox", 0)).unwrap();
         store.write_eml("abc", "content").unwrap();
 
         store.reset().unwrap();
@@ -507,26 +485,10 @@ mod tests {
     #[test]
     fn test_mark_has_details() {
         let store = open_memory_store();
-        let meta = MailMetadata {
-            element_id: "det".into(),
-            list_id: "list1".into(),
-            folder_kind: kind_to_i64(MailSetKind::Inbox),
-            subject: "Test".into(),
-            sender_name: "".into(),
-            sender_address: "t@t.com".into(),
-            received_date_ms: 0,
-            unread: false,
-            has_details: false,
-            mail_json: "{}".into(),
-        };
-        store.upsert_mail_metadata(&meta).unwrap();
-
-        let loaded = store.load_folder_metadata(MailSetKind::Inbox).unwrap();
-        assert!(!loaded[0].has_details);
+        store.upsert_mail_metadata(&meta("det", "inbox", 0)).unwrap();
+        assert!(!store.load_folder_metadata("inbox").unwrap()[0].has_details);
 
         store.mark_has_details("det").unwrap();
-
-        let loaded = store.load_folder_metadata(MailSetKind::Inbox).unwrap();
-        assert!(loaded[0].has_details);
+        assert!(store.load_folder_metadata("inbox").unwrap()[0].has_details);
     }
 }

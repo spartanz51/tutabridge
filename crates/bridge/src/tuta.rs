@@ -19,14 +19,59 @@ use tutasdk::{ApiCallError, CustomId, IdTupleGenerated, ListLoadDirection, Logge
 use crate::config::Config;
 use crate::mail::ParsedMessage;
 
+/// A mail folder as seen by the bridge, keyed by its stable Tuta `MailSet`
+/// element id rather than by a system folder kind (so custom/nested folders
+/// are first-class).
+#[derive(Clone, Debug)]
+pub struct FolderInfo {
+    /// `MailSet` element id — the stable key used everywhere.
+    pub id: String,
+    /// `MailSet.entries` list id — used to load the mails in this folder.
+    pub entries_list_id: String,
+    pub kind: MailSetKind,
+    /// IMAP mailbox path, e.g. `INBOX`, `Sent`, `Work/Projects`.
+    pub imap_path: String,
+    /// RFC 6154 special-use attribute, e.g. `\Sent` (system folders only).
+    pub special_use: Option<String>,
+}
+
+/// IMAP hierarchy delimiter used to build nested folder paths.
+pub const IMAP_DELIMITER: char = '/';
+
 #[async_trait::async_trait]
 pub trait MailBackend: Send + Sync {
-    async fn load_mail_ids_for_folder(&self, kind: MailSetKind, limit: usize) -> Result<Vec<Mail>, String>;
+    async fn load_mail_ids_for_folder(&self, folder: &FolderInfo, limit: usize) -> Result<Vec<Mail>, String>;
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String>;
-    async fn load_folder_list(&self) -> Result<Vec<(String, String)>, String>;
+    /// Enumerate all mail folders (system + custom, with hierarchy).
+    async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
     async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String>;
     async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String>;
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String>;
+}
+
+/// Canonical IMAP name for a system folder, or `None` for custom/unsupported.
+fn system_imap_name(kind: MailSetKind) -> Option<&'static str> {
+    match kind {
+        MailSetKind::Inbox => Some("INBOX"),
+        MailSetKind::Sent => Some("Sent"),
+        MailSetKind::Draft => Some("Drafts"),
+        MailSetKind::Trash => Some("Trash"),
+        MailSetKind::Archive => Some("Archive"),
+        MailSetKind::Spam => Some("Spam"),
+        _ => None,
+    }
+}
+
+/// RFC 6154 special-use attribute for a system folder.
+fn system_special_use(kind: MailSetKind) -> Option<&'static str> {
+    match kind {
+        MailSetKind::Sent => Some("\\Sent"),
+        MailSetKind::Draft => Some("\\Drafts"),
+        MailSetKind::Trash => Some("\\Trash"),
+        MailSetKind::Archive => Some("\\Archive"),
+        MailSetKind::Spam => Some("\\Junk"),
+        _ => None,
+    }
 }
 
 pub struct TutaSession {
@@ -68,17 +113,10 @@ impl TutaSession {
 
     async fn load_mail_ids_for_folder_impl(
         &self,
-        folder_kind: MailSetKind,
+        entries_list_id: &tutasdk::GeneratedId,
         limit: usize,
     ) -> Result<Vec<Mail>, ApiCallError> {
-        let mailbox = self.load_mailbox().await?;
-        let folders = self.load_folders(&mailbox).await?;
-        let folder = folders
-            .system_folder_by_type(folder_kind)
-            .ok_or_else(|| ApiCallError::internal(format!("Folder {:?} not found", folder_kind)))?;
-
         let count = if limit == 0 { 1000 } else { limit };
-        let entries_list_id = &folder.entries;
         let entries: Vec<MailSetEntry> = self
             .crypto_client()
             .load_range(
@@ -193,8 +231,9 @@ impl TutaSession {
 
 #[async_trait::async_trait]
 impl MailBackend for TutaSession {
-    async fn load_mail_ids_for_folder(&self, kind: MailSetKind, limit: usize) -> Result<Vec<Mail>, String> {
-        self.load_mail_ids_for_folder_impl(kind, limit)
+    async fn load_mail_ids_for_folder(&self, folder: &FolderInfo, limit: usize) -> Result<Vec<Mail>, String> {
+        let entries_list_id = tutasdk::GeneratedId(folder.entries_list_id.clone());
+        self.load_mail_ids_for_folder_impl(&entries_list_id, limit)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -205,24 +244,48 @@ impl MailBackend for TutaSession {
             .map_err(|e| format!("{e}"))
     }
 
-    async fn load_folder_list(&self) -> Result<Vec<(String, String)>, String> {
+    async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
         let mailbox = self.load_mailbox().await.map_err(|e| format!("{e}"))?;
         let folder_system = self.load_folders(&mailbox).await.map_err(|e| format!("{e}"))?;
 
-        let known_folders = [
-            (MailSetKind::Inbox, "INBOX", ""),
-            (MailSetKind::Sent, "Sent", "\\Sent"),
-            (MailSetKind::Draft, "Drafts", "\\Drafts"),
-            (MailSetKind::Trash, "Trash", "\\Trash"),
-            (MailSetKind::Archive, "Archive", "\\Archive"),
-            (MailSetKind::Spam, "Spam", "\\Junk"),
-        ];
-
         let mut result = Vec::new();
-        for (kind, name, flags) in &known_folders {
-            if folder_system.system_folder_by_type(*kind).is_some() {
-                result.push((name.to_string(), flags.to_string()));
+        for indented in folder_system.indented_list() {
+            let folder = indented.folder;
+            let kind = folder.mail_set_kind();
+
+            // Only expose folder types we support over IMAP.
+            let is_custom = kind == MailSetKind::Custom;
+            if !is_custom && system_imap_name(kind).is_none() {
+                continue; // skip Scheduled / virtual sets
             }
+
+            let Some(elem_id) = folder._id.as_ref().map(|id| id.element_id.to_string()) else {
+                continue;
+            };
+
+            // Build the IMAP path by mapping each ancestor segment.
+            let mut segments: Vec<String> = Vec::new();
+            for ancestor in folder_system.path_to_folder(&tutasdk::GeneratedId(elem_id.clone())) {
+                let akind = ancestor.mail_set_kind();
+                if let Some(name) = system_imap_name(akind) {
+                    segments.push(name.to_string());
+                } else {
+                    // sanitize the delimiter out of custom names
+                    segments.push(ancestor.name.replace(IMAP_DELIMITER, "_"));
+                }
+            }
+            let imap_path = segments.join(&IMAP_DELIMITER.to_string());
+            if imap_path.is_empty() {
+                continue;
+            }
+
+            result.push(FolderInfo {
+                id: elem_id,
+                entries_list_id: folder.entries.to_string(),
+                kind,
+                imap_path,
+                special_use: system_special_use(kind).map(|s| s.to_string()),
+            });
         }
         Ok(result)
     }

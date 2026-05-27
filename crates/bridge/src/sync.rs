@@ -1,23 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::{info, warn, debug};
+use log::{debug, info, warn};
 use tokio::sync::{watch, RwLock};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails};
-use tutasdk::folder_system::MailSetKind;
 
 use crate::mail::mail_to_rfc2822;
 use crate::store::{LocalStore, MailMetadata};
-use crate::tuta::MailBackend;
-
-const FOLDERS: &[MailSetKind] = &[
-    MailSetKind::Inbox,
-    MailSetKind::Sent,
-    MailSetKind::Draft,
-    MailSetKind::Trash,
-    MailSetKind::Archive,
-    MailSetKind::Spam,
-];
+use crate::tuta::{FolderInfo, MailBackend};
 
 const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
 const INTER_FOLDER_DELAY: Duration = Duration::from_millis(300);
@@ -32,7 +23,10 @@ pub struct StoredMail {
 }
 
 pub struct MailStore {
-    folders: RwLock<Vec<(MailSetKind, Vec<StoredMail>)>>,
+    /// folder id → mails in that folder.
+    folders: RwLock<HashMap<String, Vec<StoredMail>>>,
+    /// The folder list (system + custom), for IMAP enumeration.
+    folder_list: RwLock<Vec<FolderInfo>>,
     generation: watch::Sender<u64>,
     gen_counter: std::sync::atomic::AtomicU64,
 }
@@ -41,7 +35,8 @@ impl MailStore {
     pub fn new() -> Arc<Self> {
         let (tx, _) = watch::channel(0u64);
         Arc::new(Self {
-            folders: RwLock::new(Vec::new()),
+            folders: RwLock::new(HashMap::new()),
+            folder_list: RwLock::new(Vec::new()),
             generation: tx,
             gen_counter: std::sync::atomic::AtomicU64::new(0),
         })
@@ -52,64 +47,79 @@ impl MailStore {
     }
 
     pub async fn total_mail_count(&self) -> usize {
-        self.folders.read().await.iter().map(|(_, v)| v.len()).sum()
+        self.folders.read().await.values().map(|v| v.len()).sum()
     }
 
-    pub async fn folder_count(&self, kind: MailSetKind) -> usize {
+    pub async fn folder_count(&self, folder_id: &str) -> usize {
         self.folders
             .read()
             .await
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, v)| v.len())
+            .get(folder_id)
+            .map(|v| v.len())
             .unwrap_or(0)
     }
 
-    pub async fn get_folder(&self, kind: MailSetKind) -> Vec<StoredMail> {
+    pub async fn get_folder(&self, folder_id: &str) -> Vec<StoredMail> {
         self.folders
             .read()
             .await
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, v)| v.clone())
+            .get(folder_id)
+            .cloned()
             .unwrap_or_default()
     }
 
-    pub async fn get_details(&self, kind: MailSetKind, element_id: &str) -> Option<(MailDetails, String)> {
+    pub async fn get_details(
+        &self,
+        folder_id: &str,
+        element_id: &str,
+    ) -> Option<(MailDetails, String)> {
         let folders = self.folders.read().await;
-        let (_, folder) = folders.iter().find(|(k, _)| *k == kind)?;
+        let folder = folders.get(folder_id)?;
         folder.iter().find_map(|m| {
             let eid = m.mail._id.as_ref()?.element_id.to_string();
             if eid == element_id {
-                let details = m.details.clone()?;
-                let rfc = m.rfc2822.clone()?;
-                Some((details, rfc))
+                Some((m.details.clone()?, m.rfc2822.clone()?))
             } else {
                 None
             }
         })
     }
 
-    pub(crate) async fn set_folder(&self, kind: MailSetKind, mails: Vec<StoredMail>) {
-        let mut folders = self.folders.write().await;
-        if let Some(entry) = folders.iter_mut().find(|(k, _)| *k == kind) {
-            entry.1 = mails;
-        } else {
-            folders.push((kind, mails));
-        }
-        drop(folders);
+    /// The current folder list (system + custom).
+    pub async fn list_folders(&self) -> Vec<FolderInfo> {
+        self.folder_list.read().await.clone()
+    }
+
+    /// Look up a folder by its IMAP path (case-insensitive for INBOX).
+    pub async fn folder_by_imap_path(&self, path: &str) -> Option<FolderInfo> {
+        let list = self.folder_list.read().await;
+        list.iter()
+            .find(|f| f.imap_path == path || f.imap_path.eq_ignore_ascii_case(path))
+            .cloned()
+    }
+
+    pub(crate) async fn set_folder_list(&self, folders: Vec<FolderInfo>) {
+        *self.folder_list.write().await = folders;
+        self.bump_generation();
+    }
+
+    pub(crate) async fn set_folder(&self, folder_id: &str, mails: Vec<StoredMail>) {
+        self.folders
+            .write()
+            .await
+            .insert(folder_id.to_string(), mails);
         self.bump_generation();
     }
 
     async fn update_mail_details(
         &self,
-        kind: MailSetKind,
+        folder_id: &str,
         element_id: &str,
         details: MailDetails,
         rfc2822: String,
     ) {
         let mut folders = self.folders.write().await;
-        if let Some((_, folder)) = folders.iter_mut().find(|(k, _)| *k == kind) {
+        if let Some(folder) = folders.get_mut(folder_id) {
             if let Some(m) = folder.iter_mut().find(|m| {
                 m.mail
                     ._id
@@ -127,7 +137,10 @@ impl MailStore {
     }
 
     fn bump_generation(&self) {
-        let gen = self.gen_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let gen = self
+            .gen_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.generation.send_replace(gen);
     }
 }
@@ -139,16 +152,33 @@ pub async fn run_syncer(
     sync_limit: usize,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    info!("Mail syncer started (limit={})", if sync_limit == 0 { "all".to_string() } else { sync_limit.to_string() });
+    info!(
+        "Mail syncer started (limit={})",
+        if sync_limit == 0 {
+            "all".to_string()
+        } else {
+            sync_limit.to_string()
+        }
+    );
 
-    // Phase 0: load cached mails from local store into memory
-    for &kind in FOLDERS {
-        match load_cached_folder(&store, &local_store, kind).await {
+    // Fetch the folder list first; everything is keyed off it.
+    let folders = match retry(|| backend.list_folders()).await {
+        Ok(folders) => folders,
+        Err(e) => {
+            warn!("Could not load folder list: {e}");
+            Vec::new()
+        }
+    };
+    store.set_folder_list(folders.clone()).await;
+
+    // Phase 0: load cached mails from the local store into memory.
+    for folder in &folders {
+        match load_cached_folder(&store, &local_store, folder).await {
             Ok(count) if count > 0 => {
-                info!("Loaded {} cached mails for {:?}", count, kind);
+                info!("Loaded {} cached mails for {}", count, folder.imap_path);
             }
             Ok(_) => {}
-            Err(e) => warn!("Failed to load cache for {:?}: {}", kind, e),
+            Err(e) => warn!("Failed to load cache for {}: {}", folder.imap_path, e),
         }
     }
 
@@ -157,30 +187,41 @@ pub async fn run_syncer(
     loop {
         let mut had_error = false;
 
-        // Phase 1: sync mail lists for ALL folders (fast, no body loading)
-        for &kind in FOLDERS {
+        // Refresh the folder list each cycle (custom folders can change).
+        let folders = match retry(|| backend.list_folders()).await {
+            Ok(folders) => {
+                store.set_folder_list(folders.clone()).await;
+                folders
+            }
+            Err(e) => {
+                warn!("Failed to refresh folder list: {e}");
+                had_error = true;
+                store.list_folders().await
+            }
+        };
+
+        // Phase 1: sync mail lists for ALL folders (fast, no body loading).
+        for folder in &folders {
             if *shutdown.borrow() {
                 info!("Mail syncer shutting down");
                 return;
             }
-
-            match sync_folder(&store, &local_store, &*backend, kind, sync_limit).await {
+            match sync_folder(&store, &local_store, &*backend, folder, sync_limit).await {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!("Sync error for {:?}: {}", kind, e);
+                    warn!("Sync error for {}: {}", folder.imap_path, e);
                     had_error = true;
                 }
             }
-
             tokio::time::sleep(INTER_FOLDER_DELAY).await;
         }
 
-        // Phase 2: prefetch mail details (slow, but all folders are already visible)
-        for &kind in FOLDERS {
+        // Phase 2: prefetch mail details (slow, but all folders are visible).
+        for folder in &folders {
             if *shutdown.borrow() {
                 return;
             }
-            prefetch_details(&store, &local_store, &*backend, kind).await;
+            prefetch_details(&store, &local_store, &*backend, folder).await;
         }
 
         if had_error {
@@ -206,10 +247,10 @@ pub async fn run_syncer(
 async fn load_cached_folder(
     store: &MailStore,
     local_store: &LocalStore,
-    kind: MailSetKind,
+    folder: &FolderInfo,
 ) -> Result<usize, String> {
     let metas = local_store
-        .load_folder_metadata(kind)
+        .load_folder_metadata(&folder.id)
         .map_err(|e| format!("{e}"))?;
 
     if metas.is_empty() {
@@ -242,7 +283,7 @@ async fn load_cached_folder(
     }
 
     let count = stored_mails.len();
-    store.set_folder(kind, stored_mails).await;
+    store.set_folder(&folder.id, stored_mails).await;
     Ok(count)
 }
 
@@ -250,13 +291,13 @@ async fn sync_folder(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
-    kind: MailSetKind,
+    folder: &FolderInfo,
     limit: usize,
 ) -> Result<(), String> {
-    let new_mails = retry(|| backend.load_mail_ids_for_folder(kind, limit)).await?;
+    let new_mails = retry(|| backend.load_mail_ids_for_folder(folder, limit)).await?;
 
-    let existing = store.get_folder(kind).await;
-    let existing_map: std::collections::HashMap<String, StoredMail> = existing
+    let existing = store.get_folder(&folder.id).await;
+    let existing_map: HashMap<String, StoredMail> = existing
         .into_iter()
         .filter_map(|m| {
             let eid = m.mail._id.as_ref()?.element_id.to_string();
@@ -284,20 +325,18 @@ async fn sync_folder(
             });
         }
 
-        metas_to_upsert.push(mail_to_metadata(mail, kind));
+        metas_to_upsert.push(mail_to_metadata(mail, &folder.id));
     }
 
-    // Persist metadata to local store
     if let Err(e) = local_store.upsert_mail_metadata_batch(&metas_to_upsert) {
-        warn!("Failed to persist metadata for {:?}: {}", kind, e);
+        warn!("Failed to persist metadata for {}: {}", folder.imap_path, e);
     }
 
-    // Delete mails removed from server
     let current_ids: Vec<&str> = new_mails
         .iter()
         .filter_map(|m| m._id.as_ref().map(|id| id.element_id.as_str()))
         .collect();
-    match local_store.delete_mails_not_in(kind, &current_ids) {
+    match local_store.delete_mails_not_in(&folder.id, &current_ids) {
         Ok(deleted) => {
             for eid in &deleted {
                 if let Err(e) = local_store.delete_eml(eid) {
@@ -305,13 +344,20 @@ async fn sync_folder(
                 }
             }
             if !deleted.is_empty() {
-                debug!("Removed {} deleted mails from {:?} cache", deleted.len(), kind);
+                debug!(
+                    "Removed {} deleted mails from {} cache",
+                    deleted.len(),
+                    folder.imap_path
+                );
             }
         }
-        Err(e) => warn!("Failed to clean up deleted mails for {:?}: {}", kind, e),
+        Err(e) => warn!(
+            "Failed to clean up deleted mails for {}: {}",
+            folder.imap_path, e
+        ),
     }
 
-    store.set_folder(kind, updated).await;
+    store.set_folder(&folder.id, updated).await;
 
     Ok(())
 }
@@ -320,10 +366,10 @@ async fn prefetch_details(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
-    kind: MailSetKind,
+    folder: &FolderInfo,
 ) {
-    let folder = store.get_folder(kind).await;
-    let api_needed: Vec<Mail> = folder
+    let mails = store.get_folder(&folder.id).await;
+    let api_needed: Vec<Mail> = mails
         .into_iter()
         .filter(|m| m.details.is_none())
         .filter_map(|m| {
@@ -340,7 +386,11 @@ async fn prefetch_details(
         return;
     }
 
-    debug!("Pre-fetching {} mail details for {:?}", api_needed.len(), kind);
+    debug!(
+        "Pre-fetching {} mail details for {}",
+        api_needed.len(),
+        folder.imap_path
+    );
 
     for mail in &api_needed {
         tokio::time::sleep(INTER_REQUEST_DELAY).await;
@@ -360,7 +410,7 @@ async fn prefetch_details(
                     }
 
                     store
-                        .update_mail_details(kind, &eid, details, rfc2822)
+                        .update_mail_details(&folder.id, &eid, details, rfc2822)
                         .await;
                 }
             }
@@ -394,7 +444,7 @@ where
     unreachable!()
 }
 
-fn mail_to_metadata(mail: &Mail, kind: MailSetKind) -> MailMetadata {
+fn mail_to_metadata(mail: &Mail, folder_id: &str) -> MailMetadata {
     let (list_id, element_id) = mail
         ._id
         .as_ref()
@@ -406,7 +456,7 @@ fn mail_to_metadata(mail: &Mail, kind: MailSetKind) -> MailMetadata {
     MailMetadata {
         list_id,
         element_id,
-        folder_kind: kind as i64,
+        folder_id: folder_id.to_string(),
         subject: mail.subject.clone(),
         sender_name: mail.sender.name.clone(),
         sender_address: mail.sender.address.clone(),
