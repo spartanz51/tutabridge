@@ -1,0 +1,90 @@
+@font-face {
+  font-family: 'MDIO';
+  src: url('./fonts/MDIO-Semibold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* Tuta light red theme */
+  --primary: #8F4A4E;
+  --on-primary: #FFFFFF;
+  --primary-container: #F4D2D2;
+  --on-primary-container: #733337;
+  --secondary: #87521B;
+  --tertiary: #63568F;
+  --surface: #FFFFFF;
+  --surface-container: #FCF9F6;
+  --surface-container-high: #F5EEEA;
+  --surface-container-highest: #e7e2de;
+  --on-surface: #221A14;
+  --on-surface-variant: #4e4545;
+  --outline: #7f7575;
+  --outline-variant: #d0c4c4;
+  --scrim: #000000;
+  --error: #BA1A1A;
+  --on-error: #FFFFFF;
+  --success: #44845E;
+  --success-container: #E9FFED;
+  --warning: #8D7426;
+  --tuta-nota: #D93951;
+
+  --green: #44845E;
+  --orange: #8D7426;
+  --red: #BA1A1A;
+  --gray: #7f7575;
+
+  --sans: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Consolas, monospace;
+  --brand: 'MDIO', var(--sans);
+
+  font: 16px/1.4286 var(--sans);
+  color-scheme: light dark;
+  color: var(--on-surface-variant);
+  background: var(--surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary: #FFB3B5;
+    --on-primary: #561D22;
+    --primary-container: #733337;
+    --on-primary-container: #FFDADA;
+    --secondary: #F3BD6E;
+    --tertiary: #CDBDFF;
+    --surface: #181212;
+    --surface-container: #241e1e;
+    --surface-container-high: #2f2828;
+    --surface-container-highest: #3d3434;
+    --on-surface: #f3ecec;
+    --on-surface-variant: #d0c4c4;
+    --outline: #998e8e;
+    --outline-variant: #4e4545;
+    --scrim: #000000;
+    --error: #FFB4AB;
+    --on-error: #690005;
+    --success: #5E9E77;
+    --success-container: #003920;
+    --warning: #FFE089;
+    --tuta-nota: #D93951;
+
+    --green: #5E9E77;
+    --orange: #FFE089;
+    --red: #FFB4AB;
+    --gray: #998e8e;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  height: 100vh;
+}

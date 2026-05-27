@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use log::info;
+use log::{info, debug};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails};
 use tutasdk::folder_system::MailSetKind;
 
 use crate::mail::rfc2822::{extract_headers, format_internal_date};
 use crate::mail::mail_to_rfc2822;
+use crate::sync::MailStore;
 use crate::tuta::MailBackend;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,23 +25,33 @@ struct CachedMail {
 }
 
 pub struct ImapSession {
-    tuta: Arc<dyn MailBackend>,
+    store: Arc<MailStore>,
+    backend: Arc<dyn MailBackend>,
     state: State,
     selected_folder: Option<MailSetKind>,
     mails: Vec<CachedMail>,
     uid_next: u32,
     idle_tag: Option<String>,
+    auth_tag: Option<String>,
+    password_hash: Option<String>,
 }
 
 impl ImapSession {
-    pub fn new(tuta: Arc<dyn MailBackend>) -> Self {
+    pub fn new(
+        store: Arc<MailStore>,
+        backend: Arc<dyn MailBackend>,
+        password_hash: Option<String>,
+    ) -> Self {
         Self {
-            tuta,
+            store,
+            backend,
             state: State::NotAuthenticated,
             selected_folder: None,
             mails: Vec::new(),
             uid_next: 1,
             idle_tag: None,
+            auth_tag: None,
+            password_hash,
         }
     }
 
@@ -50,6 +61,56 @@ impl ImapSession {
 
     pub fn is_idle(&self) -> bool {
         self.idle_tag.is_some()
+    }
+
+    pub fn is_awaiting_auth(&self) -> bool {
+        self.auth_tag.is_some()
+    }
+
+    pub fn handle_auth_response(&mut self, line: &str) -> Vec<String> {
+        let tag = match self.auth_tag.take() {
+            Some(t) => t,
+            None => return vec![],
+        };
+
+        let decoded = match base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            line.trim(),
+        ) {
+            Ok(d) => d,
+            Err(_) => {
+                return vec![format!(
+                    "{} NO [AUTHENTICATIONFAILED] Invalid base64\r\n",
+                    tag
+                )];
+            }
+        };
+
+        // PLAIN format: \0authcid\0password (authzid is empty)
+        let parts: Vec<&[u8]> = decoded.splitn(3, |&b| b == 0).collect();
+        let password = if parts.len() == 3 {
+            String::from_utf8_lossy(parts[2]).to_string()
+        } else if parts.len() == 2 {
+            String::from_utf8_lossy(parts[1]).to_string()
+        } else {
+            return vec![format!(
+                "{} NO [AUTHENTICATIONFAILED] Invalid PLAIN data\r\n",
+                tag
+            )];
+        };
+
+        if let Some(ref expected) = self.password_hash {
+            if password != *expected {
+                return vec![format!(
+                    "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
+                    tag
+                )];
+            }
+        }
+
+        self.state = State::Authenticated;
+        info!("IMAP client authenticated via AUTHENTICATE PLAIN");
+        vec![format!("{} OK AUTHENTICATE completed\r\n", tag)]
     }
 
     pub fn end_idle(&mut self) -> Vec<String> {
@@ -65,11 +126,10 @@ impl ImapSession {
             Some(k) => k,
             None => return vec![],
         };
-        let old_count = self.mails.len();
-        if self.refresh_mails(kind).await.is_ok() {
-            let new_count = self.mails.len();
-            if new_count != old_count {
-                return vec![format!("* {} EXISTS\r\n", new_count)];
+        let store_count = self.store.folder_count(kind).await;
+        if store_count != self.mails.len() {
+            if self.refresh_mails(kind).await.is_ok() {
+                return vec![format!("* {} EXISTS\r\n", self.mails.len())];
             }
         }
         vec![]
@@ -82,7 +142,15 @@ impl ImapSession {
             "CAPABILITY" => self.cmd_capability(&tag),
             "NOOP" => vec![format!("{} OK NOOP completed\r\n", tag)],
             "LOGOUT" => self.cmd_logout(&tag),
-            "LOGIN" => self.cmd_login(&tag).await,
+            "LOGIN" => self.cmd_login(&tag, &args),
+            "AUTHENTICATE" => {
+                if args.trim().eq_ignore_ascii_case("PLAIN") {
+                    self.auth_tag = Some(tag.clone());
+                    vec!["+ \r\n".to_string()]
+                } else {
+                    vec![format!("{} NO Unsupported mechanism\r\n", tag)]
+                }
+            }
             "LIST" => self.cmd_list(&tag, &args).await,
             "LSUB" => self.cmd_list(&tag, &args).await,
             "SELECT" => self.cmd_select(&tag, &args).await,
@@ -121,7 +189,16 @@ impl ImapSession {
         ]
     }
 
-    async fn cmd_login(&mut self, tag: &str) -> Vec<String> {
+    fn cmd_login(&mut self, tag: &str, args: &str) -> Vec<String> {
+        if let Some(ref expected) = self.password_hash {
+            let (_, password) = parse_login_args(args);
+            if password != *expected {
+                return vec![format!(
+                    "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
+                    tag
+                )];
+            }
+        }
         self.state = State::Authenticated;
         info!("IMAP client authenticated (bridge session)");
         vec![format!("{} OK LOGIN completed\r\n", tag)]
@@ -140,18 +217,10 @@ impl ImapSession {
             return responses;
         }
 
-        match self.load_folder_list().await {
-            Ok(folders) => {
-                for (name, flags) in &folders {
-                    responses.push(format!("* LIST ({}) \"/\" \"{}\"\r\n", flags, name));
-                }
-                responses.push(format!("{} OK LIST completed\r\n", tag));
-            }
-            Err(e) => {
-                log::error!("Failed to load folders: {}", e);
-                responses.push(format!("{} NO Failed to load folders\r\n", tag));
-            }
+        for (name, flags) in &self.folder_list() {
+            responses.push(format!("* LIST ({}) \"/\" \"{}\"\r\n", flags, name));
         }
+        responses.push(format!("{} OK LIST completed\r\n", tag));
 
         responses
     }
@@ -208,23 +277,16 @@ impl ImapSession {
         let folder_name = args.split_whitespace().next().unwrap_or("").trim_matches('"');
         let kind = folder_name_to_kind(folder_name);
 
-        match self.tuta.load_mail_ids_for_folder(kind).await {
-            Ok(mails) => {
-                let count = mails.len();
-                let unseen = mails.iter().filter(|m| m.unread).count();
-                vec![
-                    format!(
-                        "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY 1)\r\n",
-                        folder_name, count, unseen, self.uid_next
-                    ),
-                    format!("{} OK STATUS completed\r\n", tag),
-                ]
-            }
-            Err(e) => {
-                log::warn!("STATUS failed for {}: {}", folder_name, e);
-                vec![format!("{} NO Failed to get status\r\n", tag)]
-            }
-        }
+        let stored = self.store.get_folder(kind).await;
+        let count = stored.len();
+        let unseen = stored.iter().filter(|m| m.mail.unread).count();
+        vec![
+            format!(
+                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY 1)\r\n",
+                folder_name, count, unseen, self.uid_next
+            ),
+            format!("{} OK STATUS completed\r\n", tag),
+        ]
     }
 
     async fn cmd_fetch(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
@@ -243,25 +305,41 @@ impl ImapSession {
             }
 
             if self.mails[idx].details.is_none() && needs_body(&items) {
-                match self.tuta.load_mail_details(&self.mails[idx].mail).await {
-                    Ok(Some(details)) => {
-                        self.mails[idx].details = Some(details);
-                    }
-                    Ok(None) => {
-                        log::warn!("No details available for uid={}", self.mails[idx].uid);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to load mail details for uid={}: {}", self.mails[idx].uid, e);
-                    }
+                let elem_id = self.mails[idx]
+                    .mail
+                    ._id
+                    .as_ref()
+                    .map(|id| id.element_id.to_string());
+                let kind = self.selected_folder.unwrap_or(MailSetKind::Inbox);
+
+                // Check store — syncer may have loaded details since our snapshot
+                let from_store = if let Some(ref eid) = elem_id {
+                    self.store.get_details(kind, eid).await
+                } else {
+                    None
+                };
+
+                if let Some((details, rfc)) = from_store {
+                    self.mails[idx].details = Some(details);
+                    self.mails[idx].rfc2822 = Some(rfc);
+                } else {
+                    debug!("Details not yet synced for uid={}", self.mails[idx].uid);
                 }
             }
 
-            if self.mails[idx].rfc2822.is_none() && needs_body(&items) {
-                let rfc = mail_to_rfc2822(
-                    &self.mails[idx].mail,
-                    self.mails[idx].details.as_ref(),
-                );
-                self.mails[idx].rfc2822 = Some(rfc);
+            if needs_body(&items) {
+                if self.mails[idx].details.is_some() && self.mails[idx].rfc2822.is_none() {
+                    let rfc = mail_to_rfc2822(
+                        &self.mails[idx].mail,
+                        self.mails[idx].details.as_ref(),
+                    );
+                    self.mails[idx].rfc2822 = Some(rfc);
+                } else if self.mails[idx].details.is_none() {
+                    log::warn!(
+                        "No details for uid={}, body will be placeholder",
+                        self.mails[idx].uid,
+                    );
+                }
             }
 
             let cached = &self.mails[idx];
@@ -335,7 +413,7 @@ impl ImapSession {
                 .collect();
 
             if !mail_ids.is_empty() {
-                if let Err(e) = self.tuta.set_unread_status(mail_ids, !adding).await {
+                if let Err(e) = self.backend.set_unread_status(mail_ids, !adding).await {
                     log::warn!("Failed to update read status on server: {}", e);
                 }
             }
@@ -391,7 +469,7 @@ impl ImapSession {
             .collect();
 
         if !deleted_ids.is_empty() {
-            if let Err(e) = self.tuta.trash_mails(deleted_ids).await {
+            if let Err(e) = self.backend.trash_mails(deleted_ids).await {
                 log::warn!("Failed to trash mails: {}", e);
             }
         }
@@ -414,51 +492,67 @@ impl ImapSession {
     }
 
     async fn refresh_mails(&mut self, kind: MailSetKind) -> Result<(), String> {
-        let mails = self.tuta.load_mail_ids_for_folder(kind).await?;
+        let stored = self.store.get_folder(kind).await;
 
-        let old_uids: std::collections::HashMap<String, u32> = self
-            .mails
-            .iter()
-            .filter_map(|m| {
-                m.mail._id.as_ref().map(|id| (id.element_id.to_string(), m.uid))
-            })
-            .collect();
+        let old_cache: std::collections::HashMap<String, (u32, Option<MailDetails>, Option<String>)> =
+            self.mails
+                .iter()
+                .filter_map(|m| {
+                    let eid = m.mail._id.as_ref()?.element_id.to_string();
+                    Some((eid, (m.uid, m.details.clone(), m.rfc2822.clone())))
+                })
+                .collect();
 
         self.mails.clear();
 
-        for mail in mails {
-            let uid = mail
-                ._id
+        for sm in stored {
+            let elem_id = sm.mail._id.as_ref().map(|id| id.element_id.to_string());
+
+            let (uid, old_details, old_rfc) = elem_id
                 .as_ref()
-                .and_then(|id| old_uids.get(&id.element_id.to_string()).copied())
+                .and_then(|eid| old_cache.get(eid))
+                .cloned()
                 .unwrap_or_else(|| {
                     let uid = self.uid_next;
                     self.uid_next += 1;
-                    uid
+                    (uid, None, None)
                 });
+
             if uid >= self.uid_next {
                 self.uid_next = uid + 1;
             }
+
+            let details = sm.details.or(old_details);
+            let rfc2822 = sm.rfc2822.or(old_rfc).unwrap_or_else(|| {
+                mail_to_rfc2822(&sm.mail, details.as_ref())
+            });
+
             self.mails.push(CachedMail {
-                mail,
-                details: None,
-                rfc2822: None,
+                mail: sm.mail,
+                details,
+                rfc2822: Some(rfc2822),
                 uid,
                 deleted: false,
             });
         }
 
-        info!("Loaded {} mails for folder {:?}", self.mails.len(), kind);
+        debug!("Refreshed {} mails for {:?} from store", self.mails.len(), kind);
         Ok(())
     }
 
     fn resolve_sequence_set(&self, seq_set: &str, uid_mode: bool) -> Vec<usize> {
+        let max = if uid_mode {
+            self.mails.iter().map(|m| m.uid).max().unwrap_or(0)
+        } else {
+            self.mails.len() as u32
+        };
+
         let mut result = Vec::new();
         for part in seq_set.split(',') {
             let part = part.trim();
             if let Some((start, end)) = part.split_once(':') {
-                let s = parse_seq_num(start, self.mails.len() as u32);
-                let e = parse_seq_num(end, self.mails.len() as u32);
+                let s = parse_seq_num(start, max);
+                let e = parse_seq_num(end, max);
                 let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
                 for n in lo..=hi {
                     if let Some(idx) = self.seq_to_index(n, uid_mode) {
@@ -466,7 +560,7 @@ impl ImapSession {
                     }
                 }
             } else {
-                let n = parse_seq_num(part, self.mails.len() as u32);
+                let n = parse_seq_num(part, max);
                 if let Some(idx) = self.seq_to_index(n, uid_mode) {
                     result.push(idx);
                 }
@@ -487,8 +581,15 @@ impl ImapSession {
         }
     }
 
-    async fn load_folder_list(&self) -> Result<Vec<(String, String)>, String> {
-        self.tuta.load_folder_list().await
+    fn folder_list(&self) -> Vec<(String, String)> {
+        vec![
+            ("INBOX".into(), "".into()),
+            ("Sent".into(), "\\Sent".into()),
+            ("Drafts".into(), "\\Drafts".into()),
+            ("Trash".into(), "\\Trash".into()),
+            ("Archive".into(), "\\Archive".into()),
+            ("Spam".into(), "\\Junk".into()),
+        ]
     }
 }
 
@@ -657,6 +758,35 @@ fn folder_name_to_kind(name: &str) -> MailSetKind {
         "ARCHIVE" => MailSetKind::Archive,
         "SPAM" | "JUNK" => MailSetKind::Spam,
         _ => MailSetKind::Inbox,
+    }
+}
+
+fn parse_login_args(args: &str) -> (String, String) {
+    let args = args.trim();
+    let (user, rest) = parse_imap_token(args);
+    let (pass, _) = parse_imap_token(rest.trim_start());
+    (user, pass)
+}
+
+fn parse_imap_token(s: &str) -> (String, &str) {
+    if s.starts_with('"') {
+        let mut result = String::new();
+        let mut chars = s[1..].char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => {
+                    if let Some((_, escaped)) = chars.next() {
+                        result.push(escaped);
+                    }
+                }
+                '"' => return (result, &s[i + 2..]),
+                _ => result.push(c),
+            }
+        }
+        (result, "")
+    } else {
+        let end = s.find(char::is_whitespace).unwrap_or(s.len());
+        (s[..end].to_string(), if end < s.len() { &s[end..] } else { "" })
     }
 }
 
@@ -1092,6 +1222,7 @@ mod tests {
     // =================================================================
 
     use std::sync::Mutex;
+    use crate::sync::MailStore;
     use crate::tuta::MailBackend;
     use crate::mail::ParsedMessage;
     use tutasdk::entities::generated::tutanota::{Body, Recipients};
@@ -1126,9 +1257,31 @@ mod tests {
         }
     }
 
+    use crate::sync::StoredMail;
+
+    async fn populate_store(store: &MailStore, mails: &[Mail]) {
+        let stored: Vec<StoredMail> = mails
+            .iter()
+            .map(|m| StoredMail {
+                mail: m.clone(),
+                details: None,
+                rfc2822: None,
+            })
+            .collect();
+        store.set_folder(MailSetKind::Inbox, stored).await;
+    }
+
+    async fn make_session(backend: Arc<MockBackend>) -> (Arc<MailStore>, ImapSession) {
+        let store = MailStore::new();
+        let mails = backend.mails.lock().unwrap().clone();
+        populate_store(&store, &mails).await;
+        let session = ImapSession::new(store.clone(), backend, None);
+        (store, session)
+    }
+
     #[async_trait::async_trait]
     impl MailBackend for MockBackend {
-        async fn load_mail_ids_for_folder(&self, _kind: MailSetKind) -> Result<Vec<Mail>, String> {
+        async fn load_mail_ids_for_folder(&self, _kind: MailSetKind, _limit: usize) -> Result<Vec<Mail>, String> {
             Ok(self.mails.lock().unwrap().clone())
         }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
@@ -1246,14 +1399,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_login_select_fetch_sequence() {
-        let backend = Arc::new(MockBackend::with_mails(vec![
-            make_mail("m1", "First mail", true),
-            make_mail("m2", "Second mail", false),
-        ]));
-        backend.add_details("m1", make_details("<p>Body 1</p>"));
-        backend.add_details("m2", make_details("<p>Body 2</p>"));
+        let m1 = make_mail("m1", "First mail", true);
+        let m2 = make_mail("m2", "Second mail", false);
+        let d1 = make_details("<p>Body 1</p>");
+        let d2 = make_details("<p>Body 2</p>");
 
-        let mut session = ImapSession::new(backend);
+        let backend = Arc::new(MockBackend::with_mails(vec![m1.clone(), m2.clone()]));
+        let store = MailStore::new();
+        let rfc1 = crate::mail::mail_to_rfc2822(&m1, Some(&d1));
+        let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2));
+        store.set_folder(MailSetKind::Inbox, vec![
+            StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1) },
+            StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2) },
+        ]).await;
+        let mut session = ImapSession::new(store, backend, None);
 
         // LOGIN
         let resp = session.handle_command("A001 LOGIN user pass").await;
@@ -1291,7 +1450,9 @@ mod tests {
         let backend = Arc::new(MockBackend::with_mails(vec![
             make_mail("m1", "Unread mail", true),
         ]));
-        let mut session = ImapSession::new(backend.clone());
+        let store = MailStore::new();
+        populate_store(&store, &backend.mails.lock().unwrap()).await;
+        let mut session = ImapSession::new(store, backend.clone(), None);
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1317,7 +1478,9 @@ mod tests {
             make_mail("m2", "Mail 2", false),
             make_mail("m3", "Mail 3", false),
         ]));
-        let mut session = ImapSession::new(backend.clone());
+        let store = MailStore::new();
+        populate_store(&store, &backend.mails.lock().unwrap()).await;
+        let mut session = ImapSession::new(store, backend.clone(), None);
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1350,7 +1513,9 @@ mod tests {
             make_mail("m1", "First", false),
             make_mail("m2", "Second", false),
         ]));
-        let mut session = ImapSession::new(backend.clone());
+        let store = MailStore::new();
+        populate_store(&store, &backend.mails.lock().unwrap()).await;
+        let mut session = ImapSession::new(store.clone(), backend.clone(), None);
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1360,11 +1525,12 @@ mod tests {
         let uid1_first = extract_uid(&resp[0]);
         let uid2_first = extract_uid(&resp[1]);
 
-        // Add a new mail and re-SELECT (triggers refresh)
+        // Add a new mail, update both backend and store, re-SELECT
         {
             let mut mails = backend.mails.lock().unwrap();
             mails.push(make_mail("m3", "Third", true));
         }
+        populate_store(&store, &backend.mails.lock().unwrap()).await;
         session.handle_command("A004 SELECT INBOX").await;
 
         // Get UIDs again
@@ -1392,7 +1558,7 @@ mod tests {
         let backend = Arc::new(MockBackend::with_mails(vec![
             make_mail("m1", "Test", false),
         ]));
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1415,7 +1581,7 @@ mod tests {
             make_mail("m2", "Unread", true),
             make_mail("m3", "Also read", false),
         ]));
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1432,7 +1598,7 @@ mod tests {
             make_mail("m1", "Read", false),
             make_mail("m2", "Unread", true),
         ]));
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1448,7 +1614,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_authenticated_rejects_commands() {
         let backend = Arc::new(MockBackend::new());
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         let resp = session.handle_command("A001 SELECT INBOX").await;
         assert!(resp[0].contains("NO Not authenticated"));
@@ -1460,7 +1626,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_mailbox_selected_rejects_fetch() {
         let backend = Arc::new(MockBackend::new());
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
 
@@ -1473,7 +1639,7 @@ mod tests {
         let backend = Arc::new(MockBackend::with_mails(vec![
             make_mail("m1", "Test", false),
         ]));
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1492,7 +1658,7 @@ mod tests {
             make_mail("m3", "Mail 3", false),
             make_mail("m4", "Mail 4", false),
         ]));
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1513,7 +1679,7 @@ mod tests {
     #[tokio::test]
     async fn test_logout() {
         let backend = Arc::new(MockBackend::new());
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         let resp = session.handle_command("A001 LOGOUT").await;
         assert!(resp.iter().any(|r| r.contains("BYE")));
@@ -1523,7 +1689,7 @@ mod tests {
     #[tokio::test]
     async fn test_namespace() {
         let backend = Arc::new(MockBackend::new());
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         let resp = session.handle_command("A001 NAMESPACE").await;
         assert!(resp[0].contains("NAMESPACE"));
@@ -1533,7 +1699,7 @@ mod tests {
     #[tokio::test]
     async fn test_capability() {
         let backend = Arc::new(MockBackend::new());
-        let mut session = ImapSession::new(backend);
+        let (_store, mut session) = make_session(backend).await;
 
         let resp = session.handle_command("A001 CAPABILITY").await;
         assert!(resp[0].contains("IMAP4rev1"));
