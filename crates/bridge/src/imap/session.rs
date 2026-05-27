@@ -161,6 +161,8 @@ impl ImapSession {
             "EXPUNGE" => self.cmd_expunge(&tag).await,
             "SEARCH" => self.cmd_search(&tag, &args, false),
             "STORE" => self.cmd_store(&tag, &args, false).await,
+            "MOVE" => self.cmd_move(&tag, &args, false).await,
+            "COPY" => self.cmd_copy(&tag),
             "IDLE" => {
                 self.idle_tag = Some(tag.clone());
                 vec!["+ idling\r\n".to_string()]
@@ -175,7 +177,7 @@ impl ImapSession {
 
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
         vec![
-            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS\r\n".to_string(),
+            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE\r\n".to_string(),
             format!("{} OK CAPABILITY completed\r\n", tag),
         ]
     }
@@ -454,7 +456,8 @@ impl ImapSession {
             "FETCH" => self.cmd_fetch(tag, subargs, true).await,
             "SEARCH" => self.cmd_search(tag, subargs, true),
             "STORE" => self.cmd_store(tag, subargs, true).await,
-            "COPY" => vec![format!("{} OK UID COPY completed\r\n", tag)],
+            "MOVE" => self.cmd_move(tag, subargs, true).await,
+            "COPY" => self.cmd_copy(tag),
             _ => vec![format!("{} BAD Unknown UID subcommand\r\n", tag)],
         }
     }
@@ -499,6 +502,76 @@ impl ImapSession {
 
         responses.push(format!("{} OK EXPUNGE completed\r\n", tag));
         responses
+    }
+
+    /// MOVE / UID MOVE (RFC 6851): move messages to another mailbox. Tuta
+    /// folders are exclusive, so this maps directly to a server-side move; the
+    /// messages are then expunged from the source view.
+    async fn cmd_move(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
+        let label = if uid_mode { "UID MOVE" } else { "MOVE" };
+        if self.state != State::Selected {
+            return vec![format!("{} NO No mailbox selected\r\n", tag)];
+        }
+
+        let (seq_set, rest) = args.trim().split_once(' ').unwrap_or((args.trim(), ""));
+        let (raw_name, _) = parse_imap_token(rest.trim());
+        let folder_name = super::utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone());
+        let target = match self.store.folder_by_imap_path(&folder_name).await {
+            Some(f) => f,
+            None => return vec![format!("{} NO [TRYCREATE] Mailbox does not exist\r\n", tag)],
+        };
+
+        let indices = self.resolve_sequence_set(seq_set, uid_mode);
+        let mail_ids: Vec<_> = indices
+            .iter()
+            .filter_map(|&i| self.mails.get(i))
+            .filter_map(|m| m.mail._id.clone())
+            .collect::<Vec<_>>();
+
+        if mail_ids.is_empty() {
+            return vec![format!("{} OK {} completed\r\n", tag, label)];
+        }
+
+        let moved: std::collections::HashSet<String> = mail_ids
+            .iter()
+            .map(|id| id.element_id.to_string())
+            .collect();
+
+        if let Err(e) = self.backend.move_mails(mail_ids, &target).await {
+            log::warn!("{} to {} failed: {}", label, folder_name, e);
+            return vec![format!("{} NO {} failed\r\n", tag, label)];
+        }
+
+        // Expunge the moved messages from the source view (RFC 6851).
+        let mut responses = Vec::new();
+        let mut seq = 1u32;
+        let mut i = 0;
+        while i < self.mails.len() {
+            let is_moved = self.mails[i]
+                .mail
+                ._id
+                .as_ref()
+                .map(|id| moved.contains(&id.element_id.to_string()))
+                .unwrap_or(false);
+            if is_moved {
+                responses.push(format!("* {} EXPUNGE\r\n", seq));
+                self.mails.remove(i);
+            } else {
+                seq += 1;
+                i += 1;
+            }
+        }
+        responses.push(format!("{} OK {} completed\r\n", tag, label));
+        responses
+    }
+
+    /// COPY is not supported: Tuta folders are exclusive (no duplication).
+    /// Clients should use MOVE, which we advertise.
+    fn cmd_copy(&self, tag: &str) -> Vec<String> {
+        vec![format!(
+            "{} NO [CANNOT] COPY is not supported; use MOVE\r\n",
+            tag
+        )]
     }
 
     async fn refresh_mails(&mut self, folder_id: &str) -> Result<(), String> {
@@ -1206,6 +1279,7 @@ mod tests {
         trashed: Mutex<Vec<IdTupleGenerated>>,
         unread_calls: Mutex<Vec<(Vec<IdTupleGenerated>, bool)>>,
         sent: Mutex<Vec<ParsedMessage>>,
+        moved: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
     }
 
     impl MockBackend {
@@ -1216,6 +1290,7 @@ mod tests {
                 trashed: Mutex::new(Vec::new()),
                 unread_calls: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
+                moved: Mutex::new(Vec::new()),
             }
         }
 
@@ -1237,11 +1312,60 @@ mod tests {
     fn inbox_folder() -> FolderInfo {
         FolderInfo {
             id: "inbox".to_string(),
+            list_id: "folders".to_string(),
             entries_list_id: "inbox_entries".to_string(),
             kind: MailSetKind::Inbox,
             imap_path: "INBOX".to_string(),
             special_use: None,
         }
+    }
+
+    #[tokio::test]
+    async fn uid_move_moves_to_target_and_expunges() {
+        let m1 = make_mail("e1", "one", false);
+        let m2 = make_mail("e2", "two", false);
+        let backend = Arc::new(MockBackend::with_mails(vec![m1.clone(), m2.clone()]));
+        let store = MailStore::new();
+        let target = FolderInfo {
+            id: "cust".to_string(),
+            list_id: "folders".to_string(),
+            entries_list_id: "cust_entries".to_string(),
+            kind: MailSetKind::Custom,
+            imap_path: "Work".to_string(),
+            special_use: None,
+        };
+        store.set_folder_list(vec![inbox_folder(), target]).await;
+        store
+            .set_folder(
+                "inbox",
+                vec![
+                    StoredMail { mail: m1, details: None, rfc2822: None },
+                    StoredMail { mail: m2, details: None, rfc2822: None },
+                ],
+            )
+            .await;
+        let mut session = ImapSession::new(store, backend.clone(), None);
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+
+        let resp = session.handle_command("c UID MOVE 1 Work").await;
+        assert!(resp.iter().any(|r| r.contains("EXPUNGE")), "expected EXPUNGE, got {resp:?}");
+        assert!(resp.last().unwrap().contains("OK UID MOVE"));
+
+        let moved = backend.moved.lock().unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].1, "cust");
+        assert_eq!(moved[0].0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn copy_is_rejected() {
+        let backend = Arc::new(MockBackend::with_mails(vec![]));
+        let (_store, mut session) = make_session(backend).await;
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+        let resp = session.handle_command("c UID COPY 1 Work").await;
+        assert!(resp[0].contains("NO"), "COPY should be rejected, got {resp:?}");
     }
 
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
@@ -1283,6 +1407,10 @@ mod tests {
         }
         async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String> {
             self.trashed.lock().unwrap().extend(mail_ids);
+            Ok(())
+        }
+        async fn move_mails(&self, mail_ids: Vec<IdTupleGenerated>, target: &FolderInfo) -> Result<(), String> {
+            self.moved.lock().unwrap().push((mail_ids, target.id.clone()));
             Ok(())
         }
         async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String> {
