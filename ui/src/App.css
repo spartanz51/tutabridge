@@ -79,8 +79,17 @@
 /* ── Content ── */
 .app-content {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
+  overflow: hidden;
   padding: 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The single active panel fills the content area. */
+.app-content > * {
+  flex: 1;
+  min-height: 0;
 }
 
 /* ── Shared ── */
@@ -518,7 +527,7 @@ button.small {
   max-width: none;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 120px);
+  min-height: 0;
 }
 
 .logs-header {
@@ -534,6 +543,7 @@ button.small {
 
 .logs-container {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   background: var(--surface-container);
   border: 1px solid var(--outline-variant);

@@ -77,14 +77,21 @@
   }
 }
 
+/* App is a fixed shell: no scrollbars anywhere. Scrollable regions (logs)
+   still scroll via wheel/keys, just without visible bars. */
 * {
   box-sizing: border-box;
+  scrollbar-width: none;
 }
 
-body {
-  margin: 0;
+*::-webkit-scrollbar {
+  display: none;
 }
 
+html,
+body,
 #root {
   height: 100vh;
+  margin: 0;
+  overflow: hidden;
 }

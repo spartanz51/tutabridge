@@ -15,6 +15,8 @@
         "title": "TutaBridge",
         "width": 700,
         "height": 520,
+        "minWidth": 700,
+        "minHeight": 520,
         "resizable": true,
         "center": true
       }
