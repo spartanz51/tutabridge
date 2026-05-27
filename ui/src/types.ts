@@ -3,6 +3,8 @@ export interface Config {
   imap_port: number;
   smtp_port: number;
   api_url: string;
+  /** Max mails synced per folder; 0 = fetch all. */
+  sync_limit: number;
 }
 
 export type BridgeStatus = "Stopped" | "Starting" | "Running" | { Error: string };

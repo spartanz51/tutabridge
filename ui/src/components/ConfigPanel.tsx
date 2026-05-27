@@ -12,6 +12,8 @@ export function ConfigPanel({ config, status, onSave }: Props) {
   const [imapPort, setImapPort] = useState(1143);
   const [smtpPort, setSmtpPort] = useState(1025);
   const [apiUrl, setApiUrl] = useState("https://app.tuta.com");
+  const [syncLimit, setSyncLimit] = useState(500);
+  const [fetchAll, setFetchAll] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -20,6 +22,8 @@ export function ConfigPanel({ config, status, onSave }: Props) {
       setImapPort(config.imap_port);
       setSmtpPort(config.smtp_port);
       setApiUrl(config.api_url);
+      setFetchAll(config.sync_limit === 0);
+      setSyncLimit(config.sync_limit === 0 ? 500 : config.sync_limit);
     }
   }, [config]);
 
@@ -31,6 +35,7 @@ export function ConfigPanel({ config, status, onSave }: Props) {
       imap_port: imapPort,
       smtp_port: smtpPort,
       api_url: apiUrl,
+      sync_limit: fetchAll ? 0 : syncLimit,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -77,6 +82,31 @@ export function ConfigPanel({ config, status, onSave }: Props) {
           onChange={(e) => setApiUrl(e.target.value)}
           disabled={isRunning}
         />
+      </div>
+      <div className="form-group">
+        <label>Mail to sync</label>
+        <label style={{ fontWeight: "normal" }}>
+          <input
+            type="checkbox"
+            checked={fetchAll}
+            onChange={(e) => setFetchAll(e.target.checked)}
+            disabled={isRunning}
+          />{" "}
+          Fetch all mail (entire account, kept locally)
+        </label>
+        {!fetchAll && (
+          <input
+            type="number"
+            min={1}
+            value={syncLimit}
+            onChange={(e) => setSyncLimit(Math.max(1, Number(e.target.value)))}
+            disabled={isRunning}
+            placeholder="Max mails per folder"
+          />
+        )}
+        {fetchAll && (
+          <small>Downloads every mail from the start — can be slow on large accounts.</small>
+        )}
       </div>
       <button onClick={handleSave} disabled={isRunning || !email}>
         {saved ? "Saved!" : "Save"}
