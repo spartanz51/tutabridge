@@ -13,6 +13,8 @@ use crate::tuta::{FolderInfo, MailBackend};
 const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
 const INTER_FOLDER_DELAY: Duration = Duration::from_millis(300);
 const SYNC_INTERVAL: Duration = Duration::from_secs(60);
+/// Pause between background body-prefetch sweeps.
+const PREFETCH_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RETRIES: u32 = 3;
 
 #[derive(Clone)]
@@ -150,7 +152,7 @@ pub async fn run_syncer(
     local_store: Arc<LocalStore>,
     backend: Arc<dyn MailBackend>,
     sync_limit: usize,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
     info!(
         "Mail syncer started (limit={})",
@@ -182,12 +184,32 @@ pub async fn run_syncer(
         }
     }
 
-    let mut cycle_backoff = Duration::ZERO;
+    // Run the fast list/folder sync and the slow body prefetch as independent
+    // loops: a long prefetch pass must never block folder / new-mail refresh.
+    tokio::join!(
+        list_sync_loop(&store, &local_store, &*backend, sync_limit, shutdown.clone()),
+        prefetch_loop(&store, &local_store, &*backend, shutdown.clone()),
+    );
+    info!("Mail syncer shutting down");
+}
 
+/// Fast loop: refresh the folder list and sync the mail-id list for every
+/// folder. This is what surfaces new folders and new mail (~every
+/// `SYNC_INTERVAL`), independent of the slow body prefetch.
+async fn list_sync_loop(
+    store: &MailStore,
+    local_store: &LocalStore,
+    backend: &dyn MailBackend,
+    sync_limit: usize,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut cycle_backoff = Duration::ZERO;
     loop {
+        if *shutdown.borrow() {
+            return;
+        }
         let mut had_error = false;
 
-        // Refresh the folder list each cycle (custom folders can change).
         let folders = match retry(|| backend.list_folders()).await {
             Ok(folders) => {
                 store.set_folder_list(folders.clone()).await;
@@ -200,46 +222,54 @@ pub async fn run_syncer(
             }
         };
 
-        // Phase 1: sync mail lists for ALL folders (fast, no body loading).
         for folder in &folders {
             if *shutdown.borrow() {
-                info!("Mail syncer shutting down");
                 return;
             }
-            match sync_folder(&store, &local_store, &*backend, folder, sync_limit).await {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!("Sync error for {}: {}", folder.imap_path, e);
-                    had_error = true;
-                }
+            if let Err(e) = sync_folder(store, local_store, backend, folder, sync_limit).await {
+                warn!("Sync error for {}: {}", folder.imap_path, e);
+                had_error = true;
             }
             tokio::time::sleep(INTER_FOLDER_DELAY).await;
         }
 
-        // Phase 2: prefetch mail details (slow, but all folders are visible).
-        for folder in &folders {
-            if *shutdown.borrow() {
-                return;
-            }
-            prefetch_details(&store, &local_store, &*backend, folder).await;
-        }
-
-        if had_error {
-            cycle_backoff = backoff(cycle_backoff);
-            warn!("Sync cycle had errors, backing off {:?}", cycle_backoff);
+        cycle_backoff = if had_error {
+            backoff(cycle_backoff)
         } else {
-            cycle_backoff = Duration::ZERO;
-        }
-
+            Duration::ZERO
+        };
         let wait = SYNC_INTERVAL + cycle_backoff;
-        debug!("Next sync in {:?}", wait);
+        debug!("Next list sync in {:?}", wait);
 
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
-            _ = shutdown.changed() => {
-                info!("Mail syncer shutting down");
+            _ = shutdown.changed() => return,
+        }
+    }
+}
+
+/// Slow loop: progressively prefetch mail bodies in the background, on its own
+/// cadence so it never delays `list_sync_loop`.
+async fn prefetch_loop(
+    store: &MailStore,
+    local_store: &LocalStore,
+    backend: &dyn MailBackend,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        for folder in store.list_folders().await {
+            if *shutdown.borrow() {
                 return;
             }
+            prefetch_details(store, local_store, backend, &folder).await;
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(PREFETCH_INTERVAL) => {}
+            _ = shutdown.changed() => return,
         }
     }
 }
