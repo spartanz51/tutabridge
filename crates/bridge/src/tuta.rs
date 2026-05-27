@@ -121,16 +121,22 @@ impl TutaSession {
         entries_list_id: &tutasdk::GeneratedId,
         limit: usize,
     ) -> Result<Vec<Mail>, ApiCallError> {
-        let count = if limit == 0 { 1000 } else { limit };
-        let entries: Vec<MailSetEntry> = self
-            .crypto_client()
-            .load_range(
-                entries_list_id,
-                &CustomId::default(),
-                count,
-                ListLoadDirection::DESC,
-            )
-            .await?;
+        // limit == 0 means "all": paginate the whole entries list. Otherwise
+        // load a single capped page (newest first).
+        let entries: Vec<MailSetEntry> = if limit == 0 {
+            self.crypto_client()
+                .load_all(entries_list_id, ListLoadDirection::DESC)
+                .await?
+        } else {
+            self.crypto_client()
+                .load_range(
+                    entries_list_id,
+                    &CustomId::default(),
+                    limit,
+                    ListLoadDirection::DESC,
+                )
+                .await?
+        };
 
         // Group entries by list_id for batch loading
         let mut by_list: std::collections::HashMap<String, Vec<tutasdk::GeneratedId>> =
