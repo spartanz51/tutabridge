@@ -22,6 +22,7 @@ branch = one commit, rebasable on `upstream/master`.
 | `sdk-blob-element-reading` | `BlobFacade.load_blob_element` + `MailFacade.load_mail_details_blob` (read `MailDetailsBlob`) | [tutao#10870](https://github.com/tutao/tutanota/pull/10870) | — | yes (open) | no | yes (body decrypt over IMAP) |
 | `sdk-2fa-session` | Interactive 2FA: `initiate_session`, `authenticate_with_second_factor_totp`, `is_second_factor_pending`, `cancel_create_session` | [tutao#10871](https://github.com/tutao/tutanota/pull/10871) | — | yes (open) | no | yes (full TOTP login) |
 | `sdk-folder-system` | Rebuild `FolderSystem` tree (system/custom/nested), add `MailSetKind` Label/Imported/Scheduled + accessors | — | [spartanz51#4](https://github.com/spartanz51/tutanota/pull/4) | no (held) | no | yes (custom folders listed + read over IMAP) |
+| `sdk-move-mails` | `MailFacade.move_mails` (move to an arbitrary folder via `MoveMailService`) | — | [spartanz51#5](https://github.com/spartanz51/tutanota/pull/5) | no (held) | no | yes (IMAP MOVE between folders) |
 
 ## Notes per branch
 

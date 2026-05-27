@@ -26,6 +26,9 @@ use crate::mail::ParsedMessage;
 pub struct FolderInfo {
     /// `MailSet` element id — the stable key used everywhere.
     pub id: String,
+    /// `MailSet` list id (the mailbox's folders list) — with `id` it forms the
+    /// folder's full `IdTuple`, needed as a move target.
+    pub list_id: String,
     /// `MailSet.entries` list id — used to load the mails in this folder.
     pub entries_list_id: String,
     pub kind: MailSetKind,
@@ -46,6 +49,8 @@ pub trait MailBackend: Send + Sync {
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
     async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String>;
     async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String>;
+    /// Move mails into the given target folder.
+    async fn move_mails(&self, mail_ids: Vec<IdTupleGenerated>, target: &FolderInfo) -> Result<(), String>;
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String>;
 }
 
@@ -259,7 +264,11 @@ impl MailBackend for TutaSession {
                 continue; // skip Scheduled / virtual sets
             }
 
-            let Some(elem_id) = folder._id.as_ref().map(|id| id.element_id.to_string()) else {
+            let Some((list_id, elem_id)) = folder
+                ._id
+                .as_ref()
+                .map(|id| (id.list_id.to_string(), id.element_id.to_string()))
+            else {
                 continue;
             };
 
@@ -281,6 +290,7 @@ impl MailBackend for TutaSession {
 
             result.push(FolderInfo {
                 id: elem_id,
+                list_id,
                 entries_list_id: folder.entries.to_string(),
                 kind,
                 imap_path,
@@ -306,6 +316,18 @@ impl MailBackend for TutaSession {
         self.logged_in
             .mail_facade()
             .trash_mails(mail_ids)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn move_mails(&self, mail_ids: Vec<IdTupleGenerated>, target: &FolderInfo) -> Result<(), String> {
+        let target_folder = IdTupleGenerated::new(
+            tutasdk::GeneratedId(target.list_id.clone()),
+            tutasdk::GeneratedId(target.id.clone()),
+        );
+        self.logged_in
+            .mail_facade()
+            .move_mails(mail_ids, target_folder)
             .await
             .map_err(|e| format!("{e}"))
     }
