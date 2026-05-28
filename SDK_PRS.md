@@ -24,7 +24,8 @@ branch = one commit, rebasable on `upstream/master`.
 | `sdk-folder-system` | Rebuild `FolderSystem` tree (system/custom/nested), add `MailSetKind` Label/Imported/Scheduled + accessors | — | [spartanz51#4](https://github.com/spartanz51/tutanota/pull/4) | no (held) | no | yes (custom folders listed + read over IMAP) |
 | `sdk-move-mails` | `MailFacade.move_mails` (move to an arbitrary folder via `MoveMailService`) | — | [spartanz51#5](https://github.com/spartanz51/tutanota/pull/5) | no (held) | no | yes (IMAP MOVE between folders) |
 | `sdk-event-bus` | WebSocket `EventBusClient` (`/event?…`) — realtime entity updates with catch-up via `groupsToLastEventBatchIds`, plus observable `WsState` | — | — | no (held) | no | yes (live-tested over Phase 2/3 bridge integration, 26 unit tests) |
-| `sdk-mail-set-entry-id` | `mail_set_entry_id::{construct, deconstruct}` — encode/decode `MailSetEntry._id` (4-byte truncated timestamp + 9-byte raw Mail id, base64url-no-pad) | — | — | no (held) | no | will be (consumed by the bridge realtime delta optimisation; 8 unit tests, TS test vector asserted) |
+| `sdk-mail-set-entry-id` | `mail_set_entry_id::{construct, deconstruct}` — encode/decode `MailSetEntry._id` (4-byte truncated timestamp + 9-byte raw Mail id, base64url-no-pad) | — | — | no (held) | no | yes (consumed by the bridge realtime delta optimisation; 8 unit tests, TS test vector asserted) |
+| `sdk-inline-decrypt` | `CryptoEntityClient::decrypt_inline_and_parse<T>` — decrypt an entity payload arriving inline via the event bus, with no REST round-trip; `EntityClient::parse_raw` helper | — | — | no (held) | no | yes (consumed by the bridge realtime path to skip `load_mail` on every Mail UPDATE / new mail; 3 integration tests against the live decryption fixture) |
 
 ## Notes per branch
 
@@ -76,8 +77,29 @@ shifted right by 10 bits, then 9 raw bytes of the referenced `Mail.element_id`)
 encoded as base64url-no-pad. Knowing the encoding lets a realtime consumer
 extract the mail id directly from a `MailSetEntry` CREATE/DELETE event
 without an extra REST round-trip. 8 unit tests assert the TS test vector
-verbatim plus round-trip and four error shapes. Submit upstream once a real
-SDK consumer (the bridge realtime delta path) ships using it.
+verbatim plus round-trip and four error shapes. Live-tested in the bridge
+realtime delta path (Phase 2 of the realtime work).
+
+### sdk-inline-decrypt
+**Held — not submitted upstream.** `CryptoEntityClient::decrypt_inline_and_parse<T>`
+takes the still-encrypted JSON delivered inside a WebSocket
+`EntityUpdate.instance` and walks the existing decryption pipeline
+locally (`JsonSerializer::parse` → `CryptoFacade::resolve_session_key`
+→ `EntityFacade::decrypt_and_map` → `InstanceMapper::parse_entity`),
+producing the same typed entity as a full REST `load` would, with no
+network call. Returns `Ok(None)` when the session key cannot be
+resolved — a transient state (post-reply attachment key propagation in
+the TS) that should fall through to a REST `load` rather than surface
+as an error. `EntityClient::parse_raw` is exposed as a thin public
+wrapper around the previously-private `JsonSerializer` so the new
+method can feed an arbitrary deserialised JSON object into the same
+parsing pass `load` uses internally. The `MockEntityClient` mock
+declaration is extended for the new accessor. Three integration tests
+reuse the captured `download_mail_test/mail.json` fixture as a
+simulated event-bus payload — the happy-path test asserts the inline
+decryption yields the same Mail (subject, recipientCount) that the
+REST-backed `download_mail_test` extracts. Live-tested in the bridge
+realtime path (Phase 3 of the realtime work).
 
 ## Rebasing on a newer upstream
 
@@ -93,9 +115,10 @@ git rebase upstream/master sdk-folder-system
 git rebase upstream/master sdk-move-mails
 git rebase upstream/master sdk-event-bus
 git rebase upstream/master sdk-mail-set-entry-id
+git rebase upstream/master sdk-inline-decrypt
 # rebuild the integration branch from the rebased branches
 git checkout -B tutabridge-integration upstream/master
-git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id
+git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id sdk-inline-decrypt
 ```
 
 When an upstream PR merges, drop that branch from the cherry-pick list — the
