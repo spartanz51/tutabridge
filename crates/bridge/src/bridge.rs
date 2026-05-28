@@ -9,7 +9,7 @@ use crate::tuta::{self, MailBackend, TwoFactorCallback};
 use crate::{imap, smtp, tls};
 
 /// Identifier the server uses for telemetry/rate-limit bucketing.
-const CLIENT_NAME: &str = "tutabridge";
+pub const CLIENT_NAME: &str = "tutabridge";
 
 // Tuta `modelVersions=` for the event-bus URL. Read at compile-time from the
 // vendored SDK's type-model JSONs so the values track the submodule bump
@@ -32,13 +32,13 @@ fn parse_model_version(json: &str) -> u32 {
         .expect("type model JSON has no version field")
 }
 
-fn sys_model_version() -> u32 {
+pub fn sys_model_version() -> u32 {
     static V: std::sync::LazyLock<u32> =
         std::sync::LazyLock::new(|| parse_model_version(SYS_TYPE_MODELS_JSON));
     *V
 }
 
-fn tutanota_model_version() -> u32 {
+pub fn tutanota_model_version() -> u32 {
     static V: std::sync::LazyLock<u32> =
         std::sync::LazyLock::new(|| parse_model_version(TUTANOTA_TYPE_MODELS_JSON));
     *V

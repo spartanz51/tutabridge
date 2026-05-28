@@ -11,6 +11,7 @@ rust-version = "1.84.0"
 
 [dependencies]
 tutabridge-core = { path = "crates/bridge" }
+tuta-sdk = { path = "tuta-repo/tuta-sdk/rust/sdk", features = ["net"] }
 tokio = { version = "1.43", features = ["full"] }
 tokio-rustls = { version = "0.26", features = ["ring"] }
 log = "0.4"

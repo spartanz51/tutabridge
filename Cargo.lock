@@ -5358,6 +5358,7 @@ dependencies = [
  "rpassword",
  "tokio",
  "tokio-rustls",
+ "tuta-sdk",
  "tutabridge-core",
 ]
 

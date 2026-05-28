@@ -1,6 +1,9 @@
 use std::sync::Arc;
-use log::info;
-use tutabridge_core::{config, store::LocalStore, sync, tls, tuta, imap, smtp};
+use log::{info, warn};
+use tutabridge_core::{
+    bridge as bridge_helpers, config, event_handler, imap, smtp, store::LocalStore, sync, tls,
+    tuta,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,6 +98,52 @@ async fn main() -> anyhow::Result<()> {
     let local_store = Arc::new(local_store);
     info!("Local store opened");
 
+    // Build the realtime event bus and hydrate its catch-up cursor from
+    // disk so reconnects resume from the last processed batch — the GUI's
+    // `BridgeHandle` does the same dance; the CLI used to skip it entirely
+    // and quietly degrade to "bootstrap-sync only at startup".
+    let bus_access_token = session.access_token.clone();
+    let bus_user_id = session
+        .user_id()
+        .ok_or_else(|| anyhow::anyhow!("Missing user id from session"))?;
+    let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
+        cfg.api_url.clone(),
+        bridge_helpers::sys_model_version(),
+        bridge_helpers::tutanota_model_version(),
+        tutasdk::CLIENT_VERSION.to_string(),
+        bridge_helpers::CLIENT_NAME.to_string(),
+    ));
+    {
+        // OutOfSync detection: if the oldest cursor is older than the
+        // server's batch-replay window (~44 days), the server cannot
+        // catch us up — wipe so the syncer falls back to a bootstrap.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let expire_ms = tutasdk::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
+        if let Ok(Some(min_ms)) = local_store.event_bus_state_min_updated_at_ms() {
+            if now_ms - min_ms > expire_ms {
+                info!("Cached event-bus state is older than 44 days — wiping and forcing a full re-sync");
+                if let Err(e) = local_store.clear_event_bus_state() {
+                    warn!("Could not clear event_bus_state: {e}");
+                }
+            }
+        }
+        match local_store.load_event_bus_state() {
+            Ok(s) if !s.is_empty() => {
+                let ids_handle = bus_client.last_batch_ids();
+                let mut m = ids_handle.lock().unwrap();
+                let n = s.len();
+                m.extend(s);
+                info!("Event bus catch-up state loaded ({n} group(s))");
+            }
+            Ok(_) => info!("Event bus catch-up state is empty (first launch)"),
+            Err(e) => warn!("Could not load event_bus_state: {e}"),
+        }
+    }
+    let bus_ids_for_handler = bus_client.last_batch_ids();
+
     let backend: Arc<dyn tuta::MailBackend> = Arc::new(session);
 
     let store = sync::MailStore::new();
@@ -105,8 +154,59 @@ async fn main() -> anyhow::Result<()> {
 
     let pw = cfg.bridge_password.clone();
 
+    // mpsc channel from event bus -> handler.
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+
     let syncer_handle = tokio::spawn(sync::run_syncer(
-        store.clone(), local_store, backend.clone(), cfg.sync_limit, shutdown_rx,
+        store.clone(),
+        local_store.clone(),
+        backend.clone(),
+        cfg.sync_limit,
+        shutdown_rx.clone(),
+    ));
+    let bus_handle = {
+        let client = Arc::clone(&bus_client);
+        let token = bus_access_token;
+        let uid = bus_user_id;
+        let shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
+                use tutasdk::event_bus::EventBusError;
+                if !matches!(e, EventBusError::Stopped) {
+                    warn!("Event bus exited: {e}");
+                }
+            }
+        })
+    };
+    // Log every WsState transition at INFO so production logs reveal
+    // reconnect storms without RUST_LOG=debug.
+    {
+        let mut ws_watch = bus_client.state();
+        let mut shutdown_watch = shutdown_rx.clone();
+        let mut last = *ws_watch.borrow();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = ws_watch.changed() => {
+                        let now = *ws_watch.borrow();
+                        if now != last {
+                            info!("ws state: {:?} → {:?}", last, now);
+                            last = now;
+                        }
+                    }
+                    _ = shutdown_watch.changed() => return,
+                }
+            }
+        });
+    }
+    let handler_handle = tokio::spawn(event_handler::run_event_handler(
+        store.clone(),
+        local_store.clone(),
+        backend.clone(),
+        cfg.sync_limit,
+        bus_ids_for_handler,
+        event_rx,
+        shutdown_rx.clone(),
     ));
     let imap_handle = tokio::spawn(imap::serve(
         cfg.imap_port, store.clone(), backend.clone(), imap_tls, pw.clone(),
@@ -125,6 +225,8 @@ async fn main() -> anyhow::Result<()> {
             info!("Shutting down...");
             let _ = shutdown_tx.send(true);
             syncer_handle.abort();
+            bus_handle.abort();
+            handler_handle.abort();
             Ok(())
         }
         r = imap_handle => r.map_err(|e| anyhow::anyhow!("{e}"))?.map_err(|e| anyhow::anyhow!("{e}")),
