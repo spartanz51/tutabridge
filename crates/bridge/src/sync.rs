@@ -145,6 +145,30 @@ impl MailStore {
         }
     }
 
+    /// Drop in-memory state for folders that are no longer on the server.
+    /// Returns the ids that were removed so the caller can clean up the
+    /// LocalStore + .eml files for them.
+    pub async fn prune_unknown_folders(
+        &self,
+        known: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let mut removed = Vec::new();
+        let mut folders = self.folders.write().await;
+        folders.retain(|fid, _| {
+            if known.contains(fid) {
+                true
+            } else {
+                removed.push(fid.clone());
+                false
+            }
+        });
+        drop(folders);
+        if !removed.is_empty() {
+            self.bump_generation();
+        }
+        removed
+    }
+
     /// Drop a mail from every folder it appears in (handles DELETE events).
     pub async fn remove_mail_everywhere(&self, element_id: &str) {
         let mut folders = self.folders.write().await;
@@ -704,5 +728,22 @@ mod tests {
             .await;
         store.remove_mail_everywhere("unknown").await;
         assert_eq!(store.get_folder("folderA").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prune_unknown_folders_drops_disappeared_ones() {
+        let store = MailStore::new();
+        store
+            .set_folder("keep", vec![stored(make_mail("L1", "M1", "k", true), 1)])
+            .await;
+        store
+            .set_folder("gone", vec![stored(make_mail("L1", "M2", "g", true), 2)])
+            .await;
+        let known: std::collections::HashSet<String> =
+            ["keep".to_string()].into_iter().collect();
+        let removed = store.prune_unknown_folders(&known).await;
+        assert_eq!(removed, vec!["gone".to_string()]);
+        assert_eq!(store.get_folder("keep").await.len(), 1);
+        assert!(store.get_folder("gone").await.is_empty());
     }
 }

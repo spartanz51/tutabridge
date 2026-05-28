@@ -419,6 +419,28 @@ impl LocalStore {
         Ok(out)
     }
 
+    /// Oldest `updated_at_ms` across all event-bus rows, or `None` if empty.
+    /// Used at startup to detect a cache older than the server's batch
+    /// replay window (~44 days) and force a full re-sync.
+    pub fn event_bus_state_min_updated_at_ms(&self) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let v: Option<i64> = conn.query_row(
+            "SELECT MIN(updated_at_ms) FROM event_bus_state",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(v)
+    }
+
+    /// Wipe the per-group catch-up cursors. The next reconnect will not pass
+    /// `groupsToLastEventBatchIds`, and the syncer will see an empty state
+    /// and run the one-shot bootstrap.
+    pub fn clear_event_bus_state(&self) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM event_bus_state", [])?;
+        Ok(())
+    }
+
     /// Persist the last processed batch id for a group (event-bus catch-up
     /// resumes from this point on the next reconnect).
     pub fn set_event_bus_batch_id(
@@ -475,6 +497,23 @@ impl LocalStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Drop every cached mail row that belongs to `folder_id` and return
+    /// their element ids — the caller then deletes the matching .eml files.
+    /// Used by the event handler when a `MailSet` event tells us a folder
+    /// no longer exists on the server.
+    pub fn delete_folder_mails(&self, folder_id: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT element_id FROM mails WHERE folder_id = ?1")?;
+        let ids: Vec<String> = stmt
+            .query_map([folder_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !ids.is_empty() {
+            conn.execute("DELETE FROM mails WHERE folder_id = ?1", [folder_id])?;
+        }
+        Ok(ids)
     }
 
     /// Drop a mail entirely (metadata + .eml). Used by the event handler on a
@@ -633,6 +672,27 @@ mod tests {
     }
 
     #[test]
+    fn event_bus_state_min_updated_at_and_clear() {
+        let store = open_memory_store();
+        assert!(store.event_bus_state_min_updated_at_ms().unwrap().is_none());
+
+        store.set_event_bus_batch_id("g1", "b1").unwrap();
+        // First write: min == that row's timestamp; just assert presence.
+        let min1 = store.event_bus_state_min_updated_at_ms().unwrap();
+        assert!(min1.is_some());
+        // Sleep a millisecond so the next write has a strictly larger ts.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.set_event_bus_batch_id("g2", "b2").unwrap();
+        let min2 = store.event_bus_state_min_updated_at_ms().unwrap();
+        // Still the original (oldest) row.
+        assert_eq!(min1, min2);
+
+        store.clear_event_bus_state().unwrap();
+        assert!(store.load_event_bus_state().unwrap().is_empty());
+        assert!(store.event_bus_state_min_updated_at_ms().unwrap().is_none());
+    }
+
+    #[test]
     fn event_bus_state_roundtrip() {
         let store = open_memory_store();
         assert!(store.load_event_bus_state().unwrap().is_empty());
@@ -648,6 +708,22 @@ mod tests {
         store.set_event_bus_batch_id("group1", "batchB").unwrap();
         let s = store.load_event_bus_state().unwrap();
         assert_eq!(s.get("group1"), Some(&"batchB".to_string()));
+    }
+
+    #[test]
+    fn delete_folder_mails_returns_ids_and_drops_rows() {
+        let store = open_memory_store();
+        store.upsert_mail_metadata(&meta("a", "doomed", 1)).unwrap();
+        store.upsert_mail_metadata(&meta("b", "doomed", 2)).unwrap();
+        store.upsert_mail_metadata(&meta("c", "kept", 3)).unwrap();
+        let ids = store.delete_folder_mails("doomed").unwrap();
+        let mut ids = ids;
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(store.mail_count("doomed").unwrap(), 0);
+        assert_eq!(store.mail_count("kept").unwrap(), 1);
+        // No rows for an unknown folder, returns empty.
+        assert!(store.delete_folder_mails("missing").unwrap().is_empty());
     }
 
     #[test]

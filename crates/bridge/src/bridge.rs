@@ -8,13 +8,41 @@ use crate::sync::{self, MailStore};
 use crate::tuta::{self, MailBackend, TwoFactorCallback};
 use crate::{imap, smtp, tls};
 
-// Tuta `modelVersions=` for the event-bus URL. The server uses these to
-// validate compatibility. Keep in sync with the vendored SDK
-// (`tuta-sdk/.../type_models/{sys,tutanota}.json` `version`).
-const SYS_MODEL_VERSION: u32 = 150;
-const TUTANOTA_MODEL_VERSION: u32 = 108;
 /// Identifier the server uses for telemetry/rate-limit bucketing.
 const CLIENT_NAME: &str = "tutabridge";
+
+// Tuta `modelVersions=` for the event-bus URL. Read at compile-time from the
+// vendored SDK's type-model JSONs so the values track the submodule bump
+// automatically — no more hard-coded constants going stale silently.
+const SYS_TYPE_MODELS_JSON: &str =
+    include_str!("../../../tuta-repo/tuta-sdk/rust/sdk/src/type_models/sys.json");
+const TUTANOTA_TYPE_MODELS_JSON: &str =
+    include_str!("../../../tuta-repo/tuta-sdk/rust/sdk/src/type_models/tutanota.json");
+
+fn parse_model_version(json: &str) -> u32 {
+    // The SDK guarantees every entry of an app's type-model JSON carries the
+    // same `version` field, so reading any one entry is enough.
+    let v: serde_json::Value =
+        serde_json::from_str(json).expect("type model JSON is malformed (build-time include)");
+    v.as_object()
+        .and_then(|m| m.values().next())
+        .and_then(|first| first.get("version"))
+        .and_then(|x| x.as_u64())
+        .map(|x| x as u32)
+        .expect("type model JSON has no version field")
+}
+
+fn sys_model_version() -> u32 {
+    static V: std::sync::LazyLock<u32> =
+        std::sync::LazyLock::new(|| parse_model_version(SYS_TYPE_MODELS_JSON));
+    *V
+}
+
+fn tutanota_model_version() -> u32 {
+    static V: std::sync::LazyLock<u32> =
+        std::sync::LazyLock::new(|| parse_model_version(TUTANOTA_TYPE_MODELS_JSON));
+    *V
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum BridgeStatus {
@@ -166,12 +194,32 @@ impl BridgeHandle {
         // disk so the next reconnect resumes from the last processed batch.
         let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
             bus_base_url,
-            SYS_MODEL_VERSION,
-            TUTANOTA_MODEL_VERSION,
+            sys_model_version(),
+            tutanota_model_version(),
             tutasdk::CLIENT_VERSION.to_string(),
             CLIENT_NAME.to_string(),
         ));
         {
+            // OutOfSync detection: if the oldest cursor is older than the
+            // server's batch-replay window (~44 days), the server cannot
+            // catch us up — wipe the state so the syncer falls through to a
+            // bootstrap full sync.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let expire_ms = tutasdk::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
+            if let Ok(Some(min_ms)) = local_store.event_bus_state_min_updated_at_ms() {
+                if now_ms - min_ms > expire_ms {
+                    self.emit_log(
+                        "Cached event-bus state is older than 44 days — wiping and forcing a full re-sync",
+                    );
+                    if let Err(e) = local_store.clear_event_bus_state() {
+                        self.emit_log(&format!("Could not clear event_bus_state: {e}"));
+                    }
+                }
+            }
+
             let ids_handle = bus_client.last_batch_ids();
             match local_store.load_event_bus_state() {
                 Ok(s) if !s.is_empty() => {
@@ -299,5 +347,27 @@ impl BridgeHandle {
 
     fn emit_log(&self, msg: &str) {
         let _ = self.log_tx.send(msg.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_model_version_extracts_first_entry_version() {
+        let json = r#"{
+            "0": {"name":"Foo","app":"sys","version":150,"id":0},
+            "1": {"name":"Bar","app":"sys","version":150,"id":1}
+        }"#;
+        assert_eq!(parse_model_version(json), 150);
+    }
+
+    #[test]
+    fn sys_and_tutanota_model_versions_are_positive() {
+        // The included JSONs must always carry a positive version; if this
+        // ever returns 0 something is very wrong with the vendored SDK.
+        assert!(sys_model_version() > 0);
+        assert!(tutanota_model_version() > 0);
     }
 }

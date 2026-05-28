@@ -24,6 +24,9 @@ const TUTANOTA_APP: &str = "tutanota";
 const MAIL_TYPE_ID: i64 = 97;
 /// `MailSetEntry` entity — placement of a mail inside a folder/MailSet.
 const MAIL_SET_ENTRY_TYPE_ID: i64 = 1450;
+/// `MailSet` entity — the folder itself (custom folders are created/renamed/
+/// deleted by mutating MailSet entries).
+const MAIL_SET_TYPE_ID: i64 = 429;
 
 pub async fn run_event_handler(
 	store: Arc<MailStore>,
@@ -83,8 +86,8 @@ async fn process(
 
 /// Bucketed view of the mail-relevant entity updates inside a batch. The
 /// routing decision (which folders need a resync, which mails need a
-/// metadata refresh) is pure and has no I/O — that lets us test it in
-/// isolation.
+/// metadata refresh, whether the folder list itself changed) is pure and
+/// has no I/O — that lets us test it in isolation.
 #[cfg_attr(test, derive(Debug))]
 #[derive(Default)]
 struct Bucketed<'a> {
@@ -93,6 +96,10 @@ struct Bucketed<'a> {
 	folder_entry_lists: std::collections::HashSet<&'a str>,
 	/// Mail-entity updates (read/unread, subject, delete, …).
 	mail_events: Vec<&'a EntityUpdateEvent>,
+	/// A `MailSet` entity event arrived — the folder list itself changed
+	/// (custom folder created / renamed / deleted). Triggers a refresh of
+	/// `store.list_folders()` and a prune of folders no longer on the server.
+	folder_list_dirty: bool,
 }
 
 fn bucket_updates(updates: &[EntityUpdateEvent]) -> Bucketed<'_> {
@@ -106,6 +113,7 @@ fn bucket_updates(updates: &[EntityUpdateEvent]) -> Bucketed<'_> {
 				out.folder_entry_lists.insert(ev.instance_list_id.as_str());
 			},
 			MAIL_TYPE_ID => out.mail_events.push(ev),
+			MAIL_SET_TYPE_ID => out.folder_list_dirty = true,
 			_ => {},
 		}
 	}
@@ -122,7 +130,37 @@ async fn apply_batch(
 	let Bucketed {
 		folder_entry_lists,
 		mail_events,
+		folder_list_dirty,
 	} = bucket_updates(&batch.updates);
+
+	// A MailSet event means the user added / renamed / deleted a folder in
+	// the webmail. Refresh the list first so the subsequent MailSetEntry
+	// re-sync (below) sees any newly created folder, and prune folders that
+	// disappeared from the server.
+	if folder_list_dirty {
+		match backend.list_folders().await {
+			Ok(folders) => {
+				let known: std::collections::HashSet<String> =
+					folders.iter().map(|f| f.id.clone()).collect();
+				store.set_folder_list(folders).await;
+				let removed = store.prune_unknown_folders(&known).await;
+				for fid in &removed {
+					debug!("Event bus: folder {} removed", fid);
+					match local_store.delete_folder_mails(fid) {
+						Ok(ids) => {
+							for eid in &ids {
+								if let Err(e) = local_store.delete_eml(eid) {
+									warn!("Failed to delete cached eml {}: {}", eid, e);
+								}
+							}
+						},
+						Err(e) => warn!("Failed to delete folder cache {}: {}", fid, e),
+					}
+				}
+			},
+			Err(e) => warn!("MailSet event: folder list refresh failed: {e}"),
+		}
+	}
 
 	// Any MailSetEntry CREATE/DELETE on a folder's entries list is the
 	// canonical signal that the folder's contents changed. Re-running
@@ -267,12 +305,26 @@ mod tests {
 			ev("tutanota", MAIL_SET_ENTRY_TYPE_ID, "inbox_entries", "e1", Operation::Create),
 			ev("tutanota", MAIL_TYPE_ID, "mailL", "m1", Operation::Update),
 			ev("sys", 42, "X", "Y", Operation::Create), // ignored
-			ev("tutanota", 429, "folderL", "f1", Operation::Create), // MailSet — unhandled here
 		];
 		let out = bucket_updates(&updates);
 		assert_eq!(out.folder_entry_lists.len(), 1);
 		assert!(out.folder_entry_lists.contains("inbox_entries"));
 		assert_eq!(out.mail_events.len(), 1);
 		assert_eq!(out.mail_events[0].instance_id, "m1");
+		assert!(!out.folder_list_dirty);
+	}
+
+	#[test]
+	fn bucket_marks_folder_list_dirty_on_mail_set_event() {
+		// Any CRUD on a MailSet (folder entity) flips the dirty flag once.
+		let updates = vec![
+			ev("tutanota", MAIL_SET_TYPE_ID, "folderL", "f1", Operation::Create),
+			ev("tutanota", MAIL_SET_TYPE_ID, "folderL", "f2", Operation::Delete),
+		];
+		let out = bucket_updates(&updates);
+		assert!(out.folder_list_dirty);
+		// MailSet events themselves are not bucketed as mail/entry events.
+		assert!(out.folder_entry_lists.is_empty());
+		assert!(out.mail_events.is_empty());
 	}
 }
