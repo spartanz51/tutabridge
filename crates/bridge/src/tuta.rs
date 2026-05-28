@@ -169,7 +169,11 @@ impl TutaSession {
         limit: usize,
     ) -> Result<Vec<Mail>, ApiCallError> {
         // limit == 0 means "all": paginate the whole entries list. Otherwise
-        // load a single capped page (newest first).
+        // load a single page (newest first), capped at the server-side max of
+        // 1000 per request. A higher user-facing `sync_limit` (e.g. 2000)
+        // would need multi-page stitching here; for now we honor the cap and
+        // any excess is picked up by the realtime event bus.
+        const SERVER_LOAD_RANGE_MAX: usize = 1000;
         let entries: Vec<MailSetEntry> = if limit == 0 {
             self.crypto_client()
                 .load_all(entries_list_id, ListLoadDirection::DESC)
@@ -179,7 +183,7 @@ impl TutaSession {
                 .load_range(
                     entries_list_id,
                     &CustomId::default(),
-                    limit,
+                    limit.min(SERVER_LOAD_RANGE_MAX),
                     ListLoadDirection::DESC,
                 )
                 .await?
