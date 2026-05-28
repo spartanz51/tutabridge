@@ -8,7 +8,7 @@ use tutasdk::bindings::file_client::{FileClient, FileClientError};
 use tutasdk::bindings::rest_client::RestClient;
 use tutasdk::crypto_entity_client::CryptoEntityClient;
 use tutasdk::entities::generated::tutanota::{
-    DraftCreateData, DraftData, DraftRecipient, Mail, MailBox, MailDetails,
+    DraftCreateData, DraftData, DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob,
     MailSetEntry, SendDraftData, SendDraftParameters,
 };
 use tutasdk::folder_system::{FolderSystem, MailSetKind};
@@ -59,6 +59,13 @@ pub trait MailBackend: Send + Sync {
         &self,
         json: &str,
     ) -> Result<Option<MailSetEntry>, String>;
+    /// Inline-decrypt the `event.blob_instance` carried alongside a Mail
+    /// CREATE — that's the `MailDetailsBlob` (subject + body + recipients
+    /// envelope) the prefetch loop would otherwise have to fetch via REST.
+    async fn decrypt_inline_mail_details_blob(
+        &self,
+        json: &str,
+    ) -> Result<Option<MailDetails>, String>;
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String>;
     /// Enumerate all mail folders (system + custom, with hierarchy).
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
@@ -358,6 +365,20 @@ impl MailBackend for TutaSession {
         self.crypto_client()
             .decrypt_inline_and_parse::<MailSetEntry>(json)
             .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn decrypt_inline_mail_details_blob(
+        &self,
+        json: &str,
+    ) -> Result<Option<MailDetails>, String> {
+        // `event.blob_instance` is the encrypted MailDetailsBlob. We decrypt
+        // it through the same inline pipeline as the Mail itself and pull out
+        // its `details` aggregate, which is what consumers actually want.
+        self.crypto_client()
+            .decrypt_inline_and_parse::<MailDetailsBlob>(json)
+            .await
+            .map(|opt| opt.map(|blob| blob.details))
             .map_err(|e| format!("{e}"))
     }
 

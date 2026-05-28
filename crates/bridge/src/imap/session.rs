@@ -1471,6 +1471,12 @@ mod tests {
         ) -> Result<Option<tutasdk::entities::generated::tutanota::MailSetEntry>, String> {
             Ok(None)
         }
+        async fn decrypt_inline_mail_details_blob(
+            &self,
+            _json: &str,
+        ) -> Result<Option<MailDetails>, String> {
+            Ok(None)
+        }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
             let key = mail._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
             Ok(self.details.lock().unwrap().get(&key).cloned())
