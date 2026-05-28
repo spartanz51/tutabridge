@@ -168,25 +168,52 @@ impl TutaSession {
         entries_list_id: &tutasdk::GeneratedId,
         limit: usize,
     ) -> Result<Vec<Mail>, ApiCallError> {
-        // limit == 0 means "all": paginate the whole entries list. Otherwise
-        // load a single page (newest first), capped at the server-side max of
-        // 1000 per request. A higher user-facing `sync_limit` (e.g. 2000)
-        // would need multi-page stitching here; for now we honor the cap and
-        // any excess is picked up by the realtime event bus.
-        const SERVER_LOAD_RANGE_MAX: usize = 1000;
+        // The server rejects a single `load_range` with `count` > 1000 (400
+        // Bad request). For higher user-facing `sync_limit` we page through
+        // by 1000 each call, advancing the cursor with the last entry id of
+        // the previous page (DESC = newest first, oldest at the end). The
+        // `limit == 0` path delegates to `load_all` which already paginates.
+        const SERVER_PAGE: usize = 1000;
         let entries: Vec<MailSetEntry> = if limit == 0 {
             self.crypto_client()
                 .load_all(entries_list_id, ListLoadDirection::DESC)
                 .await?
-        } else {
+        } else if limit <= SERVER_PAGE {
             self.crypto_client()
                 .load_range(
                     entries_list_id,
                     &CustomId::default(),
-                    limit.min(SERVER_LOAD_RANGE_MAX),
+                    limit,
                     ListLoadDirection::DESC,
                 )
                 .await?
+        } else {
+            let mut out: Vec<MailSetEntry> = Vec::with_capacity(limit);
+            let mut start = CustomId::default();
+            while out.len() < limit {
+                let want = (limit - out.len()).min(SERVER_PAGE);
+                let page: Vec<MailSetEntry> = self
+                    .crypto_client()
+                    .load_range(entries_list_id, &start, want, ListLoadDirection::DESC)
+                    .await?;
+                let got = page.len();
+                if got == 0 {
+                    break;
+                }
+                // Use the last (oldest in DESC) entry's element id as the
+                // exclusive cursor for the next page.
+                let next_start = page
+                    .last()
+                    .and_then(|e| e._id.as_ref())
+                    .map(|id| id.element_id.clone());
+                out.extend(page);
+                if got < want {
+                    break; // server has no more
+                }
+                let Some(ns) = next_start else { break };
+                start = ns;
+            }
+            out
         };
 
         // Group entries by list_id for batch loading
