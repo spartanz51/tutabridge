@@ -434,17 +434,30 @@ async fn load_cached_folder(
         let mail: Mail = serde_json::from_str(&meta.mail_json)
             .map_err(|e| format!("Bad cached mail {}: {e}", meta.element_id))?;
 
-        let rfc2822 = if meta.has_details {
-            match local_store.read_eml(&meta.element_id) {
-                Ok(Some(eml)) => Some(eml),
-                Ok(None) => Some(mail_to_rfc2822(&mail, None)),
-                Err(e) => {
-                    warn!("Failed to read cached eml {}: {e}", meta.element_id);
-                    Some(mail_to_rfc2822(&mail, None))
+        // Always try to recover the full body from disk first — the `.eml`
+        // file is the source of truth and may exist even when the metadata
+        // row says otherwise (a schema migration drops the `mails` table but
+        // keeps the encrypted `.eml.enc` files, so `has_details` is reset to
+        // 0 on first boot after the migration). Self-heal the row when we
+        // find an orphaned body, so the prefetch loop knows to skip it on
+        // the next sweep.
+        let rfc2822 = match local_store.read_eml(&meta.element_id) {
+            Ok(Some(eml)) => {
+                if !meta.has_details {
+                    if let Err(e) = local_store.mark_has_details(&meta.element_id) {
+                        warn!(
+                            "Failed to heal has_details for {}: {e}",
+                            meta.element_id
+                        );
+                    }
                 }
-            }
-        } else {
-            Some(mail_to_rfc2822(&mail, None))
+                Some(eml)
+            },
+            Ok(None) => Some(mail_to_rfc2822(&mail, None)),
+            Err(e) => {
+                warn!("Failed to read cached eml {}: {e}", meta.element_id);
+                Some(mail_to_rfc2822(&mail, None))
+            },
         };
 
         stored_mails.push(StoredMail {
