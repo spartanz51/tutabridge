@@ -125,13 +125,61 @@ impl ImapSession {
             Some(f) => f,
             None => return vec![],
         };
-        let store_count = self.store.folder_count(&folder.id).await;
-        if store_count != self.mails.len() {
-            if self.refresh_mails(&folder.id).await.is_ok() {
-                return vec![format!("* {} EXISTS\r\n", self.mails.len())];
+
+        // Compare the new authoritative list against our session view by
+        // element id. Count-only diffing is not enough — a MOVE between two
+        // folders that share the same `sync_limit` window keeps the count
+        // constant while swapping one mail for another. We must detect set
+        // changes and signal them to the client (EXPUNGE for departed
+        // mails, EXISTS for the new count so the client refetches).
+        let new_list = self.store.get_folder(&folder.id).await;
+        let new_eids: std::collections::HashSet<String> = new_list
+            .iter()
+            .filter_map(|m| m.mail._id.as_ref().map(|id| id.element_id.to_string()))
+            .collect();
+
+        // EXPUNGE seqnos must reference the message numbers as they were
+        // **before** this update, so compute them against `self.mails`.
+        let mut expunges: Vec<u32> = Vec::new();
+        for (idx, m) in self.mails.iter().enumerate() {
+            if let Some(eid) = m.mail._id.as_ref().map(|id| id.element_id.to_string()) {
+                if !new_eids.contains(&eid) {
+                    expunges.push((idx as u32) + 1);
+                }
             }
         }
-        vec![]
+
+        let old_eids: std::collections::HashSet<String> = self
+            .mails
+            .iter()
+            .filter_map(|m| m.mail._id.as_ref().map(|id| id.element_id.to_string()))
+            .collect();
+        let added = new_list
+            .iter()
+            .filter(|m| {
+                m.mail
+                    ._id
+                    .as_ref()
+                    .map(|id| !old_eids.contains(&id.element_id.to_string()))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        if expunges.is_empty() && added == 0 && new_list.len() == self.mails.len() {
+            return vec![];
+        }
+
+        // Apply the new view, then notify. RFC 3501: EXPUNGEs go in
+        // descending seqno order so subsequent values are not shifted.
+        let _ = self.refresh_mails(&folder.id).await;
+
+        let mut responses = Vec::with_capacity(expunges.len() + 1);
+        expunges.sort_unstable_by(|a, b| b.cmp(a));
+        for s in expunges {
+            responses.push(format!("* {} EXPUNGE\r\n", s));
+        }
+        responses.push(format!("* {} EXISTS\r\n", self.mails.len()));
+        responses
     }
 
     pub async fn handle_command(&mut self, line: &str) -> Vec<String> {
@@ -1833,5 +1881,114 @@ mod tests {
         let resp = session.handle_command("A001 CAPABILITY").await;
         assert!(resp[0].contains("IMAP4rev1"));
         assert!(resp[0].contains("IDLE"));
+    }
+
+    // --- check_new_mail: push diff to the IDLE'd client ---
+
+    async fn session_on_inbox(mails: Vec<Mail>) -> (Arc<MailStore>, ImapSession) {
+        let backend = Arc::new(MockBackend::with_mails(mails.clone()));
+        let (store, mut session) = make_session(backend).await;
+        populate_store(&store, &mails).await;
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+        (store, session)
+    }
+
+    #[tokio::test]
+    async fn check_new_mail_quiet_when_set_unchanged() {
+        // Same mails, same order, same count → nothing to tell the client.
+        let m1 = make_mail("e1", "one", false);
+        let (_store, mut session) = session_on_inbox(vec![m1]).await;
+        let resp = session.check_new_mail().await;
+        assert!(resp.is_empty(), "expected no notifications, got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn check_new_mail_pushes_exists_on_growth() {
+        let m1 = make_mail("e1", "one", false);
+        let (store, mut session) = session_on_inbox(vec![m1.clone()]).await;
+        let m2 = make_mail("e2", "two", false);
+        store
+            .set_folder(
+                "inbox",
+                vec![
+                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 },
+                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2 },
+                ],
+            )
+            .await;
+        let resp = session.check_new_mail().await;
+        // No EXPUNGE — only an added mail. EXISTS reports the new total.
+        assert!(!resp.iter().any(|r| r.contains("EXPUNGE")), "got {resp:?}");
+        assert!(resp.iter().any(|r| r.contains("* 2 EXISTS")), "got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn check_new_mail_pushes_expunge_on_removal() {
+        let m1 = make_mail("e1", "one", false);
+        let m2 = make_mail("e2", "two", false);
+        let (store, mut session) = session_on_inbox(vec![m1.clone(), m2.clone()]).await;
+        // Drop m2 from the store — simulates a server-side delete arriving via
+        // the event bus.
+        store
+            .set_folder(
+                "inbox",
+                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 }],
+            )
+            .await;
+        let resp = session.check_new_mail().await;
+        // m2 was seqno 2 in the session view.
+        assert!(resp.iter().any(|r| r.contains("* 2 EXPUNGE")), "got {resp:?}");
+        assert!(resp.iter().any(|r| r.contains("* 1 EXISTS")), "got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn check_new_mail_pushes_swap_when_count_unchanged() {
+        // Regression test for the MOVE-between-folders bug: a fresh mail
+        // arrived (event bus) and an old one fell out of the sync_limit
+        // window. Total count stays the same, but the set changed — we must
+        // still notify so the client refetches.
+        let old1 = make_mail("e1", "one", false);
+        let old2 = make_mail("e2", "two", false);
+        let (store, mut session) = session_on_inbox(vec![old1.clone(), old2.clone()]).await;
+        let new3 = make_mail("e3", "three", false);
+        store
+            .set_folder(
+                "inbox",
+                vec![
+                    StoredMail { mail: old1, details: None, rfc2822: None, uid: 1 },
+                    StoredMail { mail: new3, details: None, rfc2822: None, uid: 3 },
+                ],
+            )
+            .await;
+        let resp = session.check_new_mail().await;
+        // e2 was at seqno 2 — must EXPUNGE it. Then EXISTS reports the
+        // (unchanged) count so the client refetches and discovers e3.
+        assert!(resp.iter().any(|r| r.contains("* 2 EXPUNGE")), "got {resp:?}");
+        assert!(resp.iter().any(|r| r.contains("* 2 EXISTS")), "got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn check_new_mail_expunges_in_descending_seqno() {
+        // RFC 3501: when several mails are expunged, seqnos must arrive in
+        // descending order so subsequent ones don't shift incorrectly.
+        let m1 = make_mail("e1", "1", false);
+        let m2 = make_mail("e2", "2", false);
+        let m3 = make_mail("e3", "3", false);
+        let (store, mut session) = session_on_inbox(vec![m1.clone(), m2, m3]).await;
+        // Only m1 survives; m2 and m3 are gone.
+        store
+            .set_folder(
+                "inbox",
+                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 }],
+            )
+            .await;
+        let resp = session.check_new_mail().await;
+        let expunge_idx_3 = resp.iter().position(|r| r.contains("* 3 EXPUNGE")).expect("missing 3");
+        let expunge_idx_2 = resp.iter().position(|r| r.contains("* 2 EXPUNGE")).expect("missing 2");
+        assert!(
+            expunge_idx_3 < expunge_idx_2,
+            "EXPUNGE 3 must come before EXPUNGE 2, got {resp:?}",
+        );
     }
 }
