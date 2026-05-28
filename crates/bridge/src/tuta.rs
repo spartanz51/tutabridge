@@ -48,6 +48,17 @@ pub trait MailBackend: Send + Sync {
     /// handler to fetch a freshly-created or updated mail without re-listing
     /// its folder. `Ok(None)` means the entity is no longer on the server.
     async fn load_mail(&self, list_id: &str, element_id: &str) -> Result<Option<Mail>, String>;
+    /// Decrypt the still-encrypted `event.instance` payload of a Mail event
+    /// directly (no REST round-trip). `Ok(None)` covers both "session key
+    /// transient" and "payload absent" so the handler can fall back to
+    /// `load_mail`.
+    async fn decrypt_inline_mail(&self, json: &str) -> Result<Option<Mail>, String>;
+    /// Same shape for a `MailSetEntry` event — gives the handler the
+    /// referenced `mail` IdTuple without ever asking the server.
+    async fn decrypt_inline_mail_set_entry(
+        &self,
+        json: &str,
+    ) -> Result<Option<MailSetEntry>, String>;
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String>;
     /// Enumerate all mail folders (system + custom, with hierarchy).
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
@@ -329,6 +340,23 @@ impl MailBackend for TutaSession {
 
     async fn load_mail(&self, list_id: &str, element_id: &str) -> Result<Option<Mail>, String> {
         self.load_mail_by_id(list_id, element_id)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn decrypt_inline_mail(&self, json: &str) -> Result<Option<Mail>, String> {
+        self.crypto_client()
+            .decrypt_inline_and_parse::<Mail>(json)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn decrypt_inline_mail_set_entry(
+        &self,
+        json: &str,
+    ) -> Result<Option<MailSetEntry>, String> {
+        self.crypto_client()
+            .decrypt_inline_and_parse::<MailSetEntry>(json)
             .await
             .map_err(|e| format!("{e}"))
     }

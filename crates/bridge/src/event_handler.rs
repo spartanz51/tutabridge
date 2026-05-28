@@ -286,19 +286,25 @@ async fn apply_mail_set_entry_create(
 		return;
 	}
 
-	// MISS path: never seen this mail. Ask the backend for just that one
-	// mail. Needs the Mail's `list_id` (≠ the folder's entries_list_id) —
-	// sniff it from any cached Mail (single-MailGroup is the common case;
-	// caller falls back if the cache is still empty).
-	let Some(list_id) = store.mail_list_id().await else {
+	// MISS path: never seen this mail. The MailSetEntry payload is
+	// inline in `event.instance`; decrypting it gives us the referenced
+	// Mail's full `(list_id, element_id)` directly, so we can ask the
+	// backend for just that one mail. No global mail-list-id cache, no
+	// `sync_folder` fallback needed in the typical case.
+	let mail_id_tuple = resolve_mail_set_entry(backend, ev).await;
+	let Some(mail_tuple) = mail_id_tuple else {
+		// Inline decode failed AND we have no cached mail to clone — the
+		// folder will be brought up-to-date by the safety-net sync below.
 		fallback_folders.insert(ev.instance_list_id.clone());
 		return;
 	};
-	match backend.load_mail(&list_id, &mail_eid).await {
+	let list_id = mail_tuple.list_id.to_string();
+	let elem_id = mail_tuple.element_id.to_string();
+	match backend.load_mail(&list_id, &elem_id).await {
 		Ok(Some(mail)) => {
 			debug!(
 				"Event bus: targeted load_mail({}, {}) → {} (1 REST call)",
-				list_id, mail_eid, target_folder.imap_path
+				list_id, elem_id, target_folder.imap_path
 			);
 			let mut stored = StoredMail {
 				mail,
@@ -306,19 +312,38 @@ async fn apply_mail_set_entry_create(
 				rfc2822: None,
 				uid: 0,
 			};
-			assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
+			assign_uid_and_upsert(store, local_store, target_folder, &elem_id, &mut stored).await;
 		},
 		Ok(None) => {
-			debug!("MailSetEntry CREATE: mail {} not found on server", mail_eid);
+			debug!("MailSetEntry CREATE: mail {} not found on server", elem_id);
 		},
 		Err(e) => {
 			warn!(
 				"MailSetEntry CREATE: load_mail({}, {}) failed: {e} — falling back",
-				list_id, mail_eid
+				list_id, elem_id
 			);
 			fallback_folders.insert(ev.instance_list_id.clone());
 		},
 	}
+}
+
+/// Try to discover the Mail referenced by a `MailSetEntry` CREATE event
+/// without a REST round-trip. Preferred path: decrypt `event.instance`
+/// inline (the entry carries `mail: IdTupleGenerated`). Falls back to the
+/// in-memory cache by entry-id-derived mail id — if neither works, the
+/// caller queues a fallback `sync_folder`.
+async fn resolve_mail_set_entry(
+	backend: &dyn MailBackend,
+	ev: &EntityUpdateEvent,
+) -> Option<tutasdk::IdTupleGenerated> {
+	if let Some(json) = ev.instance.as_deref() {
+		match backend.decrypt_inline_mail_set_entry(json).await {
+			Ok(Some(entry)) => return Some(entry.mail),
+			Ok(None) => debug!("MailSetEntry inline: session key unresolved"),
+			Err(e) => warn!("MailSetEntry inline decrypt failed: {e}"),
+		}
+	}
+	None
 }
 
 async fn apply_mail_set_entry_delete(
@@ -378,30 +403,78 @@ async fn apply_mail_event(
 			}
 			store.remove_mail_everywhere(&ev.instance_id).await;
 		},
-		Operation::Update => match backend.load_mail(&ev.instance_list_id, &ev.instance_id).await {
-			Ok(Some(mail)) => {
-				store.refresh_mail_in_place(&mail).await;
-				let mail_json = serde_json::to_string(&mail).unwrap_or_default();
-				if let Err(e) = local_store.refresh_mail_fields(
-					&ev.instance_id,
-					&mail.subject,
-					&mail.sender.name,
-					&mail.sender.address,
-					mail.unread,
-					&mail_json,
-				) {
-					debug!("Could not refresh metadata for {}: {}", ev.instance_id, e);
-				}
-			},
-			Ok(None) => {
-				// Disappeared between event and our follow-up load — treat
-				// like a delete.
-				let _ = local_store.delete_mail(&ev.instance_id);
-				store.remove_mail_everywhere(&ev.instance_id).await;
-			},
-			Err(e) => warn!("Mail UPDATE: failed to load {}: {}", ev.instance_id, e),
+		Operation::Update => {
+			// Prefer the inline-decrypt path: the encrypted Mail is already
+			// in `event.instance`, no REST round-trip needed. Fall back to
+			// `load_mail` if the payload is absent or its session key is in a
+			// transient unresolvable state (e.g. post-reply attachment keys).
+			let mail = resolve_mail(backend, ev).await;
+			match mail {
+				Some(mail) => {
+					store.refresh_mail_in_place(&mail).await;
+					let mail_json = serde_json::to_string(&mail).unwrap_or_default();
+					if let Err(e) = local_store.refresh_mail_fields(
+						&ev.instance_id,
+						&mail.subject,
+						&mail.sender.name,
+						&mail.sender.address,
+						mail.unread,
+						&mail_json,
+					) {
+						debug!("Could not refresh metadata for {}: {}", ev.instance_id, e);
+					}
+				},
+				None => {
+					// Disappeared / unresolvable — treat like a delete to
+					// keep the cache consistent.
+					let _ = local_store.delete_mail(&ev.instance_id);
+					store.remove_mail_everywhere(&ev.instance_id).await;
+				},
+			}
 		},
 		Operation::Create | Operation::Other(_) => {},
+	}
+}
+
+/// Decrypt-inline first, REST-fallback second. Centralises the policy so
+/// every event-bus consumer takes the same fast path when the payload is
+/// already inline, and the same safety-net otherwise.
+async fn resolve_mail(
+	backend: &dyn MailBackend,
+	ev: &EntityUpdateEvent,
+) -> Option<tutasdk::entities::generated::tutanota::Mail> {
+	if let Some(json) = ev.instance.as_deref() {
+		match backend.decrypt_inline_mail(json).await {
+			Ok(Some(mail)) => {
+				debug!(
+					"Event bus: decrypted Mail {} inline (no REST)",
+					ev.instance_id
+				);
+				return Some(mail);
+			},
+			Ok(None) => {
+				debug!(
+					"Event bus: Mail {} session key unresolvable, falling back to load_mail",
+					ev.instance_id
+				);
+			},
+			Err(e) => {
+				warn!(
+					"Event bus: decrypt_inline_mail({}) failed: {e} — falling back",
+					ev.instance_id
+				);
+			},
+		}
+	}
+	match backend
+		.load_mail(&ev.instance_list_id, &ev.instance_id)
+		.await
+	{
+		Ok(opt) => opt,
+		Err(e) => {
+			warn!("Event bus: load_mail({}) failed: {e}", ev.instance_id);
+			None
+		},
 	}
 }
 

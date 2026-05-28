@@ -1460,6 +1460,17 @@ mod tests {
                 })
                 .cloned())
         }
+        async fn decrypt_inline_mail(&self, _json: &str) -> Result<Option<Mail>, String> {
+            // Tests stub: the inline path is exercised by handler tests with
+            // an explicit recorded payload, not through the mock's body.
+            Ok(None)
+        }
+        async fn decrypt_inline_mail_set_entry(
+            &self,
+            _json: &str,
+        ) -> Result<Option<tutasdk::entities::generated::tutanota::MailSetEntry>, String> {
+            Ok(None)
+        }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
             let key = mail._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
             Ok(self.details.lock().unwrap().get(&key).cloned())

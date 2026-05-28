@@ -32,11 +32,6 @@ pub struct MailStore {
     folder_list: RwLock<Vec<FolderInfo>>,
     generation: watch::Sender<u64>,
     gen_counter: std::sync::atomic::AtomicU64,
-    /// Cached `Mail.list_id` for this user. A user has one (per `MailGroup`)
-    /// and every Mail in the cache shares it; we sniff it lazily from any
-    /// existing Mail so the event handler can `load_mail` brand-new mail
-    /// ids without re-listing a folder.
-    mail_list_id_cache: RwLock<Option<String>>,
 }
 
 impl MailStore {
@@ -47,7 +42,6 @@ impl MailStore {
             folder_list: RwLock::new(Vec::new()),
             generation: tx,
             gen_counter: std::sync::atomic::AtomicU64::new(0),
-            mail_list_id_cache: RwLock::new(None),
         })
     }
 
@@ -237,26 +231,6 @@ impl MailStore {
         }
         drop(folders);
         self.bump_generation();
-    }
-
-    /// Return the cached `Mail.list_id` for this user, sniffing it from any
-    /// Mail already in the store on first call. `None` only if the store
-    /// is still empty (very first boot, no mail seen yet).
-    pub async fn mail_list_id(&self) -> Option<String> {
-        if let Some(cached) = self.mail_list_id_cache.read().await.clone() {
-            return Some(cached);
-        }
-        let folders = self.folders.read().await;
-        let sniffed = folders.values().find_map(|mails| {
-            mails
-                .iter()
-                .find_map(|m| m.mail._id.as_ref().map(|id| id.list_id.to_string()))
-        });
-        drop(folders);
-        if let Some(id) = &sniffed {
-            *self.mail_list_id_cache.write().await = Some(id.clone());
-        }
-        sniffed
     }
 
     /// Drop in-memory state for folders that are no longer on the server.
@@ -925,24 +899,6 @@ mod tests {
         assert_eq!(store.get_folder("A").await.len(), 2);
     }
 
-    #[tokio::test]
-    async fn mail_list_id_sniffs_lazily_and_caches() {
-        let store = MailStore::new();
-        // No mails yet — nothing to sniff.
-        assert!(store.mail_list_id().await.is_none());
-        store
-            .set_folder("A", vec![stored(make_mail("listAAA", "e1", "s", true), 1)])
-            .await;
-        assert_eq!(store.mail_list_id().await.as_deref(), Some("listAAA"));
-        // Now the cache is populated — calling again returns the same value
-        // even if the store changes (cache is intentionally sticky for a
-        // session; a different list_id would only appear with a different
-        // MailGroup, which forces a full restart anyway).
-        store
-            .set_folder("A", vec![stored(make_mail("listBBB", "e1", "s", true), 1)])
-            .await;
-        assert_eq!(store.mail_list_id().await.as_deref(), Some("listAAA"));
-    }
 
     #[tokio::test]
     async fn prune_unknown_folders_drops_disappeared_ones() {
