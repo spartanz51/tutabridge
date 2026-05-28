@@ -69,7 +69,7 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
     }
 }
 
-fn split_headers_body(raw: &str) -> (String, String) {
+pub(super) fn split_headers_body(raw: &str) -> (String, String) {
     if let Some(pos) = raw.find("\r\n\r\n") {
         (raw[..pos].to_string(), raw[pos + 4..].to_string())
     } else if let Some(pos) = raw.find("\n\n") {
@@ -79,7 +79,7 @@ fn split_headers_body(raw: &str) -> (String, String) {
     }
 }
 
-fn parse_headers(header_section: &str) -> Vec<(String, String)> {
+pub(super) fn parse_headers(header_section: &str) -> Vec<(String, String)> {
     let mut headers = Vec::new();
     let mut current_name = String::new();
     let mut current_value = String::new();
@@ -102,7 +102,7 @@ fn parse_headers(header_section: &str) -> Vec<(String, String)> {
     headers
 }
 
-fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
+pub(super) fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
     headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
 }
 
@@ -221,7 +221,7 @@ fn decode_q_encoding(s: &str) -> String {
     String::from_utf8(result).unwrap_or_else(|_| s.to_string())
 }
 
-fn extract_boundary(content_type: &str) -> Option<String> {
+pub(super) fn extract_boundary(content_type: &str) -> Option<String> {
     let lower = content_type.to_lowercase();
     if let Some(pos) = lower.find("boundary=") {
         let rest = &content_type[pos + 9..];
@@ -338,7 +338,7 @@ fn extract_param(header: &str, key: &str) -> Option<String> {
     }
 }
 
-fn split_mime_parts(body: &str, boundary: &str) -> Vec<String> {
+pub(super) fn split_mime_parts(body: &str, boundary: &str) -> Vec<String> {
     let delimiter = format!("--{}", boundary);
     let end_delimiter = format!("--{}--", boundary);
     let mut parts = Vec::new();
