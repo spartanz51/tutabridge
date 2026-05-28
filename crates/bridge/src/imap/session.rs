@@ -394,12 +394,16 @@ impl ImapSession {
                         self.mails[idx].details.as_ref(),
                     );
                     self.mails[idx].rfc2822 = Some(rfc);
-                } else if self.mails[idx].details.is_none() {
+                } else if self.mails[idx].rfc2822.is_none() {
                     log::warn!(
-                        "No details for uid={}, body will be placeholder",
+                        "No body for uid={}, will serve headers-only placeholder",
                         self.mails[idx].uid,
                     );
                 }
+                // If `rfc2822` is already populated (Phase 0 read it from
+                // disk), there is nothing else to do — the body will be
+                // served from it; `details` being None is normal and not a
+                // placeholder situation.
             }
 
             let cached = &self.mails[idx];
