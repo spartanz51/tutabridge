@@ -24,6 +24,7 @@ branch = one commit, rebasable on `upstream/master`.
 | `sdk-folder-system` | Rebuild `FolderSystem` tree (system/custom/nested), add `MailSetKind` Label/Imported/Scheduled + accessors | — | [spartanz51#4](https://github.com/spartanz51/tutanota/pull/4) | no (held) | no | yes (custom folders listed + read over IMAP) |
 | `sdk-move-mails` | `MailFacade.move_mails` (move to an arbitrary folder via `MoveMailService`) | — | [spartanz51#5](https://github.com/spartanz51/tutanota/pull/5) | no (held) | no | yes (IMAP MOVE between folders) |
 | `sdk-event-bus` | WebSocket `EventBusClient` (`/event?…`) — realtime entity updates with catch-up via `groupsToLastEventBatchIds`, plus observable `WsState` | — | — | no (held) | no | yes (live-tested over Phase 2/3 bridge integration, 26 unit tests) |
+| `sdk-mail-set-entry-id` | `mail_set_entry_id::{construct, deconstruct}` — encode/decode `MailSetEntry._id` (4-byte truncated timestamp + 9-byte raw Mail id, base64url-no-pad) | — | — | no (held) | no | will be (consumed by the bridge realtime delta optimisation; 8 unit tests, TS test vector asserted) |
 
 ## Notes per branch
 
@@ -65,6 +66,19 @@ stack; gated behind the existing `net` feature. 26 unit tests cover URL
 building, wire parsing, reconnect logic and state-broadcast behaviour.
 Live-tested as part of the bridge realtime sync (Phase 2/3).
 
+### sdk-mail-set-entry-id
+**Held — not submitted upstream.** New module `mail_set_entry_id` exposing
+`construct(receive_date, mail_id) -> CustomId` and the inverse
+`deconstruct(custom_id) -> Result<(DateTime, GeneratedId), _>`. Mirrors the
+TypeScript helpers in `src/platform-kit/meta/EntityUtils.ts` — a
+`MailSetEntry._id.element_id` is a 13-byte buffer (4 bytes of timestamp
+shifted right by 10 bits, then 9 raw bytes of the referenced `Mail.element_id`)
+encoded as base64url-no-pad. Knowing the encoding lets a realtime consumer
+extract the mail id directly from a `MailSetEntry` CREATE/DELETE event
+without an extra REST round-trip. 8 unit tests assert the TS test vector
+verbatim plus round-trip and four error shapes. Submit upstream once a real
+SDK consumer (the bridge realtime delta path) ships using it.
+
 ## Rebasing on a newer upstream
 
 ```
@@ -78,9 +92,10 @@ git rebase upstream/master sdk-2fa-session
 git rebase upstream/master sdk-folder-system
 git rebase upstream/master sdk-move-mails
 git rebase upstream/master sdk-event-bus
+git rebase upstream/master sdk-mail-set-entry-id
 # rebuild the integration branch from the rebased branches
 git checkout -B tutabridge-integration upstream/master
-git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus
+git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id
 ```
 
 When an upstream PR merges, drop that branch from the cherry-pick list — the
