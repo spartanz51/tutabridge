@@ -264,15 +264,30 @@ impl TutaSession {
         &self,
         mail: &Mail,
     ) -> Result<Option<MailDetails>, ApiCallError> {
-        if mail.mailDetails.is_some() {
-            match self.logged_in.mail_facade().load_mail_details_blob(mail).await {
+        // Tuta stores a mail's body in two different places depending on
+        // whether the mail is received or a draft. Match the TS routing
+        // (`isDraft(mail) ? loadMailDetailsDraft : loadMailDetailsBlob`).
+        let mail_facade = self.logged_in.mail_facade();
+        if mail.mailDetailsDraft.is_some() {
+            match mail_facade.load_mail_details_draft(mail).await {
+                Ok(details) => Ok(Some(details)),
+                Err(e) => {
+                    log::error!("Failed to load mail details draft: {e}");
+                    Err(e)
+                },
+            }
+        } else if mail.mailDetails.is_some() {
+            match mail_facade.load_mail_details_blob(mail).await {
                 Ok(details) => Ok(Some(details)),
                 Err(e) => {
                     log::error!("Failed to load mail details blob: {e}");
                     Err(e)
-                }
+                },
             }
         } else {
+            // Legacy mail without either reference — body lives nowhere we
+            // know how to read. The prefetch layer treats `Ok(None)` as
+            // "render with headers only, do not retry".
             Ok(None)
         }
     }

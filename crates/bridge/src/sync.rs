@@ -615,7 +615,20 @@ async fn prefetch_details(
                 }
             }
             Ok(None) => {
-                debug!("No details for mail {:?}", mail.subject);
+                // The mail references neither a `MailDetailsBlob` nor a
+                // `MailDetailsDraft` (legacy / malformed). Persist a
+                // headers-only `.eml` and mark the row done so we don't
+                // re-attempt every prefetch sweep.
+                let rfc2822 = mail_to_rfc2822(mail, None);
+                if let Some(id) = mail._id.as_ref() {
+                    let eid = id.element_id.to_string();
+                    if let Err(e) = local_store.write_eml(&eid, &rfc2822) {
+                        warn!("Failed to cache headers-only eml {}: {}", eid, e);
+                    }
+                    if let Err(e) = local_store.mark_has_details(&eid) {
+                        warn!("Failed to mark has_details {}: {}", eid, e);
+                    }
+                }
             }
             Err(e) => {
                 warn!("Failed to prefetch details for {:?}: {}", mail.subject, e);
