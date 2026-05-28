@@ -18,6 +18,7 @@ fn main() {
 
     let handle = BridgeHandle::new();
     let log_rx = handle.subscribe_logs();
+    let stats_rx = handle.subscribe_stats();
     let shared = Arc::new(Mutex::new(handle));
 
     tauri::Builder::default()
@@ -38,6 +39,12 @@ fn main() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 stream_logs(app_handle, log_rx).await;
+            });
+
+            let app_handle = app.handle().clone();
+            let stats_state = app.state::<BridgeState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                stream_stats(app_handle, stats_rx, stats_state).await;
             });
 
             let state = app.state::<BridgeState>().inner().clone();
@@ -72,6 +79,36 @@ async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
     let mut handle = state.lock().await;
     if let Err(e) = handle.start(cfg, None, None).await {
         log::warn!("Auto-start failed: {e}");
+    }
+}
+
+async fn stream_stats(
+    app: tauri::AppHandle,
+    mut rx: tokio::sync::broadcast::Receiver<()>,
+    state: BridgeState,
+) {
+    use tauri::Emitter;
+    // Emit a single snapshot covering both bridge status and stats. Status
+    // transitions (start / stop) and stats changes (new mail, ws state) all
+    // pulse the same channel, so the UI replaces its periodic poll with one
+    // listen per topic.
+    async fn emit_snapshot(app: &tauri::AppHandle, state: &BridgeState) {
+        let handle = state.lock().await;
+        let status = handle.status().await;
+        let stats = handle.stats().await;
+        drop(handle);
+        let _ = app.emit("bridge://stats", &stats);
+        let _ = app.emit("bridge://status", &status);
+    }
+
+    emit_snapshot(&app, &state).await;
+    loop {
+        match rx.recv().await {
+            Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                emit_snapshot(&app, &state).await;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
     }
 }
 

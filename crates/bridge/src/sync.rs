@@ -12,8 +12,6 @@ use crate::tuta::{FolderInfo, MailBackend};
 
 const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
 const INTER_FOLDER_DELAY: Duration = Duration::from_millis(300);
-/// Pause between background body-prefetch sweeps.
-const PREFETCH_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RETRIES: u32 = 3;
 
 #[derive(Clone)]
@@ -384,14 +382,19 @@ pub async fn run_syncer(
     info!("Mail syncer shutting down");
 }
 
-/// Slow loop: progressively prefetch mail bodies in the background, on its own
-/// cadence so it never delays `list_sync_loop`.
+/// Event-driven background prefetch. Wakes whenever the `MailStore`'s
+/// generation counter changes (a new mail arrived, a sync finished, …) and
+/// catches up any folder that still has bodies missing. When the store is
+/// quiet — every Mail has its `.eml` cached, no folder mutations in flight —
+/// the loop sleeps indefinitely on the watch channel; no timer-driven
+/// polling.
 async fn prefetch_loop(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut store_watch = store.subscribe();
     loop {
         if *shutdown.borrow() {
             return;
@@ -403,8 +406,11 @@ async fn prefetch_loop(
             prefetch_details(store, local_store, backend, &folder).await;
         }
 
+        // Wait for the store to change again (or shutdown). `changed()` on a
+        // freshly-borrowed receiver returns immediately if a bump happened
+        // during the prefetch pass above, so we never miss a generation.
         tokio::select! {
-            _ = tokio::time::sleep(PREFETCH_INTERVAL) => {}
+            _ = store_watch.changed() => {}
             _ = shutdown.changed() => return,
         }
     }

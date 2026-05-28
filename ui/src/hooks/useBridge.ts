@@ -1,10 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Config, BridgeStatus, BridgeStats } from "../types";
 
 const MAX_LOG_LINES = 500;
-const POLL_INTERVAL = 1000;
 
 export function useBridge() {
   const [config, setConfig] = useState<Config | null>(null);
@@ -18,7 +17,6 @@ export function useBridge() {
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(() => {
     invoke<BridgeStatus>("get_status").then(setStatus);
@@ -31,9 +29,13 @@ export function useBridge() {
     invoke<string | null>("get_bridge_password").then(setBridgePassword);
     refresh();
 
-    pollRef.current = setInterval(refresh, POLL_INTERVAL);
+    // The bridge pushes `bridge://stats` and `bridge://status` whenever
+    // anything changes (mail count, ws state, start/stop). No setInterval.
+    const unlistenStats = listen<BridgeStats>("bridge://stats", (e) => setStats(e.payload));
+    const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => setStatus(e.payload));
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      unlistenStats.then((fn) => fn());
+      unlistenStatus.then((fn) => fn());
     };
   }, [refresh]);
 
