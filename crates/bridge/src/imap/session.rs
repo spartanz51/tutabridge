@@ -754,11 +754,14 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
     }
 
     if items_upper.contains("BODYSTRUCTURE") {
-        let size = cached.rfc2822.as_ref().map(|r| r.len()).unwrap_or(0);
-        parts.push(format!(
-            "BODYSTRUCTURE (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"BASE64\" {} 0)",
-            size
-        ));
+        let bs = cached
+            .rfc2822
+            .as_ref()
+            .map(|r| crate::mail::compute_bodystructure(r))
+            .unwrap_or_else(|| {
+                "(\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"BASE64\" 0 0)".to_owned()
+            });
+        parts.push(format!("BODYSTRUCTURE {}", bs));
     }
 
     if items_upper.contains("BODY[]") || items_upper.contains("BODY.PEEK[]") {
