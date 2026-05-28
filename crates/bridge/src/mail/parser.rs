@@ -1,5 +1,14 @@
 use base64::Engine;
 
+/// One parsed file attachment from an incoming RFC 2822 message — the
+/// minimum the bridge needs to forward it to Tuta as a `DraftAttachment`.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ParsedMessage {
@@ -10,6 +19,7 @@ pub struct ParsedMessage {
     pub bcc: Vec<(String, String)>,
     pub subject: String,
     pub body_html: String,
+    pub attachments: Vec<Attachment>,
 }
 
 pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
@@ -38,10 +48,13 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         .unwrap_or_default()
         .to_lowercase();
 
-    let body_html = if content_type.to_lowercase().contains("multipart/") {
-        extract_multipart_body(&body_section, &content_type)
+    let (body_html, attachments) = if content_type.to_lowercase().contains("multipart/") {
+        extract_multipart_body_and_attachments(&body_section, &content_type)
     } else {
-        decode_body(&body_section, &content_transfer_encoding, &content_type.to_lowercase())
+        (
+            decode_body(&body_section, &content_transfer_encoding, &content_type.to_lowercase()),
+            Vec::new(),
+        )
     };
 
     ParsedMessage {
@@ -52,6 +65,7 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         bcc,
         subject,
         body_html,
+        attachments,
     }
 }
 
@@ -223,15 +237,23 @@ fn extract_boundary(content_type: &str) -> Option<String> {
     None
 }
 
-fn extract_multipart_body(body: &str, content_type: &str) -> String {
+/// Walk a multipart MIME body, picking up:
+///   * the user-facing HTML (or plain) body (first non-attachment text part);
+///   * every part that looks like a file attachment (non-text, or a part
+///     with `Content-Disposition: attachment` / a `name=` in its Content-Type).
+fn extract_multipart_body_and_attachments(
+    body: &str,
+    content_type: &str,
+) -> (String, Vec<Attachment>) {
     let boundary = match extract_boundary(content_type) {
         Some(b) => b,
-        None => return body.to_string(),
+        None => return (body.to_string(), Vec::new()),
     };
 
     let parts = split_mime_parts(body, &boundary);
     let mut html_part = None;
     let mut text_part = None;
+    let mut attachments: Vec<Attachment> = Vec::new();
 
     for part in &parts {
         let (part_headers_str, part_body) = split_headers_body(part);
@@ -240,23 +262,80 @@ fn extract_multipart_body(body: &str, content_type: &str) -> String {
         let part_cte = get_header(&part_headers, "content-transfer-encoding")
             .unwrap_or_default()
             .to_lowercase();
+        let part_cd = get_header(&part_headers, "content-disposition").unwrap_or_default();
         let part_ct_lower = part_ct.to_lowercase();
+        let part_cd_lower = part_cd.to_lowercase();
+
+        let is_attachment = part_cd_lower.contains("attachment")
+            || (extract_param(&part_ct, "name").is_some()
+                && !part_ct_lower.contains("text/"));
 
         if part_ct_lower.contains("multipart/") {
-            let nested = extract_multipart_body(&part_body, &part_ct);
-            if !nested.is_empty() {
-                return nested;
+            let (nested_body, nested_atts) =
+                extract_multipart_body_and_attachments(&part_body, &part_ct);
+            if html_part.is_none() && !nested_body.is_empty() {
+                html_part = Some(nested_body);
             }
-        } else if part_ct_lower.contains("text/html") {
+            attachments.extend(nested_atts);
+        } else if is_attachment {
+            let data = match part_cte.as_str() {
+                cte if cte.contains("base64") => {
+                    let clean: String = part_body.chars().filter(|c| !c.is_whitespace()).collect();
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&clean)
+                        .unwrap_or_default()
+                },
+                cte if cte.contains("quoted-printable") => {
+                    decode_quoted_printable(&part_body).into_bytes()
+                },
+                _ => part_body.as_bytes().to_vec(),
+            };
+            let filename = extract_param(&part_cd, "filename")
+                .or_else(|| extract_param(&part_ct, "name"))
+                .unwrap_or_else(|| "attachment.bin".to_owned());
+            let filename = decode_header_value(&filename);
+            let mime_type = part_ct
+                .split(';')
+                .next()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "application/octet-stream".to_owned());
+            attachments.push(Attachment {
+                filename,
+                mime_type,
+                data,
+            });
+        } else if part_ct_lower.contains("text/html") && html_part.is_none() {
             html_part = Some(decode_body(&part_body, &part_cte, &part_ct_lower));
-        } else if part_ct_lower.contains("text/plain") && html_part.is_none() {
+        } else if part_ct_lower.contains("text/plain") && html_part.is_none() && text_part.is_none() {
             text_part = Some(decode_body(&part_body, &part_cte, &part_ct_lower));
         }
     }
 
-    html_part
-        .or(text_part)
-        .unwrap_or_else(|| body.to_string())
+    let body = html_part.or(text_part).unwrap_or_else(|| body.to_string());
+    (body, attachments)
+}
+
+/// Pull a `key=value` parameter out of a header value such as a Content-Type
+/// (`text/plain; charset="UTF-8"; name="doc.pdf"`). Handles both quoted and
+/// unquoted forms; returns `None` if the parameter is absent.
+fn extract_param(header: &str, key: &str) -> Option<String> {
+    let lower = header.to_lowercase();
+    let needle = format!("{}=", key.to_lowercase());
+    let pos = lower.find(&needle)?;
+    let rest = &header[pos + needle.len()..];
+    let value = if rest.starts_with('"') {
+        rest[1..].split('"').next().unwrap_or("")
+    } else {
+        rest.split(|c: char| c == ';' || c.is_whitespace())
+            .next()
+            .unwrap_or("")
+    };
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 fn split_mime_parts(body: &str, boundary: &str) -> Vec<String> {
@@ -468,6 +547,42 @@ mod tests {
             extract_boundary("multipart/mixed; boundary=abc123"),
             Some("abc123".to_string())
         );
+    }
+
+    #[test]
+    fn test_multipart_with_attachment_extracts_both_body_and_file() {
+        let body = b"this is a fake pdf";
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(body);
+        let raw = format!(
+            "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nContent-Type: multipart/mixed; boundary=\"xx\"\r\n\r\n--xx\r\nContent-Type: text/html\r\n\r\n<p>HTML body</p>\r\n--xx\r\nContent-Type: application/pdf; name=\"doc.pdf\"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"doc.pdf\"\r\n\r\n{}\r\n--xx--",
+            body_b64
+        );
+        let msg = parse_rfc2822(&raw);
+        assert!(msg.body_html.contains("HTML body"));
+        assert_eq!(msg.attachments.len(), 1);
+        let att = &msg.attachments[0];
+        assert_eq!(att.filename, "doc.pdf");
+        assert_eq!(att.mime_type, "application/pdf");
+        assert_eq!(att.data, body);
+    }
+
+    #[test]
+    fn test_multipart_attachment_without_filename_uses_content_type_name() {
+        let raw = "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nContent-Type: multipart/mixed; boundary=\"yy\"\r\n\r\n--yy\r\nContent-Type: text/plain\r\n\r\nbody\r\n--yy\r\nContent-Type: image/png; name=\"avatar.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\nUE5HSEVBREVS\r\n--yy--";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "avatar.png");
+        assert_eq!(msg.attachments[0].mime_type, "image/png");
+        assert_eq!(msg.attachments[0].data, b"PNGHEADER");
+    }
+
+    #[test]
+    fn test_multipart_alternative_ignores_alternative_parts_as_attachments() {
+        let raw = "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nContent-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n--alt\r\nContent-Type: text/plain\r\n\r\nplain body\r\n--alt\r\nContent-Type: text/html\r\n\r\n<p>HTML body</p>\r\n--alt--";
+        let msg = parse_rfc2822(raw);
+        // text/html and text/plain alternatives must not be picked up as attachments
+        assert!(msg.attachments.is_empty());
+        assert!(msg.body_html.contains("HTML body"));
     }
 
     #[test]

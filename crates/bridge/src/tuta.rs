@@ -7,10 +7,14 @@ use crypto_primitives::randomizer_facade::RandomizerFacade;
 use tutasdk::bindings::file_client::{FileClient, FileClientError};
 use tutasdk::bindings::rest_client::RestClient;
 use tutasdk::crypto_entity_client::CryptoEntityClient;
+use tutasdk::blobs::blob_facade::FileData;
+use tutasdk::entities::generated::sys::BlobReferenceTokenWrapper;
 use tutasdk::entities::generated::tutanota::{
-    DraftCreateData, DraftData, DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob,
-    MailSetEntry, SendDraftData, SendDraftParameters, TutanotaFile,
+    AttachmentKeyData, DraftAttachment, DraftCreateData, DraftData, DraftRecipient, Mail, MailBox,
+    MailDetails, MailDetailsBlob, MailSetEntry, NewDraftAttachment, SendDraftData,
+    SendDraftParameters, TutanotaFile,
 };
+use tutasdk::tutanota_constants::ArchiveDataType;
 use tutasdk::folder_system::{FolderSystem, MailSetKind};
 use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
 use tutasdk::services::ExtraServiceParams;
@@ -319,6 +323,125 @@ impl TutaSession {
         Ok(out)
     }
 
+    /// Encrypt + upload every attachment in one go, then assemble the
+    /// `DraftAttachment` aggregates the `DraftService` needs. Returns the
+    /// aggregates in the same order as `attachments`, paired with each
+    /// file's plaintext session key so the later `SendDraftService` call can
+    /// hand it to the server.
+    async fn build_added_attachments(
+        &self,
+        attachments: &[crate::mail::Attachment],
+        mail_group_id: &tutasdk::GeneratedId,
+        mail_group_key: &GenericAesKey,
+        mail_group_key_version: u64,
+        randomizer: &RandomizerFacade,
+    ) -> Result<(Vec<DraftAttachment>, Vec<GenericAesKey>), ApiCallError> {
+        if attachments.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let session_keys: Vec<GenericAesKey> = (0..attachments.len())
+            .map(|_| Aes256Key::generate(randomizer).into())
+            .collect();
+
+        let file_data: Vec<FileData> = attachments
+            .iter()
+            .zip(session_keys.iter())
+            .map(|(att, sk)| FileData {
+                session_key: sk.clone(),
+                data: att.data.as_slice(),
+            })
+            .collect();
+
+        let tokens_per_file: Vec<Vec<BlobReferenceTokenWrapper>> = self
+            .logged_in
+            .blob_facade()
+            .encrypt_and_upload_multiple(
+                ArchiveDataType::Attachments,
+                mail_group_id,
+                file_data.iter(),
+            )
+            .await?;
+
+        if tokens_per_file.len() != attachments.len() {
+            return Err(ApiCallError::internal(format!(
+                "blob upload returned {} token sets for {} attachments",
+                tokens_per_file.len(),
+                attachments.len()
+            )));
+        }
+
+        let mut drafts: Vec<DraftAttachment> = Vec::with_capacity(attachments.len());
+        for ((att, file_sk), tokens) in attachments
+            .iter()
+            .zip(session_keys.iter())
+            .zip(tokens_per_file.into_iter())
+        {
+            let enc_file_name = file_sk
+                .encrypt_data(att.filename.as_bytes(), Iv::generate(randomizer))
+                .map_err(|e| {
+                    ApiCallError::internal(format!("Failed to encrypt attachment name: {e}"))
+                })?;
+            let enc_mime_type = file_sk
+                .encrypt_data(att.mime_type.as_bytes(), Iv::generate(randomizer))
+                .map_err(|e| {
+                    ApiCallError::internal(format!(
+                        "Failed to encrypt attachment mime type: {e}"
+                    ))
+                })?;
+            let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, Iv::generate(randomizer));
+
+            let new_draft = NewDraftAttachment {
+                _id: Some(random_custom_id(randomizer)),
+                encFileName: enc_file_name,
+                encMimeType: enc_mime_type,
+                encCid: None,
+                referenceTokens: tokens,
+            };
+            drafts.push(DraftAttachment {
+                _id: Some(random_custom_id(randomizer)),
+                ownerEncFileSessionKey: owner_enc_file_sk,
+                ownerKeyVersion: mail_group_key_version as i64,
+                newFile: Some(new_draft),
+                existingFile: None,
+            });
+        }
+
+        Ok((drafts, session_keys))
+    }
+
+    /// After `DraftService` succeeds, the saved Mail's `attachments` Vec
+    /// holds the freshly-allocated `File` IdTuples (in the same order as
+    /// the `addedAttachments` we just submitted). Reload the Mail, zip
+    /// those IdTuples with our local session keys, and produce the
+    /// `AttachmentKeyData[]` the server expects from `SendDraftService`.
+    async fn build_attachment_key_data(
+        &self,
+        draft_id: &IdTupleGenerated,
+        session_keys: &[GenericAesKey],
+        randomizer: &RandomizerFacade,
+    ) -> Result<Vec<AttachmentKeyData>, ApiCallError> {
+        let mail: Mail = self.crypto_client().load(draft_id).await?;
+        if mail.attachments.len() != session_keys.len() {
+            return Err(ApiCallError::internal(format!(
+                "DraftService returned {} attachments but we uploaded {}",
+                mail.attachments.len(),
+                session_keys.len()
+            )));
+        }
+        Ok(mail
+            .attachments
+            .into_iter()
+            .zip(session_keys.iter())
+            .map(|(file_id, sk)| AttachmentKeyData {
+                _id: Some(random_custom_id(randomizer)),
+                bucketEncFileSessionKey: None,
+                fileSessionKey: Some(sk.as_bytes().to_vec()),
+                file: file_id,
+            })
+            .collect())
+    }
+
     async fn send_mail_impl(&self, msg: &ParsedMessage) -> Result<(), ApiCallError> {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
         let session_key: GenericAesKey = Aes256Key::generate(&randomizer).into();
@@ -337,7 +460,22 @@ impl TutaSession {
             group_key.object.encrypt_key(&session_key, Iv::generate(&randomizer));
         let owner_key_version = group_key.version as i64;
 
-        let draft_data = build_draft_data(msg, &self.email);
+        // Upload every attachment first — the resulting `DraftAttachment`
+        // aggregates ride along inside `DraftData.addedAttachments`, and we
+        // stash each per-file session key in `attachment_keys` so the later
+        // `SendDraftService` call can hand it to the server in
+        // `attachmentKeyData[]`.
+        let (added_attachments, attachment_keys) = self
+            .build_added_attachments(
+                &msg.attachments,
+                &mail_group_id,
+                &group_key.object,
+                group_key.version,
+                &randomizer,
+            )
+            .await?;
+
+        let draft_data = build_draft_data(msg, &self.email, added_attachments);
 
         let create_data = DraftCreateData {
             _format: 0,
@@ -362,12 +500,28 @@ impl TutaSession {
 
         log::info!("Draft created: {:?}", draft_return.draft);
 
+        // To populate `attachmentKeyData[]` we need each File entity's
+        // IdTuple — the server allocated those when the draft was created.
+        // We load the freshly-saved Mail just to read its `attachments`
+        // field (order matches our `addedAttachments`) and zip with the
+        // session keys we generated earlier.
+        let attachment_key_data = if attachment_keys.is_empty() {
+            Vec::new()
+        } else {
+            self.build_attachment_key_data(&draft_return.draft, &attachment_keys, &randomizer)
+                .await?
+        };
+
         let parameters_id = CustomId(
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(randomizer.generate_random_array::<4>()),
         );
-        let send_data =
-            build_send_draft_data(session_key.as_bytes().to_vec(), draft_return.draft, parameters_id);
+        let send_data = build_send_draft_data(
+            session_key.as_bytes().to_vec(),
+            draft_return.draft,
+            parameters_id,
+            attachment_key_data,
+        );
 
         let send_return = executor
             .post::<SendDraftService>(send_data, ExtraServiceParams::default())
@@ -767,7 +921,11 @@ fn build_draft_recipients(recipients: &[(String, String)]) -> Vec<DraftRecipient
 /// Mirrors the web client: the body goes into both `bodyText` and
 /// `compressedBodyText`, and empty sender/recipient names fall back to the
 /// address (an empty name makes `SendDraftService` fail).
-fn build_draft_data(msg: &ParsedMessage, sender_email: &str) -> DraftData {
+fn build_draft_data(
+    msg: &ParsedMessage,
+    sender_email: &str,
+    added_attachments: Vec<DraftAttachment>,
+) -> DraftData {
     DraftData {
         _id: None,
         subject: msg.subject.clone(),
@@ -784,11 +942,20 @@ fn build_draft_data(msg: &ParsedMessage, sender_email: &str) -> DraftData {
         toRecipients: build_draft_recipients(&msg.to),
         ccRecipients: build_draft_recipients(&msg.cc),
         bccRecipients: build_draft_recipients(&msg.bcc),
-        addedAttachments: vec![],
+        addedAttachments: added_attachments,
         removedAttachments: vec![],
         replyTos: vec![],
         _errors: Default::default(),
     }
+}
+
+/// Build a random 4-byte `CustomId` — used for `_id` on aggregates that
+/// declare `cardinality: One`. Server never reads the value.
+fn random_custom_id(randomizer: &RandomizerFacade) -> CustomId {
+    CustomId(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(randomizer.generate_random_array::<4>()),
+    )
 }
 
 /// Build the `SendDraftData` for sending a previously created draft.
@@ -802,6 +969,7 @@ fn build_send_draft_data(
     session_key_bytes: Vec<u8>,
     draft_id: IdTupleGenerated,
     parameters_id: CustomId,
+    attachment_key_data: Vec<AttachmentKeyData>,
 ) -> SendDraftData {
     SendDraftData {
         _format: 0,
@@ -816,7 +984,7 @@ fn build_send_draft_data(
         allowUndo: false,
         internalRecipientKeyData: vec![],
         secureExternalRecipientKeyData: vec![],
-        attachmentKeyData: vec![],
+        attachmentKeyData: attachment_key_data.clone(),
         mail: draft_id.clone(),
         symEncInternalRecipientKeyData: vec![],
         parameters: Some(SendDraftParameters {
@@ -832,7 +1000,7 @@ fn build_send_draft_data(
             internalRecipientKeyData: vec![],
             secureExternalRecipientKeyData: vec![],
             symEncInternalRecipientKeyData: vec![],
-            attachmentKeyData: vec![],
+            attachmentKeyData: attachment_key_data,
         }),
     }
 }
@@ -850,12 +1018,13 @@ mod send_tests {
             bcc: vec![],
             subject: "Hi".to_string(),
             body_html: "<p>hello</p>".to_string(),
+            attachments: vec![],
         }
     }
 
     #[test]
     fn draft_data_puts_body_in_both_fields() {
-        let d = build_draft_data(&sample_msg(), "me@tuta.io");
+        let d = build_draft_data(&sample_msg(), "me@tuta.io", vec![]);
         assert_eq!(d.bodyText, "<p>hello</p>");
         assert_eq!(d.compressedBodyText.as_deref(), Some("<p>hello</p>"));
         assert!(!d.confidential);
@@ -866,13 +1035,13 @@ mod send_tests {
     fn draft_data_empty_sender_name_falls_back_to_address() {
         let mut msg = sample_msg();
         msg.from_name = String::new();
-        let d = build_draft_data(&msg, "me@tuta.io");
+        let d = build_draft_data(&msg, "me@tuta.io", vec![]);
         assert_eq!(d.senderName, "me@tuta.io");
     }
 
     #[test]
     fn draft_data_keeps_non_empty_sender_name() {
-        let d = build_draft_data(&sample_msg(), "me@tuta.io");
+        let d = build_draft_data(&sample_msg(), "me@tuta.io", vec![]);
         assert_eq!(d.senderName, "Me");
     }
 
@@ -897,7 +1066,7 @@ mod send_tests {
         );
         let pid = CustomId("aggId".to_string());
         let sk = vec![1u8, 2, 3, 4];
-        let sd = build_send_draft_data(sk.clone(), draft_id.clone(), pid.clone());
+        let sd = build_send_draft_data(sk.clone(), draft_id.clone(), pid.clone(), vec![]);
 
         // top-level
         assert!(!sd.plaintext);
