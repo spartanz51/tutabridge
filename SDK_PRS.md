@@ -23,6 +23,7 @@ branch = one commit, rebasable on `upstream/master`.
 | `sdk-2fa-session` | Interactive 2FA: `initiate_session`, `authenticate_with_second_factor_totp`, `is_second_factor_pending`, `cancel_create_session` | [tutao#10871](https://github.com/tutao/tutanota/pull/10871) | — | yes (open) | no | yes (full TOTP login) |
 | `sdk-folder-system` | Rebuild `FolderSystem` tree (system/custom/nested), add `MailSetKind` Label/Imported/Scheduled + accessors | — | [spartanz51#4](https://github.com/spartanz51/tutanota/pull/4) | no (held) | no | yes (custom folders listed + read over IMAP) |
 | `sdk-move-mails` | `MailFacade.move_mails` (move to an arbitrary folder via `MoveMailService`) | — | [spartanz51#5](https://github.com/spartanz51/tutanota/pull/5) | no (held) | no | yes (IMAP MOVE between folders) |
+| `sdk-event-bus` | WebSocket `EventBusClient` (`/event?…`) — realtime entity updates with catch-up via `groupsToLastEventBatchIds` | — | — | no (held) | no | not yet (24 unit tests, bridge integration is Phase 2) |
 
 ## Notes per branch
 
@@ -48,6 +49,19 @@ custom/nested folder support in the bridge. Live-tested in the bridge: custom
 folders are listed and read over IMAP (the `custom-folders` bridge change keys
 everything by folder id).
 
+### sdk-event-bus
+**Held — not submitted upstream.** Port of
+`src/common/api/worker/EventBusClient.ts`: WebSocket client for `/event?…`,
+reconnect/backoff matching the TS close-code semantics, catch-up of missed
+batches via the `groupsToLastEventBatchIds` query param. Entity-update batches
+are decoded from the server's untyped wire format into a small typed
+`EntityUpdateBatch` (the other message kinds stay as raw `serde_json::Value`
+since the bridge does not need them yet — consumers can apply the SDK's type
+machinery if they want a typed view). New dependency: `tokio-tungstenite`
+configured to reuse the existing rustls stack; gated behind the existing `net`
+feature. 24 unit tests cover URL building, wire parsing and reconnect logic.
+Submit upstream only after a working bridge integration (Phase 2).
+
 ## Rebasing on a newer upstream
 
 ```
@@ -59,9 +73,11 @@ git rebase upstream/master sdk-load-multiple
 git rebase upstream/master sdk-blob-element-reading
 git rebase upstream/master sdk-2fa-session
 git rebase upstream/master sdk-folder-system
+git rebase upstream/master sdk-move-mails
+git rebase upstream/master sdk-event-bus
 # rebuild the integration branch from the rebased branches
 git checkout -B tutabridge-integration upstream/master
-git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system
+git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus
 ```
 
 When an upstream PR merges, drop that branch from the cherry-pick list — the
