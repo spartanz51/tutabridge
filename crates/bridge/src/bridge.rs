@@ -290,13 +290,24 @@ impl BridgeHandle {
             let mut store_watch = store.subscribe();
             let mut ws_watch = bus_client.state();
             let mut shutdown_watch = shutdown_sync_rx.clone();
+            // Track the previous WS state so we only log on transitions,
+            // not on every internal `publish()` (some calls re-set the same
+            // state).
+            let mut last_ws_state = *ws_watch.borrow();
             tokio::spawn(async move {
                 // Initial pulse so a subscriber sees the freshly-started state.
                 let _ = stats_dirty.send(());
                 loop {
                     tokio::select! {
                         _ = store_watch.changed() => { let _ = stats_dirty.send(()); }
-                        _ = ws_watch.changed() => { let _ = stats_dirty.send(()); }
+                        _ = ws_watch.changed() => {
+                            let now = *ws_watch.borrow();
+                            if now != last_ws_state {
+                                log::info!("ws state: {:?} → {:?}", last_ws_state, now);
+                                last_ws_state = now;
+                            }
+                            let _ = stats_dirty.send(());
+                        }
                         _ = shutdown_watch.changed() => return,
                     }
                 }
