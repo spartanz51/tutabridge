@@ -331,9 +331,19 @@ async fn apply_mail_set_entry_create(
 			target_folder.imap_path,
 			if details.is_some() { ", body inline too" } else { "" },
 		);
-		let rfc2822 = details
-			.as_ref()
-			.map(|d| crate::mail::mail_to_rfc2822(&mail, Some(d), &[]));
+		// Render the inline body to an RFC 2822 envelope only when the mail
+		// has zero attachments — those need a separate blob download per
+		// File that the event-bus handler cannot do synchronously. Mails
+		// with attachments stay at `has_details=0` so the prefetch loop
+		// picks them up and emits a proper `multipart/mixed` envelope.
+		let has_attachments = !mail.attachments.is_empty();
+		let rfc2822 = details.as_ref().and_then(|d| {
+			if has_attachments {
+				None
+			} else {
+				Some(crate::mail::mail_to_rfc2822(&mail, Some(d), &[]))
+			}
+		});
 		let mut stored = StoredMail {
 			mail,
 			details: details.clone(),
@@ -342,7 +352,7 @@ async fn apply_mail_set_entry_create(
 		};
 		// Persist the body straight away so the IMAP layer can serve FETCH
 		// BODY[] without a placeholder, and the prefetch loop skips it.
-		if let (Some(eml), true) = (rfc2822.as_deref(), details.is_some()) {
+		if let Some(eml) = rfc2822.as_deref() {
 			if let Err(e) = local_store.write_eml(&mail_eid, eml) {
 				warn!("Failed to cache eml for {}: {e}", mail_eid);
 			} else if let Err(e) = local_store.mark_has_details(&mail_eid) {
