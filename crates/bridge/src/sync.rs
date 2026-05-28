@@ -32,6 +32,11 @@ pub struct MailStore {
     folder_list: RwLock<Vec<FolderInfo>>,
     generation: watch::Sender<u64>,
     gen_counter: std::sync::atomic::AtomicU64,
+    /// Cached `Mail.list_id` for this user. A user has one (per `MailGroup`)
+    /// and every Mail in the cache shares it; we sniff it lazily from any
+    /// existing Mail so the event handler can `load_mail` brand-new mail
+    /// ids without re-listing a folder.
+    mail_list_id_cache: RwLock<Option<String>>,
 }
 
 impl MailStore {
@@ -42,6 +47,7 @@ impl MailStore {
             folder_list: RwLock::new(Vec::new()),
             generation: tx,
             gen_counter: std::sync::atomic::AtomicU64::new(0),
+            mail_list_id_cache: RwLock::new(None),
         })
     }
 
@@ -143,6 +149,114 @@ impl MailStore {
         if changed {
             self.bump_generation();
         }
+    }
+
+    /// Find a mail by element id across all folders. Returns the source
+    /// folder id and a clone of the [`StoredMail`] entry — letting the
+    /// event handler reuse the already-decrypted Mail/details when the
+    /// same mail just hopped between two cached folders, no REST round-trip.
+    pub async fn find_mail_anywhere(&self, element_id: &str) -> Option<(String, StoredMail)> {
+        let folders = self.folders.read().await;
+        for (fid, mails) in folders.iter() {
+            for m in mails {
+                if m.mail
+                    ._id
+                    .as_ref()
+                    .map(|id| id.element_id.to_string())
+                    .as_deref()
+                    == Some(element_id)
+                {
+                    return Some((fid.clone(), m.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// `true` if any folder still references this mail. Used after a
+    /// per-folder removal to decide whether the cached `.eml` can go.
+    pub async fn is_mail_anywhere(&self, element_id: &str) -> bool {
+        let folders = self.folders.read().await;
+        folders.values().any(|mails| {
+            mails.iter().any(|m| {
+                m.mail
+                    ._id
+                    .as_ref()
+                    .map(|id| id.element_id.to_string())
+                    .as_deref()
+                    == Some(element_id)
+            })
+        })
+    }
+
+    /// Remove a single mail from one specific folder. Returns `true` if a
+    /// row was actually removed (the mail might already be gone from this
+    /// folder if we are reprocessing an event).
+    pub async fn remove_mail_from_folder(&self, folder_id: &str, element_id: &str) -> bool {
+        let mut folders = self.folders.write().await;
+        let Some(mails) = folders.get_mut(folder_id) else {
+            return false;
+        };
+        let before = mails.len();
+        mails.retain(|m| {
+            m.mail
+                ._id
+                .as_ref()
+                .map(|id| id.element_id.to_string())
+                .as_deref()
+                != Some(element_id)
+        });
+        let changed = mails.len() != before;
+        drop(folders);
+        if changed {
+            self.bump_generation();
+        }
+        changed
+    }
+
+    /// Insert or replace a mail in `folder_id`. Replace-by-element-id keeps
+    /// the operation idempotent — re-applying the same event leaves the
+    /// store unchanged.
+    pub async fn upsert_mail_in_folder(&self, folder_id: &str, mail: StoredMail) {
+        let Some(eid) = mail.mail._id.as_ref().map(|id| id.element_id.to_string()) else {
+            return;
+        };
+        let mut folders = self.folders.write().await;
+        let entries = folders.entry(folder_id.to_string()).or_default();
+        if let Some(slot) = entries.iter_mut().find(|m| {
+            m.mail
+                ._id
+                .as_ref()
+                .map(|id| id.element_id.to_string())
+                .as_deref()
+                == Some(&eid)
+        }) {
+            *slot = mail;
+        } else {
+            entries.push(mail);
+        }
+        drop(folders);
+        self.bump_generation();
+    }
+
+    /// Return the cached `Mail.list_id` for this user, sniffing it from any
+    /// Mail already in the store on first call. `None` only if the store
+    /// is still empty (very first boot, no mail seen yet).
+    pub async fn mail_list_id(&self) -> Option<String> {
+        if let Some(cached) = self.mail_list_id_cache.read().await.clone() {
+            return Some(cached);
+        }
+        let folders = self.folders.read().await;
+        let sniffed = folders.values().find_map(|mails| {
+            mails
+                .iter()
+                .find_map(|m| m.mail._id.as_ref().map(|id| id.list_id.to_string()))
+        });
+        drop(folders);
+        if let Some(id) = &sniffed {
+            *self.mail_list_id_cache.write().await = Some(id.clone());
+        }
+        sniffed
     }
 
     /// Drop in-memory state for folders that are no longer on the server.
@@ -550,7 +664,7 @@ where
     unreachable!()
 }
 
-fn mail_to_metadata(mail: &Mail, folder_id: &str, uid: u32) -> MailMetadata {
+pub(crate) fn mail_to_metadata(mail: &Mail, folder_id: &str, uid: u32) -> MailMetadata {
     let (list_id, element_id) = mail
         ._id
         .as_ref()
@@ -728,6 +842,106 @@ mod tests {
             .await;
         store.remove_mail_everywhere("unknown").await;
         assert_eq!(store.get_folder("folderA").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn find_mail_anywhere_returns_first_match() {
+        let store = MailStore::new();
+        store
+            .set_folder("A", vec![stored(make_mail("L1", "shared", "x", true), 7)])
+            .await;
+        store
+            .set_folder("B", vec![stored(make_mail("L1", "shared", "x", true), 11)])
+            .await;
+        let found = store.find_mail_anywhere("shared").await.expect("must find");
+        assert!(found.0 == "A" || found.0 == "B");
+        assert_eq!(
+            found.1.mail._id.as_ref().unwrap().element_id.to_string(),
+            "shared"
+        );
+        assert!(store.find_mail_anywhere("missing").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn is_mail_anywhere_reflects_presence() {
+        let store = MailStore::new();
+        store
+            .set_folder("A", vec![stored(make_mail("L1", "e1", "s", true), 1)])
+            .await;
+        assert!(store.is_mail_anywhere("e1").await);
+        assert!(!store.is_mail_anywhere("e2").await);
+    }
+
+    #[tokio::test]
+    async fn remove_mail_from_folder_only_touches_that_folder() {
+        let store = MailStore::new();
+        store
+            .set_folder(
+                "A",
+                vec![
+                    stored(make_mail("L1", "k", "keep", true), 1),
+                    stored(make_mail("L1", "g", "gone", true), 2),
+                ],
+            )
+            .await;
+        store
+            .set_folder("B", vec![stored(make_mail("L1", "g", "gone", true), 5)])
+            .await;
+
+        let removed = store.remove_mail_from_folder("A", "g").await;
+        assert!(removed);
+        assert_eq!(store.get_folder("A").await.len(), 1);
+        // B still has the mail — `remove_mail_from_folder` is scoped.
+        assert_eq!(store.get_folder("B").await.len(), 1);
+        // Idempotent: re-removing the same mail from A is a no-op.
+        assert!(!store.remove_mail_from_folder("A", "g").await);
+    }
+
+    #[tokio::test]
+    async fn upsert_mail_in_folder_replaces_existing_by_element_id() {
+        let store = MailStore::new();
+        store
+            .set_folder("A", vec![stored(make_mail("L1", "e1", "old", true), 4)])
+            .await;
+        store
+            .upsert_mail_in_folder("A", stored(make_mail("L1", "e1", "new", false), 4))
+            .await;
+        let mails = store.get_folder("A").await;
+        // Same element_id → replaced in place, no duplicate.
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].mail.subject, "new");
+        assert!(!mails[0].mail.unread);
+    }
+
+    #[tokio::test]
+    async fn upsert_mail_in_folder_appends_when_new() {
+        let store = MailStore::new();
+        store
+            .set_folder("A", vec![stored(make_mail("L1", "e1", "one", true), 1)])
+            .await;
+        store
+            .upsert_mail_in_folder("A", stored(make_mail("L1", "e2", "two", true), 2))
+            .await;
+        assert_eq!(store.get_folder("A").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mail_list_id_sniffs_lazily_and_caches() {
+        let store = MailStore::new();
+        // No mails yet — nothing to sniff.
+        assert!(store.mail_list_id().await.is_none());
+        store
+            .set_folder("A", vec![stored(make_mail("listAAA", "e1", "s", true), 1)])
+            .await;
+        assert_eq!(store.mail_list_id().await.as_deref(), Some("listAAA"));
+        // Now the cache is populated — calling again returns the same value
+        // even if the store changes (cache is intentionally sticky for a
+        // session; a different list_id would only appear with a different
+        // MailGroup, which forces a full restart anyway).
+        store
+            .set_folder("A", vec![stored(make_mail("listBBB", "e1", "s", true), 1)])
+            .await;
+        assert_eq!(store.mail_list_id().await.as_deref(), Some("listAAA"));
     }
 
     #[tokio::test]
