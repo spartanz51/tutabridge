@@ -27,6 +27,7 @@ branch = one commit, rebasable on `upstream/master`.
 | `sdk-mail-set-entry-id` | `mail_set_entry_id::{construct, deconstruct}` — encode/decode `MailSetEntry._id` (4-byte truncated timestamp + 9-byte raw Mail id, base64url-no-pad) | — | — | no (held) | no | yes (consumed by the bridge realtime delta optimisation; 8 unit tests, TS test vector asserted) |
 | `sdk-inline-decrypt` | `CryptoEntityClient::decrypt_inline_and_parse<T>` — decrypt an entity payload arriving inline via the event bus, with no REST round-trip; `EntityClient::parse_raw` helper | — | — | no (held) | no | yes (consumed by the bridge realtime path to skip `load_mail` on every Mail UPDATE / new mail; 3 integration tests against the live decryption fixture) |
 | `sdk-mail-draft-details` | `MailFacade::load_mail_details_draft` — load + decrypt the `MailDetailsDraft` of a draft `Mail` (session key from the parent `Mail`); `CryptoEntityClient::load_encrypted` accessor for the no-auto-decrypt fetch step | — | — | no (held) | no | yes (consumed by the bridge prefetch loop so drafts get a proper body instead of the "No details for mail" spam; 3 contract unit tests) |
+| `sdk-blob-download-and-decrypt` | `BlobFacade::download_and_decrypt` — fetch a TutanotaFile's blobs in one request per archive, retry once on 403, decrypt with session key, concatenate in input order. `MailFacade::load_file_attachment_data` resolves the file's session key from `_ownerEncSessionKey` first. `parse_multiple_blobs_response` decodes the binary `[count][blobId|hash|size|data]…` wire format. | — | — | no (held) | no | yes (consumed by the bridge prefetch to surface attachments as `multipart/mixed`; 6 parser unit tests) |
 
 ## Notes per branch
 
@@ -105,6 +106,31 @@ draft id, refuses a missing `_ownerEncSessionKey`). Live-tested in the
 bridge prefetch path so drafts get a body instead of the "No details
 for mail" log spam.
 
+### sdk-blob-download-and-decrypt
+**Held — not submitted upstream.** `BlobFacade::download_and_decrypt`
+is the binary-content counterpart of `load_blob_element` introduced in
+[[sdk-blob-element-reading]]: `load_blob_element` fetches an
+entity-style blob (e.g. `MailDetailsBlob` — JSON envelope of an
+encrypted entity stored on a blob archive), while this new method
+fetches the raw encrypted bytes of one or more `Blob` chunks (e.g. the
+contents of a `TutanotaFile` attachment), decrypts each chunk with the
+caller-supplied session key, and concatenates them in input order.
+Mirrors the TS `BlobFacade.downloadAndDecrypt` →
+`downloadAndDecryptMultipleBlobsOfArchives` →
+`downloadBlobsOfOneArchive` pipeline: per-archive grouping, one
+`GET /rest/storage/blobservice` per archive with the `BlobGetIn` body
+JSON-mapped through the existing instance pipeline, retry-once on
+`NotAuthorizedError`, and binary response parsing.
+`parse_multiple_blobs_response` decodes the wire format `[#blobs:i32]
+([blobId:9][hash:6][size:i32][data])*` and exposes a `HashMap<GeneratedId,
+Vec<u8>>`. `MailFacade::load_file_attachment_data` is a small convenience
+on top that resolves the file's session key from `_ownerEncSessionKey`
+the same way `load_mail_details_blob` does for `MailDetailsBlob`. 6 unit
+tests pin down the parser (empty, single, multi, short buffer,
+truncated entry, negative count). Live-tested in the bridge so
+`mail.attachments` is surfaced over IMAP as `multipart/mixed` rather
+than dropped.
+
 ### sdk-inline-decrypt
 **Held — not submitted upstream.** `CryptoEntityClient::decrypt_inline_and_parse<T>`
 takes the still-encrypted JSON delivered inside a WebSocket
@@ -141,13 +167,16 @@ git rebase upstream/master sdk-move-mails
 git rebase upstream/master sdk-event-bus
 git rebase upstream/master sdk-mail-set-entry-id
 git rebase upstream/master sdk-inline-decrypt
+# `sdk-blob-download-and-decrypt` is currently a single commit on top of
+# `tutabridge-integration`; once the blob branch lands upstream it can be
+# extracted into its own rebasable branch off `upstream/master`.
 # `sdk-mail-draft-details` is stacked on `sdk-blob-element-reading` (it
 # depends on `decrypt_with_owner_key`). Rebase it onto the rebased blob
 # branch so it stays linear:
 git rebase sdk-blob-element-reading sdk-mail-draft-details
 # rebuild the integration branch from the rebased branches
 git checkout -B tutabridge-integration upstream/master
-git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id sdk-inline-decrypt sdk-mail-draft-details
+git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id sdk-inline-decrypt sdk-mail-draft-details sdk-blob-download-and-decrypt
 ```
 
 When an upstream PR merges, drop that branch from the cherry-pick list — the
