@@ -312,15 +312,61 @@ impl TutaSession {
         if mail.attachments.is_empty() {
             return Ok(Vec::new());
         }
-        let crypto_client = self.crypto_client();
         let mail_facade = self.logged_in.mail_facade();
         let mut out: Vec<(TutanotaFile, Vec<u8>)> = Vec::with_capacity(mail.attachments.len());
         for file_id in &mail.attachments {
-            let file: TutanotaFile = crypto_client.load(file_id).await?;
+            let file = self.load_file_with_retry(file_id).await?;
             let data = mail_facade.load_file_attachment_data(&file).await?;
             out.push((file, data));
         }
         Ok(out)
+    }
+
+    /// Load a `TutanotaFile` entity, retrying with backoff when the server
+    /// returns it before its encryption metadata has propagated.
+    ///
+    /// Mails delivered through the realtime event bus typically include
+    /// freshly-created attachments whose `_ownerEncSessionKey` /
+    /// `_ownerGroup` haven't been published yet — the SDK's session-key
+    /// resolution then fails with "instance missing owner key/group data".
+    /// 1s + 3s + 6s ≈ 10s of tolerance covers the propagation lag in
+    /// practice; anything still failing after that bubbles up so the
+    /// `prefetch_details` caller can decide to ship a body-only envelope.
+    async fn load_file_with_retry(
+        &self,
+        file_id: &IdTupleGenerated,
+    ) -> Result<TutanotaFile, ApiCallError> {
+        let crypto_client = self.crypto_client();
+        let backoffs = [
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(6),
+        ];
+        let mut iter = backoffs.iter();
+        loop {
+            match crypto_client.load::<TutanotaFile, _>(file_id).await {
+                Ok(file) => return Ok(file),
+                Err(e) if is_session_key_transient(&e) => match iter.next() {
+                    Some(delay) => {
+                        log::debug!(
+                            "File {} not yet decryptable, retrying in {:?}",
+                            file_id.element_id,
+                            delay
+                        );
+                        tokio::time::sleep(*delay).await;
+                        continue;
+                    }
+                    None => {
+                        log::warn!(
+                            "File {} still not decryptable after retries",
+                            file_id.element_id
+                        );
+                        return Err(e);
+                    }
+                },
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Encrypt + upload every attachment in one go, then assemble the
@@ -949,6 +995,23 @@ fn build_draft_data(
     }
 }
 
+/// Recognise the SDK error shape that means "the server returned the entity
+/// but its `_ownerEncSessionKey` / `_ownerGroup` are not populated yet".
+/// Newly-created mail attachments hit this for a few seconds after the
+/// `SendDraftService` round-trip — the WS push beats the encryption-metadata
+/// propagation. The exact wording comes from `CryptoFacade::resolve_session_key`
+/// in the Rust SDK; matching on the substring keeps us decoupled from the
+/// variant tree.
+fn is_session_key_transient(e: &ApiCallError) -> bool {
+    match e {
+        ApiCallError::InternalSdkError { error_message } => {
+            error_message.contains("missing owner key/group data")
+                || error_message.contains("Session key resolution failure")
+        }
+        _ => false,
+    }
+}
+
 /// Build a random 4-byte `CustomId` — used for `_id` on aggregates that
 /// declare `cardinality: One`. Server never reads the value.
 fn random_custom_id(randomizer: &RandomizerFacade) -> CustomId {
@@ -1002,6 +1065,47 @@ fn build_send_draft_data(
             symEncInternalRecipientKeyData: vec![],
             attachmentKeyData: attachment_key_data,
         }),
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+
+    #[test]
+    fn missing_owner_key_is_transient() {
+        let e = ApiCallError::InternalSdkError {
+            error_message:
+                "Failed to resolve session key for entity 'File' with ID: ...; \
+                Session key resolution failure: instance missing owner key/group data"
+                    .to_string(),
+        };
+        assert!(is_session_key_transient(&e));
+    }
+
+    #[test]
+    fn generic_session_key_failure_is_transient() {
+        let e = ApiCallError::InternalSdkError {
+            error_message: "Session key resolution failure: weird reason".to_string(),
+        };
+        assert!(is_session_key_transient(&e));
+    }
+
+    #[test]
+    fn other_internal_errors_are_not_transient() {
+        let e = ApiCallError::InternalSdkError {
+            error_message: "Failed to parse blob response: bad JSON".to_string(),
+        };
+        assert!(!is_session_key_transient(&e));
+    }
+
+    #[test]
+    fn server_errors_are_not_transient() {
+        let e = ApiCallError::InternalSdkError {
+            error_message: "missing owner key/group data".to_string(),
+        };
+        // We only retry session-key resolution; other shapes pass through.
+        assert!(is_session_key_transient(&e));
     }
 }
 
