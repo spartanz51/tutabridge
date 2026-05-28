@@ -97,15 +97,26 @@ async fn process(
 }
 
 /// Bucketed view of the mail-relevant entity updates inside a batch. Pure;
-/// no I/O. Splitting `MailSetEntry` events into creates and deletes lets
-/// us process them in the right order (CREATEs first — so a move can clone
-/// the mail from the source folder before the DELETE removes it).
+/// no I/O. Splitting `MailSetEntry` events into creates and deletes (and
+/// peeling Mail CREATEs out of the generic `mail_events` bucket) lets us
+/// process them in the right order:
+///
+/// 1. Mail CREATEs pre-decrypt to a pending pool with their `MailDetails`
+///    blob inline.
+/// 2. MailSetEntry CREATEs consume the pool — no REST call on a brand-new
+///    mail when its payload was inline.
+/// 3. MailSetEntry DELETEs run after the CREATEs so a MOVE can clone from
+///    the source folder before it is wiped.
+/// 4. Mail UPDATEs / DELETEs apply last.
 #[cfg_attr(test, derive(Debug))]
 #[derive(Default)]
 struct Bucketed<'a> {
 	mail_set_entry_creates: Vec<&'a EntityUpdateEvent>,
 	mail_set_entry_deletes: Vec<&'a EntityUpdateEvent>,
-	/// Mail-entity updates (read/unread, subject, delete, …).
+	/// Mail CREATEs — kept separate so we can pre-decrypt Mail + blob
+	/// inline before the matching MailSetEntry CREATE asks for the mail.
+	mail_creates: Vec<&'a EntityUpdateEvent>,
+	/// Mail UPDATE / DELETE events.
 	mail_events: Vec<&'a EntityUpdateEvent>,
 	/// A `MailSet` entity event arrived — the folder list itself changed
 	/// (custom folder created / renamed / deleted). Triggers a refresh of
@@ -127,12 +138,24 @@ fn bucket_updates(updates: &[EntityUpdateEvent]) -> Bucketed<'_> {
 				// CREATE / DELETE happen. Ignore other operations defensively.
 				_ => {},
 			},
-			MAIL_TYPE_ID => out.mail_events.push(ev),
+			MAIL_TYPE_ID => match ev.operation {
+				Operation::Create => out.mail_creates.push(ev),
+				_ => out.mail_events.push(ev),
+			},
 			MAIL_SET_TYPE_ID => out.folder_list_dirty = true,
 			_ => {},
 		}
 	}
 	out
+}
+
+/// A Mail+details pair recovered by inline-decrypting a Mail CREATE event
+/// before the matching MailSetEntry CREATE runs. `details` is only set
+/// when the server also bundled `event.blob_instance` (it's `None` on
+/// drafts and on legacy events).
+struct PendingMail {
+	mail: tutasdk::entities::generated::tutanota::Mail,
+	details: Option<tutasdk::entities::generated::tutanota::MailDetails>,
 }
 
 async fn apply_batch(
@@ -145,6 +168,7 @@ async fn apply_batch(
 	let Bucketed {
 		mail_set_entry_creates,
 		mail_set_entry_deletes,
+		mail_creates,
 		mail_events,
 		folder_list_dirty,
 	} = bucket_updates(&batch.updates);
@@ -168,6 +192,13 @@ async fn apply_batch(
 	// `sync_folder` at the end.
 	let mut fallback_folders: HashSet<String> = HashSet::new();
 
+	// Pre-decrypt every Mail CREATE in this batch so its `event.instance`
+	// (and `event.blob_instance`, when present) gives us the Mail and its
+	// `MailDetails` without any REST call. The matching MailSetEntry CREATE
+	// below consumes from this pool; what's left is dropped at scope end.
+	let mut pending: HashMap<String, PendingMail> =
+		predecrypt_mail_creates(backend, &mail_creates).await;
+
 	// 1) MailSetEntry CREATEs first. Doing creates *before* the matching
 	// deletes lets a MOVE clone the already-decrypted Mail straight from
 	// the source folder (still present in the cache at this point) — no
@@ -179,6 +210,7 @@ async fn apply_batch(
 			backend,
 			&folder_by_entries,
 			&mut fallback_folders,
+			&mut pending,
 			ev,
 		)
 		.await;
@@ -252,6 +284,7 @@ async fn apply_mail_set_entry_create(
 	backend: &dyn MailBackend,
 	folder_by_entries: &HashMap<&str, &FolderInfo>,
 	fallback_folders: &mut HashSet<String>,
+	pending: &mut HashMap<String, PendingMail>,
 	ev: &EntityUpdateEvent,
 ) {
 	let custom = CustomId(ev.instance_id.clone());
@@ -282,6 +315,40 @@ async fn apply_mail_set_entry_create(
 			"Event bus: cloning mail {} from {} → {} (no REST)",
 			mail_eid, source_folder, target_folder.imap_path
 		);
+		assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
+		return;
+	}
+
+	// HIT-FROM-BATCH path: a matching Mail CREATE rode in the same batch
+	// and we already inline-decrypted it (and possibly its MailDetails blob)
+	// into `pending`. Use that directly — no REST, and if we got the blob
+	// too the body is already RFC2822-rendered and written to disk so the
+	// prefetch loop has nothing left to do for this mail.
+	if let Some(PendingMail { mail, details }) = pending.remove(&mail_eid) {
+		debug!(
+			"Event bus: applying inline Mail CREATE {} → {} (no REST{})",
+			mail_eid,
+			target_folder.imap_path,
+			if details.is_some() { ", body inline too" } else { "" },
+		);
+		let rfc2822 = details
+			.as_ref()
+			.map(|d| crate::mail::mail_to_rfc2822(&mail, Some(d)));
+		let mut stored = StoredMail {
+			mail,
+			details: details.clone(),
+			rfc2822: rfc2822.clone(),
+			uid: 0,
+		};
+		// Persist the body straight away so the IMAP layer can serve FETCH
+		// BODY[] without a placeholder, and the prefetch loop skips it.
+		if let (Some(eml), true) = (rfc2822.as_deref(), details.is_some()) {
+			if let Err(e) = local_store.write_eml(&mail_eid, eml) {
+				warn!("Failed to cache eml for {}: {e}", mail_eid);
+			} else if let Err(e) = local_store.mark_has_details(&mail_eid) {
+				warn!("Failed to mark has_details for {}: {e}", mail_eid);
+			}
+		}
 		assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
 		return;
 	}
@@ -434,6 +501,50 @@ async fn apply_mail_event(
 		},
 		Operation::Create | Operation::Other(_) => {},
 	}
+}
+
+/// Pre-decrypt every Mail CREATE event in a batch into a `(eid -> Mail + details)`
+/// pool, ready to be consumed by the matching MailSetEntry CREATE. Each
+/// event has its Mail in `event.instance` and (when the server bundles it)
+/// the MailDetails blob in `event.blob_instance`. Failure on any single
+/// event leaves the pool entry absent — the MailSetEntry handler then
+/// falls back to `load_mail`, so nothing is silently lost.
+async fn predecrypt_mail_creates(
+	backend: &dyn MailBackend,
+	events: &[&EntityUpdateEvent],
+) -> HashMap<String, PendingMail> {
+	let mut out: HashMap<String, PendingMail> = HashMap::with_capacity(events.len());
+	for ev in events {
+		let Some(json) = ev.instance.as_deref() else {
+			continue;
+		};
+		let mail = match backend.decrypt_inline_mail(json).await {
+			Ok(Some(m)) => m,
+			Ok(None) => continue, // session key transient — caller will REST-fallback
+			Err(e) => {
+				warn!(
+					"predecrypt Mail CREATE {}: decrypt_inline_mail failed: {e}",
+					ev.instance_id
+				);
+				continue;
+			},
+		};
+		let details = match ev.blob_instance.as_deref() {
+			Some(blob_json) => match backend.decrypt_inline_mail_details_blob(blob_json).await {
+				Ok(opt) => opt,
+				Err(e) => {
+					warn!(
+						"predecrypt Mail CREATE {}: blob decrypt failed: {e} — keeping mail without body",
+						ev.instance_id
+					);
+					None
+				},
+			},
+			None => None,
+		};
+		out.insert(ev.instance_id.clone(), PendingMail { mail, details });
+	}
+	out
 }
 
 /// Decrypt-inline first, REST-fallback second. Centralises the policy so
@@ -594,8 +705,24 @@ mod tests {
 		];
 		let out = bucket_updates(&updates);
 		assert_eq!(out.mail_events.len(), 2);
+		assert!(out.mail_creates.is_empty(), "no CREATE here");
 		assert_eq!(out.mail_events[0].instance_id, "m1");
 		assert_eq!(out.mail_events[1].operation, Operation::Delete);
+	}
+
+	#[test]
+	fn bucket_routes_mail_create_to_its_own_bucket() {
+		// Mail CREATEs are split out of `mail_events` so the inline pool
+		// can pre-decrypt them before MailSetEntry CREATEs consume them.
+		let updates = vec![
+			ev("tutanota", MAIL_TYPE_ID, "mailL", "newM", Operation::Create),
+			ev("tutanota", MAIL_TYPE_ID, "mailL", "readM", Operation::Update),
+		];
+		let out = bucket_updates(&updates);
+		assert_eq!(out.mail_creates.len(), 1);
+		assert_eq!(out.mail_creates[0].instance_id, "newM");
+		assert_eq!(out.mail_events.len(), 1);
+		assert_eq!(out.mail_events[0].instance_id, "readM");
 	}
 
 	#[test]
