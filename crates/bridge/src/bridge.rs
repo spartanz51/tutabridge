@@ -84,6 +84,10 @@ pub struct BridgeHandle {
     status: Arc<RwLock<BridgeStatus>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     log_tx: broadcast::Sender<String>,
+    /// Fires whenever something `stats()` would surface has changed —
+    /// mail count, ws state, uptime tick on start/stop. Lets the UI replace
+    /// its 1s poll with a push subscription.
+    stats_dirty_tx: broadcast::Sender<()>,
     started_at: Option<std::time::Instant>,
     store: Option<Arc<MailStore>>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -94,10 +98,12 @@ pub struct BridgeHandle {
 impl BridgeHandle {
     pub fn new() -> Self {
         let (log_tx, _) = broadcast::channel(256);
+        let (stats_dirty_tx, _) = broadcast::channel(16);
         Self {
             status: Arc::new(RwLock::new(BridgeStatus::Stopped)),
             shutdown_tx: None,
             log_tx,
+            stats_dirty_tx,
             started_at: None,
             store: None,
             task: None,
@@ -111,6 +117,13 @@ impl BridgeHandle {
 
     pub fn log_sender(&self) -> broadcast::Sender<String> {
         self.log_tx.clone()
+    }
+
+    /// Subscribe to "stats dirty" pulses. The receiver gets a `()` every
+    /// time something that `stats()` would surface has changed; the UI calls
+    /// `stats()` on each pulse instead of polling on a timer.
+    pub fn subscribe_stats(&self) -> broadcast::Receiver<()> {
+        self.stats_dirty_tx.subscribe()
     }
 
     pub async fn status(&self) -> BridgeStatus {
@@ -268,6 +281,28 @@ impl BridgeHandle {
         let bus_ids_for_handler = bus_client.last_batch_ids();
         self.ws_state_rx = Some(bus_client.state());
 
+        // Spawn a tiny watcher BEFORE the outer task swallows the
+        // observables: it turns MailStore / WsState changes into
+        // `stats_dirty_tx` pulses so the UI can replace its 1s poll with
+        // an event subscription. Aborts when shutdown fires.
+        {
+            let stats_dirty = self.stats_dirty_tx.clone();
+            let mut store_watch = store.subscribe();
+            let mut ws_watch = bus_client.state();
+            let mut shutdown_watch = shutdown_sync_rx.clone();
+            tokio::spawn(async move {
+                // Initial pulse so a subscriber sees the freshly-started state.
+                let _ = stats_dirty.send(());
+                loop {
+                    tokio::select! {
+                        _ = store_watch.changed() => { let _ = stats_dirty.send(()); }
+                        _ = ws_watch.changed() => { let _ = stats_dirty.send(()); }
+                        _ = shutdown_watch.changed() => return,
+                    }
+                }
+            });
+        }
+
         let task = tokio::spawn(async move {
             let imap_tls = tls_acceptor.clone();
             let smtp_tls = tls_acceptor;
@@ -362,8 +397,10 @@ impl BridgeHandle {
         });
 
         self.task = Some(task);
+
         *self.status.write().await = BridgeStatus::Running;
         self.emit_log("Bridge is running");
+        let _ = self.stats_dirty_tx.send(()); // status transition
         Ok(())
     }
 
@@ -376,6 +413,9 @@ impl BridgeHandle {
         }
         self.started_at = None;
         self.ws_state_rx = None;
+        // Final pulse so the UI re-reads `stats()` (now reporting Stopped /
+        // zero uptime / zero mails) without waiting for a poll.
+        let _ = self.stats_dirty_tx.send(());
     }
 
     fn emit_log(&self, msg: &str) {
