@@ -277,7 +277,11 @@ async fn apply_mail_set_entry_create(
 	// HIT path: the mail already lives in another cached folder (typical
 	// MOVE between two known folders). Clone the StoredMail into the
 	// target, allocate a fresh UID and persist.
-	if let Some((_source_folder, mut stored)) = store.find_mail_anywhere(&mail_eid).await {
+	if let Some((source_folder, mut stored)) = store.find_mail_anywhere(&mail_eid).await {
+		debug!(
+			"Event bus: cloning mail {} from {} → {} (no REST)",
+			mail_eid, source_folder, target_folder.imap_path
+		);
 		assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
 		return;
 	}
@@ -292,6 +296,10 @@ async fn apply_mail_set_entry_create(
 	};
 	match backend.load_mail(&list_id, &mail_eid).await {
 		Ok(Some(mail)) => {
+			debug!(
+				"Event bus: targeted load_mail({}, {}) → {} (1 REST call)",
+				list_id, mail_eid, target_folder.imap_path
+			);
 			let mut stored = StoredMail {
 				mail,
 				details: None,
@@ -337,9 +345,15 @@ async fn apply_mail_set_entry_delete(
 	let Some(source_folder) = folder_by_entries.get(ev.instance_list_id.as_str()).copied() else {
 		return;
 	};
-	store
+	let removed = store
 		.remove_mail_from_folder(&source_folder.id, &mail_eid)
 		.await;
+	if removed {
+		debug!(
+			"Event bus: removed mail {} from {} (no REST)",
+			mail_eid, source_folder.imap_path
+		);
+	}
 	// Drop the on-disk row + `.eml` only if no folder still holds the
 	// mail. Multi-folder placement (rare with the current Tuta model) and
 	// MOVE-within-batch (the matching CREATE ran first, so the target
