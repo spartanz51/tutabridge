@@ -9,7 +9,7 @@ use tutasdk::bindings::rest_client::RestClient;
 use tutasdk::crypto_entity_client::CryptoEntityClient;
 use tutasdk::entities::generated::tutanota::{
     DraftCreateData, DraftData, DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob,
-    MailSetEntry, SendDraftData, SendDraftParameters,
+    MailSetEntry, SendDraftData, SendDraftParameters, TutanotaFile,
 };
 use tutasdk::folder_system::{FolderSystem, MailSetKind};
 use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
@@ -67,6 +67,15 @@ pub trait MailBackend: Send + Sync {
         json: &str,
     ) -> Result<Option<MailDetails>, String>;
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String>;
+    /// Load and decrypt every attachment of `mail`. Returns a vector of
+    /// `(file metadata, decrypted bytes)` in the order they appear in
+    /// `mail.attachments`. Empty if the mail has no attachments. Errors are
+    /// per-mail (no partial returns): if any one attachment fails the whole
+    /// call returns `Err` so the caller can decide to retry the prefetch.
+    async fn load_attachments(
+        &self,
+        mail: &Mail,
+    ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String>;
     /// Enumerate all mail folders (system + custom, with hierarchy).
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
     async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String>;
@@ -292,6 +301,24 @@ impl TutaSession {
         }
     }
 
+    async fn load_attachments_impl(
+        &self,
+        mail: &Mail,
+    ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, ApiCallError> {
+        if mail.attachments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let crypto_client = self.crypto_client();
+        let mail_facade = self.logged_in.mail_facade();
+        let mut out: Vec<(TutanotaFile, Vec<u8>)> = Vec::with_capacity(mail.attachments.len());
+        for file_id in &mail.attachments {
+            let file: TutanotaFile = crypto_client.load(file_id).await?;
+            let data = mail_facade.load_file_attachment_data(&file).await?;
+            out.push((file, data));
+        }
+        Ok(out)
+    }
+
     async fn send_mail_impl(&self, msg: &ParsedMessage) -> Result<(), ApiCallError> {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
         let session_key: GenericAesKey = Aes256Key::generate(&randomizer).into();
@@ -401,6 +428,13 @@ impl MailBackend for TutaSession {
         self.load_mail_details_impl(mail)
             .await
             .map_err(|e| format!("{e}"))
+    }
+
+    async fn load_attachments(
+        &self,
+        mail: &Mail,
+    ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String> {
+        self.load_attachments_impl(mail).await.map_err(|e| format!("{e}"))
     }
 
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {

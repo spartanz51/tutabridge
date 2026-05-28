@@ -333,7 +333,7 @@ async fn apply_mail_set_entry_create(
 		);
 		let rfc2822 = details
 			.as_ref()
-			.map(|d| crate::mail::mail_to_rfc2822(&mail, Some(d)));
+			.map(|d| crate::mail::mail_to_rfc2822(&mail, Some(d), &[]));
 		let mut stored = StoredMail {
 			mail,
 			details: details.clone(),
