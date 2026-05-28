@@ -137,12 +137,14 @@ impl BridgeHandle {
         self.emit_log("Local store opened");
 
         // Seed the realtime event bus before we move `session` into the
-        // backend Arc: we need its access_token / user_id / membership groups.
+        // backend Arc. We do not pass `event_groups()` to the bus: the URL's
+        // `groupsToLastEventBatchIds=` is purely a per-group catch-up cursor
+        // built from `last_batch_ids`, and the authenticated WebSocket already
+        // implicitly subscribes to every group the user is a member of.
         let bus_access_token = session.access_token.clone();
         let bus_user_id = session
             .user_id()
             .ok_or_else(|| "Missing user id from session".to_string())?;
-        let bus_event_groups = session.event_groups();
         let bus_base_url = config.api_url.clone();
 
         let backend: Arc<dyn MailBackend> = Arc::new(session);
@@ -208,12 +210,6 @@ impl BridgeHandle {
                 let token = bus_access_token;
                 let uid = bus_user_id;
                 let shutdown = shutdown_sync_rx.clone();
-                // Multiple memberships are still surfaced as their group ids
-                // via `bus_event_groups`; even if our handler only acts on
-                // mail-related events, the bus query string already lists
-                // every group from `last_batch_ids`, so the server replays
-                // missed events for all of them.
-                let _ = bus_event_groups;
                 tokio::spawn(async move {
                     if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
                         match e {

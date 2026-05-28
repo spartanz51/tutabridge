@@ -81,6 +81,37 @@ async fn process(
 	}
 }
 
+/// Bucketed view of the mail-relevant entity updates inside a batch. The
+/// routing decision (which folders need a resync, which mails need a
+/// metadata refresh) is pure and has no I/O — that lets us test it in
+/// isolation.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Default)]
+struct Bucketed<'a> {
+	/// `MailSetEntry.instance_list_id` for every CREATE / DELETE / UPDATE
+	/// we received — i.e. the folders whose contents changed.
+	folder_entry_lists: std::collections::HashSet<&'a str>,
+	/// Mail-entity updates (read/unread, subject, delete, …).
+	mail_events: Vec<&'a EntityUpdateEvent>,
+}
+
+fn bucket_updates(updates: &[EntityUpdateEvent]) -> Bucketed<'_> {
+	let mut out = Bucketed::default();
+	for ev in updates {
+		if ev.application != TUTANOTA_APP {
+			continue;
+		}
+		match ev.type_id {
+			MAIL_SET_ENTRY_TYPE_ID => {
+				out.folder_entry_lists.insert(ev.instance_list_id.as_str());
+			},
+			MAIL_TYPE_ID => out.mail_events.push(ev),
+			_ => {},
+		}
+	}
+	out
+}
+
 async fn apply_batch(
 	store: &MailStore,
 	local_store: &LocalStore,
@@ -88,23 +119,12 @@ async fn apply_batch(
 	sync_limit: usize,
 	batch: &EntityUpdateBatch,
 ) {
-	// 1) Bucket updates by what they affect.
-	let mut folder_entry_lists: std::collections::HashSet<String> = Default::default();
-	let mut mail_events: Vec<&EntityUpdateEvent> = Vec::new();
-	for ev in &batch.updates {
-		if ev.application != TUTANOTA_APP {
-			continue;
-		}
-		match ev.type_id {
-			MAIL_SET_ENTRY_TYPE_ID => {
-				folder_entry_lists.insert(ev.instance_list_id.clone());
-			},
-			MAIL_TYPE_ID => mail_events.push(ev),
-			_ => {},
-		}
-	}
+	let Bucketed {
+		folder_entry_lists,
+		mail_events,
+	} = bucket_updates(&batch.updates);
 
-	// 2) Any MailSetEntry CREATE/DELETE on a folder's entries list is the
+	// Any MailSetEntry CREATE/DELETE on a folder's entries list is the
 	// canonical signal that the folder's contents changed. Re-running
 	// `sync_folder` reuses the existing diff-and-update logic and is correct
 	// for all of CREATE / DELETE / multi-move at once. Cheaper than tracking
@@ -113,7 +133,7 @@ async fn apply_batch(
 		let folders = store.list_folders().await;
 		for folder in folders
 			.iter()
-			.filter(|f| folder_entry_lists.contains(&f.entries_list_id))
+			.filter(|f| folder_entry_lists.contains(f.entries_list_id.as_str()))
 		{
 			debug!(
 				"Event bus: re-syncing folder {} (batch {})",
@@ -169,5 +189,90 @@ async fn apply_batch(
 			},
 			Operation::Create | Operation::Other(_) => {},
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn ev(app: &str, type_id: i64, list: &str, elem: &str, op: Operation) -> EntityUpdateEvent {
+		EntityUpdateEvent {
+			application: app.to_string(),
+			type_id,
+			instance_list_id: list.to_string(),
+			instance_id: elem.to_string(),
+			operation: op,
+			instance: None,
+			blob_instance: None,
+		}
+	}
+
+	#[test]
+	fn bucket_empty_batch() {
+		let out = bucket_updates(&[]);
+		assert!(out.folder_entry_lists.is_empty());
+		assert!(out.mail_events.is_empty());
+	}
+
+	#[test]
+	fn bucket_ignores_other_applications() {
+		// `sys`-app events (e.g. group/user changes) must not affect mail buckets.
+		let updates = vec![ev("sys", 97, "L", "E", Operation::Create)];
+		let out = bucket_updates(&updates);
+		assert!(out.folder_entry_lists.is_empty());
+		assert!(out.mail_events.is_empty());
+	}
+
+	#[test]
+	fn bucket_ignores_unknown_type_ids_in_tutanota() {
+		// Unrelated tutanota entities (e.g. attachments, contacts) should pass through.
+		let updates = vec![ev("tutanota", 999, "L", "E", Operation::Update)];
+		let out = bucket_updates(&updates);
+		assert!(out.folder_entry_lists.is_empty());
+		assert!(out.mail_events.is_empty());
+	}
+
+	#[test]
+	fn bucket_collects_mail_set_entry_lists() {
+		// Same list appearing twice (CREATE + DELETE) should de-duplicate.
+		let updates = vec![
+			ev("tutanota", MAIL_SET_ENTRY_TYPE_ID, "inbox_entries", "e1", Operation::Create),
+			ev("tutanota", MAIL_SET_ENTRY_TYPE_ID, "inbox_entries", "e2", Operation::Delete),
+			ev("tutanota", MAIL_SET_ENTRY_TYPE_ID, "sent_entries", "e3", Operation::Create),
+		];
+		let out = bucket_updates(&updates);
+		assert_eq!(out.folder_entry_lists.len(), 2);
+		assert!(out.folder_entry_lists.contains("inbox_entries"));
+		assert!(out.folder_entry_lists.contains("sent_entries"));
+		assert!(out.mail_events.is_empty());
+	}
+
+	#[test]
+	fn bucket_collects_mail_events_in_order() {
+		let updates = vec![
+			ev("tutanota", MAIL_TYPE_ID, "mailL", "m1", Operation::Update),
+			ev("tutanota", MAIL_TYPE_ID, "mailL", "m2", Operation::Delete),
+		];
+		let out = bucket_updates(&updates);
+		assert!(out.folder_entry_lists.is_empty());
+		assert_eq!(out.mail_events.len(), 2);
+		assert_eq!(out.mail_events[0].instance_id, "m1");
+		assert_eq!(out.mail_events[1].operation, Operation::Delete);
+	}
+
+	#[test]
+	fn bucket_mixed_batch() {
+		let updates = vec![
+			ev("tutanota", MAIL_SET_ENTRY_TYPE_ID, "inbox_entries", "e1", Operation::Create),
+			ev("tutanota", MAIL_TYPE_ID, "mailL", "m1", Operation::Update),
+			ev("sys", 42, "X", "Y", Operation::Create), // ignored
+			ev("tutanota", 429, "folderL", "f1", Operation::Create), // MailSet — unhandled here
+		];
+		let out = bucket_updates(&updates);
+		assert_eq!(out.folder_entry_lists.len(), 1);
+		assert!(out.folder_entry_lists.contains("inbox_entries"));
+		assert_eq!(out.mail_events.len(), 1);
+		assert_eq!(out.mail_events[0].instance_id, "m1");
 	}
 }
