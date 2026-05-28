@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use tokio::sync::{watch, RwLock};
-use tutasdk::entities::generated::tutanota::{Mail, MailDetails};
+use tutasdk::entities::generated::tutanota::{Mail, MailDetails, TutanotaFile};
 
 use crate::mail::mail_to_rfc2822;
 use crate::store::{LocalStore, MailMetadata};
@@ -453,10 +453,10 @@ async fn load_cached_folder(
                 }
                 Some(eml)
             },
-            Ok(None) => Some(mail_to_rfc2822(&mail, None)),
+            Ok(None) => Some(mail_to_rfc2822(&mail, None, &[])),
             Err(e) => {
                 warn!("Failed to read cached eml {}: {e}", meta.element_id);
-                Some(mail_to_rfc2822(&mail, None))
+                Some(mail_to_rfc2822(&mail, None, &[]))
             },
         };
 
@@ -529,7 +529,7 @@ pub(crate) async fn sync_folder(
                 uid,
             });
         } else {
-            let rfc2822 = mail_to_rfc2822(mail, None);
+            let rfc2822 = mail_to_rfc2822(mail, None, &[]);
             updated.push(StoredMail {
                 mail: mail.clone(),
                 details: None,
@@ -611,7 +611,29 @@ async fn prefetch_details(
         let result = retry(|| backend.load_mail_details(mail)).await;
         match result {
             Ok(Some(details)) => {
-                let rfc2822 = mail_to_rfc2822(mail, Some(&details));
+                // Best-effort attachment fetch: if any blob fails to load we
+                // still ship the body — the user can re-open the mail later
+                // and the prefetch sweep will retry. Empty `mail.attachments`
+                // short-circuits inside the backend so this is free for the
+                // overwhelmingly common "no attachments" case.
+                let attachments_owned = match backend.load_attachments(mail).await {
+                    Ok(atts) => atts,
+                    Err(e) => {
+                        warn!(
+                            "Failed to load attachments for {}: {e}",
+                            mail._id
+                                .as_ref()
+                                .map(|id| id.element_id.to_string())
+                                .unwrap_or_default()
+                        );
+                        Vec::new()
+                    }
+                };
+                let attachment_refs: Vec<(&TutanotaFile, &[u8])> = attachments_owned
+                    .iter()
+                    .map(|(f, d)| (f, d.as_slice()))
+                    .collect();
+                let rfc2822 = mail_to_rfc2822(mail, Some(&details), &attachment_refs);
                 if let Some(id) = mail._id.as_ref() {
                     let eid = id.element_id.to_string();
 
@@ -632,7 +654,7 @@ async fn prefetch_details(
                 // `MailDetailsDraft` (legacy / malformed). Persist a
                 // headers-only `.eml` and mark the row done so we don't
                 // re-attempt every prefetch sweep.
-                let rfc2822 = mail_to_rfc2822(mail, None);
+                let rfc2822 = mail_to_rfc2822(mail, None, &[]);
                 if let Some(id) = mail._id.as_ref() {
                     let eid = id.element_id.to_string();
                     if let Err(e) = local_store.write_eml(&eid, &rfc2822) {

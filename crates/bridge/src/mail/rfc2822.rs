@@ -1,7 +1,16 @@
 use base64::Engine;
-use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails};
+use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, TutanotaFile};
 
-pub fn mail_to_rfc2822(mail: &Mail, details: Option<&MailDetails>) -> String {
+/// One decrypted attachment as it lands in the RFC 2822 we serve over IMAP:
+/// the [`TutanotaFile`] entity (for name + MIME type + cid) and the raw
+/// decrypted bytes (for the body of the part).
+pub type AttachmentPart<'a> = (&'a TutanotaFile, &'a [u8]);
+
+pub fn mail_to_rfc2822(
+    mail: &Mail,
+    details: Option<&MailDetails>,
+    attachments: &[AttachmentPart<'_>],
+) -> String {
     let mut msg = String::with_capacity(4096);
 
     let date_str = format_rfc2822_date(mail.receivedDate.as_millis());
@@ -38,10 +47,6 @@ pub fn mail_to_rfc2822(mail: &Mail, details: Option<&MailDetails>) -> String {
         msg.push_str(&format!("To: {}\r\n", format_address(first)));
     }
 
-    msg.push_str("MIME-Version: 1.0\r\n");
-    msg.push_str("Content-Type: text/html; charset=UTF-8\r\n");
-    msg.push_str("Content-Transfer-Encoding: base64\r\n");
-
     if let Some(ref id) = mail._id {
         msg.push_str(&format!(
             "Message-ID: <{}.{}@tutabridge.local>\r\n",
@@ -49,17 +54,74 @@ pub fn mail_to_rfc2822(mail: &Mail, details: Option<&MailDetails>) -> String {
         ));
     }
 
-    msg.push_str("\r\n");
+    msg.push_str("MIME-Version: 1.0\r\n");
 
     let body_text = details
         .and_then(|d| d.body.compressedText.as_deref().or(d.body.text.as_deref()))
         .unwrap_or("<p>(No body available)</p>");
 
-    let encoded = base64_encode_body(body_text.as_bytes());
-    msg.push_str(&encoded);
-    msg.push_str("\r\n");
+    if attachments.is_empty() {
+        msg.push_str("Content-Type: text/html; charset=UTF-8\r\n");
+        msg.push_str("Content-Transfer-Encoding: base64\r\n");
+        msg.push_str("\r\n");
+        msg.push_str(&base64_encode_body(body_text.as_bytes()));
+        msg.push_str("\r\n");
+    } else {
+        // The boundary is derived from the mail's element id so the same
+        // mail always produces the same MIME boundary — keeps `.eml.enc`
+        // bytes stable across rewrites.
+        let boundary = build_boundary(mail);
+        msg.push_str(&format!(
+            "Content-Type: multipart/mixed; boundary=\"{}\"\r\n",
+            boundary
+        ));
+        msg.push_str("\r\n");
+        msg.push_str("This is a multi-part message in MIME format.\r\n");
+
+        msg.push_str(&format!("--{}\r\n", boundary));
+        msg.push_str("Content-Type: text/html; charset=UTF-8\r\n");
+        msg.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+        msg.push_str(&base64_encode_body(body_text.as_bytes()));
+        msg.push_str("\r\n");
+
+        for (file, data) in attachments {
+            msg.push_str(&format!("--{}\r\n", boundary));
+            let mime = file.mimeType.as_deref().unwrap_or("application/octet-stream");
+            let name_encoded = encode_header_value(&file.name);
+            msg.push_str(&format!(
+                "Content-Type: {}; name=\"{}\"\r\n",
+                mime, name_encoded
+            ));
+            msg.push_str("Content-Transfer-Encoding: base64\r\n");
+            msg.push_str(&format!(
+                "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                name_encoded
+            ));
+            if let Some(ref cid) = file.cid {
+                // Some Tuta files (inline images) carry a Content-ID — propagate
+                // it so HTML `<img src="cid:…">` references still resolve.
+                msg.push_str(&format!("Content-ID: <{}>\r\n", cid));
+            }
+            msg.push_str("\r\n");
+            msg.push_str(&base64_encode_body(data));
+            msg.push_str("\r\n");
+        }
+        msg.push_str(&format!("--{}--\r\n", boundary));
+    }
 
     msg
+}
+
+/// Build a MIME boundary that is stable for a given mail and unlikely to
+/// collide with payload bytes. Format: `=_TutaBridge_<list>_<elem>` where the
+/// ids are the mail's `IdTuple` — they contain only base64-ext characters
+/// (so safe in a Content-Type header) and uniquely identify the mail.
+fn build_boundary(mail: &Mail) -> String {
+    if let Some(ref id) = mail._id {
+        format!("=_TutaBridge_{}_{}", id.list_id, id.element_id)
+    } else {
+        "=_TutaBridge_unknown".to_owned()
+    }
 }
 
 pub(crate) fn format_address(addr: &MailAddress) -> String {
@@ -373,7 +435,7 @@ mod tests {
             _errors: Default::default(),
         };
 
-        let rfc = mail_to_rfc2822(&mail, None);
+        let rfc = mail_to_rfc2822(&mail, None, &[]);
 
         assert!(rfc.contains("Date: Wed, 25 Dec 2024 12:37:25 +0000\r\n"));
         assert!(rfc.contains("From: Alice <alice@tuta.com>\r\n"));
@@ -484,7 +546,7 @@ mod tests {
             },
         };
 
-        let rfc = mail_to_rfc2822(&mail, Some(&details));
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
 
         assert!(rfc.contains("From: sender@tuta.com\r\n"));
         assert!(rfc.contains("To: Bob <bob@example.com>, charlie@example.com\r\n"));
@@ -493,5 +555,125 @@ mod tests {
         let body_b64 =
             base64::engine::general_purpose::STANDARD.encode(b"<p>Hello World</p>");
         assert!(rfc.contains(&body_b64));
+    }
+
+    #[test]
+    fn test_mail_to_rfc2822_with_attachment_emits_multipart() {
+        use tutasdk::date::DateTime;
+        use tutasdk::entities::generated::tutanota::{Body, Recipients, TutanotaFile};
+        use tutasdk::IdTupleGenerated;
+
+        let mail = Mail {
+            _id: Some(IdTupleGenerated::new(
+                test_id("list_att"),
+                test_id("elem_att"),
+            )),
+            _permissions: test_id("perm_att"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            subject: "With Attachment".to_string(),
+            receivedDate: DateTime::from_millis(0),
+            state: 2,
+            unread: false,
+            confidential: false,
+            replyType: 0,
+            _ownerGroup: None,
+            differentEnvelopeSender: None,
+            listUnsubscribe: false,
+            movedTime: None,
+            phishingStatus: 0,
+            authStatus: None,
+            method: 0,
+            recipientCount: 1,
+            encryptionAuthStatus: None,
+            _ownerKeyVersion: None,
+            processingState: 0,
+            processNeeded: false,
+            sendAt: None,
+            serverClassificationData: None,
+            _kdfNonce: None,
+            sender: MailAddress {
+                _id: None,
+                name: "Alice".to_string(),
+                address: "alice@tuta.com".to_string(),
+                contact: None,
+                _errors: Default::default(),
+            },
+            attachments: vec![],
+            conversationEntry: IdTupleGenerated::new(
+                test_id("conv_l"),
+                test_id("conv_e"),
+            ),
+            firstRecipient: Some(MailAddress {
+                _id: None,
+                name: "".to_string(),
+                address: "bob@example.com".to_string(),
+                contact: None,
+                _errors: Default::default(),
+            }),
+            mailDetails: None,
+            mailDetailsDraft: None,
+            bucketKey: None,
+            sets: vec![],
+            clientSpamClassifierResult: None,
+            _errors: Default::default(),
+        };
+        let details = MailDetails {
+            _id: None,
+            sentDate: DateTime::from_millis(0),
+            authStatus: 0,
+            replyTos: vec![],
+            recipients: Recipients {
+                _id: None,
+                toRecipients: vec![],
+                ccRecipients: vec![],
+                bccRecipients: vec![],
+            },
+            headers: None,
+            body: Body {
+                _id: None,
+                text: Some("<p>The body</p>".to_string()),
+                compressedText: None,
+                _errors: Default::default(),
+            },
+        };
+        let file = TutanotaFile {
+            _id: Some(IdTupleGenerated::new(
+                test_id("file_list"),
+                test_id("file_elem"),
+            )),
+            _permissions: test_id("file_perm"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            name: "doc.pdf".to_string(),
+            size: 5,
+            mimeType: Some("application/pdf".to_string()),
+            _ownerGroup: None,
+            cid: None,
+            _ownerKeyVersion: None,
+            _kdfNonce: None,
+            parent: None,
+            subFiles: None,
+            blobs: vec![],
+            _errors: Default::default(),
+        };
+        let data: &[u8] = b"PDFDA";
+        let attachments: Vec<super::AttachmentPart> = vec![(&file, data)];
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &attachments);
+
+        assert!(rfc.contains("Content-Type: multipart/mixed; boundary=\"=_TutaBridge_list_att_elem_att\""));
+        assert!(rfc.contains("--=_TutaBridge_list_att_elem_att\r\n"));
+        // Body part: text/html base64
+        assert!(rfc.contains("Content-Type: text/html; charset=UTF-8\r\n"));
+        let body_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"<p>The body</p>");
+        assert!(rfc.contains(&body_b64));
+        // Attachment part
+        assert!(rfc.contains("Content-Type: application/pdf; name=\"doc.pdf\""));
+        assert!(rfc.contains("Content-Disposition: attachment; filename=\"doc.pdf\""));
+        let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+        assert!(rfc.contains(&pdf_b64));
+        // Closing boundary
+        assert!(rfc.ends_with("--=_TutaBridge_list_att_elem_att--\r\n"));
     }
 }

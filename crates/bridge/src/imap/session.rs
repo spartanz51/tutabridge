@@ -392,6 +392,7 @@ impl ImapSession {
                     let rfc = mail_to_rfc2822(
                         &self.mails[idx].mail,
                         self.mails[idx].details.as_ref(),
+                        &[],
                     );
                     self.mails[idx].rfc2822 = Some(rfc);
                 } else if self.mails[idx].rfc2822.is_none() {
@@ -660,7 +661,7 @@ impl ImapSession {
 
             let details = sm.details.or(old_details);
             let rfc2822 = sm.rfc2822.or(old_rfc).unwrap_or_else(|| {
-                mail_to_rfc2822(&sm.mail, details.as_ref())
+                mail_to_rfc2822(&sm.mail, details.as_ref(), &[])
             });
 
             self.mails.push(CachedMail {
@@ -1485,6 +1486,14 @@ mod tests {
             let key = mail._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
             Ok(self.details.lock().unwrap().get(&key).cloned())
         }
+        async fn load_attachments(
+            &self,
+            _mail: &Mail,
+        ) -> Result<Vec<(tutasdk::entities::generated::tutanota::TutanotaFile, Vec<u8>)>, String> {
+            // The mock has no attachment fixtures; the IMAP-session tests
+            // only exercise body/header paths.
+            Ok(Vec::new())
+        }
         async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
             Ok(vec![inbox_folder()])
         }
@@ -1603,8 +1612,8 @@ mod tests {
 
         let backend = Arc::new(MockBackend::with_mails(vec![m1.clone(), m2.clone()]));
         let store = MailStore::new();
-        let rfc1 = crate::mail::mail_to_rfc2822(&m1, Some(&d1));
-        let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2));
+        let rfc1 = crate::mail::mail_to_rfc2822(&m1, Some(&d1), &[]);
+        let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2), &[]);
         store.set_folder_list(vec![inbox_folder()]).await;
         store.set_folder("inbox", vec![
             StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1), uid: 1 },
