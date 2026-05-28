@@ -26,6 +26,7 @@ branch = one commit, rebasable on `upstream/master`.
 | `sdk-event-bus` | WebSocket `EventBusClient` (`/event?…`) — realtime entity updates with catch-up via `groupsToLastEventBatchIds`, plus observable `WsState` | — | — | no (held) | no | yes (live-tested over Phase 2/3 bridge integration, 26 unit tests) |
 | `sdk-mail-set-entry-id` | `mail_set_entry_id::{construct, deconstruct}` — encode/decode `MailSetEntry._id` (4-byte truncated timestamp + 9-byte raw Mail id, base64url-no-pad) | — | — | no (held) | no | yes (consumed by the bridge realtime delta optimisation; 8 unit tests, TS test vector asserted) |
 | `sdk-inline-decrypt` | `CryptoEntityClient::decrypt_inline_and_parse<T>` — decrypt an entity payload arriving inline via the event bus, with no REST round-trip; `EntityClient::parse_raw` helper | — | — | no (held) | no | yes (consumed by the bridge realtime path to skip `load_mail` on every Mail UPDATE / new mail; 3 integration tests against the live decryption fixture) |
+| `sdk-mail-draft-details` | `MailFacade::load_mail_details_draft` — load + decrypt the `MailDetailsDraft` of a draft `Mail` (session key from the parent `Mail`); `CryptoEntityClient::load_encrypted` accessor for the no-auto-decrypt fetch step | — | — | no (held) | no | yes (consumed by the bridge prefetch loop so drafts get a proper body instead of the "No details for mail" spam; 3 contract unit tests) |
 
 ## Notes per branch
 
@@ -80,6 +81,30 @@ without an extra REST round-trip. 8 unit tests assert the TS test vector
 verbatim plus round-trip and four error shapes. Live-tested in the bridge
 realtime delta path (Phase 2 of the realtime work).
 
+### sdk-mail-draft-details
+**Held — not submitted upstream.** `MailFacade::load_mail_details_draft(&mail)`
+mirrors the TS `MailFacade.loadMailDetailsDraft()` companion of
+`loadMailDetailsBlob`. A draft mail's body lives in a `MailDetailsDraft`
+list element (not a blob archive entry like `MailDetailsBlob`), so it's
+fetched through the standard list-element REST path; the session key is
+always resolved from the parent `Mail` (`_ownerEncSessionKey` +
+`_ownerGroup` + `_ownerKeyVersion`), never from the `MailDetailsDraft`
+itself — the draft's own `_ownerEncSessionKey` is `ZeroOrOne` on the
+wire and the TS client never relies on it being set, so we match that
+contract. `CryptoEntityClient::load_encrypted` is a small public helper
+that exposes the raw `EntityClient::load` step without the auto-decrypt
+that `load_untyped` performs — the list-element counterpart of
+`BlobFacade::load_blob_element` for the same use case (caller has the
+session key from elsewhere and will decrypt the result with
+`decrypt_with_owner_key`). Built off `sdk-blob-element-reading`
+because it depends on `decrypt_with_owner_key` introduced there; if the
+blob branch merges upstream first this branch becomes a clean
+one-commit branch off `upstream/master`. 3 unit tests pin down the
+early-return contract (rejects a received mail, refuses a missing
+draft id, refuses a missing `_ownerEncSessionKey`). Live-tested in the
+bridge prefetch path so drafts get a body instead of the "No details
+for mail" log spam.
+
 ### sdk-inline-decrypt
 **Held — not submitted upstream.** `CryptoEntityClient::decrypt_inline_and_parse<T>`
 takes the still-encrypted JSON delivered inside a WebSocket
@@ -116,9 +141,13 @@ git rebase upstream/master sdk-move-mails
 git rebase upstream/master sdk-event-bus
 git rebase upstream/master sdk-mail-set-entry-id
 git rebase upstream/master sdk-inline-decrypt
+# `sdk-mail-draft-details` is stacked on `sdk-blob-element-reading` (it
+# depends on `decrypt_with_owner_key`). Rebase it onto the rebased blob
+# branch so it stays linear:
+git rebase sdk-blob-element-reading sdk-mail-draft-details
 # rebuild the integration branch from the rebased branches
 git checkout -B tutabridge-integration upstream/master
-git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id sdk-inline-decrypt
+git cherry-pick sdk-load-multiple sdk-blob-element-reading sdk-2fa-session sdk-folder-system sdk-move-mails sdk-event-bus sdk-mail-set-entry-id sdk-inline-decrypt sdk-mail-draft-details
 ```
 
 When an upstream PR merges, drop that branch from the cherry-pick list — the
