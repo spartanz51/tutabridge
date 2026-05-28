@@ -1396,8 +1396,8 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 },
-                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2 },
+                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false },
+                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2, attachments_pending: false },
                 ],
             )
             .await;
@@ -1435,6 +1435,7 @@ mod tests {
                 details: None,
                 rfc2822: None,
                 uid: (i + 1) as u32,
+                attachments_pending: false,
             })
             .collect();
         store.set_folder("inbox", stored).await;
@@ -1619,8 +1620,8 @@ mod tests {
         let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2), &[]);
         store.set_folder_list(vec![inbox_folder()]).await;
         store.set_folder("inbox", vec![
-            StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1), uid: 1 },
-            StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2), uid: 2 },
+            StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1), uid: 1, attachments_pending: false },
+            StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2), uid: 2, attachments_pending: false },
         ]).await;
         let mut session = ImapSession::new(store, backend, None);
 
@@ -1945,8 +1946,8 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 },
-                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2 },
+                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false },
+                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2, attachments_pending: false },
                 ],
             )
             .await;
@@ -1966,7 +1967,7 @@ mod tests {
         store
             .set_folder(
                 "inbox",
-                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 }],
+                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false }],
             )
             .await;
         let resp = session.check_new_mail().await;
@@ -1989,8 +1990,8 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: old1, details: None, rfc2822: None, uid: 1 },
-                    StoredMail { mail: new3, details: None, rfc2822: None, uid: 3 },
+                    StoredMail { mail: old1, details: None, rfc2822: None, uid: 1, attachments_pending: false },
+                    StoredMail { mail: new3, details: None, rfc2822: None, uid: 3, attachments_pending: false },
                 ],
             )
             .await;
@@ -2013,7 +2014,7 @@ mod tests {
         store
             .set_folder(
                 "inbox",
-                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1 }],
+                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false }],
             )
             .await;
         let resp = session.check_new_mail().await;

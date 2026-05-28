@@ -329,18 +329,22 @@ impl TutaSession {
     /// freshly-created attachments whose `_ownerEncSessionKey` /
     /// `_ownerGroup` haven't been published yet — the SDK's session-key
     /// resolution then fails with "instance missing owner key/group data".
-    /// 1s + 3s + 6s ≈ 10s of tolerance covers the propagation lag in
-    /// practice; anything still failing after that bubbles up so the
-    /// `prefetch_details` caller can decide to ship a body-only envelope.
+    /// 2s + 4s + 8s + 16s ≈ 30s of tolerance covers the propagation lag in
+    /// practice (self-sends can take >20s because the same mailbox
+    /// produces both the Sent entity and the Inbox copy); anything still
+    /// failing after that bubbles up so the `prefetch_details` caller can
+    /// decide to ship a body-only envelope and let the next prefetch
+    /// sweep (triggered by another store mutation) take another shot.
     async fn load_file_with_retry(
         &self,
         file_id: &IdTupleGenerated,
     ) -> Result<TutanotaFile, ApiCallError> {
         let crypto_client = self.crypto_client();
         let backoffs = [
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(3),
-            std::time::Duration::from_secs(6),
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(4),
+            std::time::Duration::from_secs(8),
+            std::time::Duration::from_secs(16),
         ];
         let mut iter = backoffs.iter();
         loop {

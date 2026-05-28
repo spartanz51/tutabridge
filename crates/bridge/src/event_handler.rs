@@ -349,6 +349,7 @@ async fn apply_mail_set_entry_create(
 			details: details.clone(),
 			rfc2822: rfc2822.clone(),
 			uid: 0,
+			attachments_pending: false,
 		};
 		// Persist the body straight away so the IMAP layer can serve FETCH
 		// BODY[] without a placeholder, and the prefetch loop skips it.
@@ -388,6 +389,7 @@ async fn apply_mail_set_entry_create(
 				details: None,
 				rfc2822: None,
 				uid: 0,
+				attachments_pending: false,
 			};
 			assign_uid_and_upsert(store, local_store, target_folder, &elem_id, &mut stored).await;
 		},
