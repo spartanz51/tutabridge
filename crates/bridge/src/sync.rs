@@ -558,3 +558,151 @@ fn backoff(current: Duration) -> Duration {
     };
     next.min(Duration::from_secs(120))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tutasdk::date::DateTime;
+    use tutasdk::entities::generated::tutanota::MailAddress;
+    use tutasdk::{GeneratedId, IdTupleGenerated};
+
+    fn id(s: &str) -> GeneratedId {
+        GeneratedId(s.to_string())
+    }
+
+    /// Minimal `Mail` fixture for `MailStore` tests. Only the `_id` and a
+    /// couple of metadata fields are read by the helpers under test; the rest
+    /// is filled with defaults.
+    fn make_mail(list: &str, element: &str, subject: &str, unread: bool) -> Mail {
+        Mail {
+            _id: Some(IdTupleGenerated::new(id(list), id(element))),
+            _permissions: id("perm"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            subject: subject.to_string(),
+            receivedDate: DateTime::from_millis(1735130245000),
+            state: 2,
+            unread,
+            confidential: false,
+            replyType: 0,
+            _ownerGroup: None,
+            differentEnvelopeSender: None,
+            listUnsubscribe: false,
+            movedTime: None,
+            phishingStatus: 0,
+            authStatus: None,
+            method: 0,
+            recipientCount: 1,
+            encryptionAuthStatus: None,
+            _ownerKeyVersion: None,
+            processingState: 0,
+            processNeeded: false,
+            sendAt: None,
+            serverClassificationData: None,
+            _kdfNonce: None,
+            sender: MailAddress {
+                _id: None,
+                name: "Sender".to_string(),
+                address: "sender@tuta.com".to_string(),
+                contact: None,
+                _errors: Default::default(),
+            },
+            attachments: vec![],
+            conversationEntry: IdTupleGenerated::new(id("conv_list"), id("conv_elem")),
+            firstRecipient: None,
+            mailDetails: None,
+            mailDetailsDraft: None,
+            bucketKey: None,
+            sets: vec![],
+            clientSpamClassifierResult: None,
+            _errors: Default::default(),
+        }
+    }
+
+    fn stored(mail: Mail, uid: u32) -> StoredMail {
+        StoredMail {
+            mail,
+            details: None,
+            rfc2822: None,
+            uid,
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_mail_in_place_updates_metadata_in_every_folder() {
+        let store = MailStore::new();
+        // Same mail referenced in two folders (Tuta's model allows this via
+        // MailSet membership). Both rows must be updated when the entity
+        // changes — e.g. an "unread" toggle from the webmail.
+        let m_a = make_mail("L1", "M1", "Hello", true);
+        let m_b = m_a.clone();
+        store.set_folder("folderA", vec![stored(m_a, 7)]).await;
+        store.set_folder("folderB", vec![stored(m_b, 12)]).await;
+
+        let mut updated = make_mail("L1", "M1", "Hello [updated]", false);
+        // also tweak subject to verify the whole entity is swapped in.
+        updated.subject = "Hello [updated]".into();
+        store.refresh_mail_in_place(&updated).await;
+
+        let a = store.get_folder("folderA").await;
+        let b = store.get_folder("folderB").await;
+        assert_eq!(a[0].mail.subject, "Hello [updated]");
+        assert!(!a[0].mail.unread);
+        assert_eq!(a[0].uid, 7, "UID is per-folder state, must survive a refresh");
+        assert_eq!(b[0].mail.subject, "Hello [updated]");
+        assert_eq!(b[0].uid, 12);
+    }
+
+    #[tokio::test]
+    async fn refresh_mail_in_place_no_match_is_noop() {
+        let store = MailStore::new();
+        store
+            .set_folder("folderA", vec![stored(make_mail("L1", "M1", "S", true), 1)])
+            .await;
+        let stranger = make_mail("L1", "OTHER", "X", false);
+        store.refresh_mail_in_place(&stranger).await;
+        let a = store.get_folder("folderA").await;
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].mail.subject, "S"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn remove_mail_everywhere_drops_from_all_folders() {
+        let store = MailStore::new();
+        store
+            .set_folder(
+                "folderA",
+                vec![
+                    stored(make_mail("L1", "keep", "k", true), 1),
+                    stored(make_mail("L1", "gone", "g", true), 2),
+                ],
+            )
+            .await;
+        store
+            .set_folder(
+                "folderB",
+                vec![stored(make_mail("L1", "gone", "g", true), 5)],
+            )
+            .await;
+        store.remove_mail_everywhere("gone").await;
+
+        let a = store.get_folder("folderA").await;
+        let b = store.get_folder("folderB").await;
+        assert_eq!(a.len(), 1);
+        assert_eq!(
+            a[0].mail._id.as_ref().unwrap().element_id.to_string(),
+            "keep"
+        );
+        assert!(b.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_mail_everywhere_unknown_id_is_noop() {
+        let store = MailStore::new();
+        store
+            .set_folder("folderA", vec![stored(make_mail("L1", "M1", "s", true), 1)])
+            .await;
+        store.remove_mail_everywhere("unknown").await;
+        assert_eq!(store.get_folder("folderA").await.len(), 1);
+    }
+}
