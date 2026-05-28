@@ -230,8 +230,31 @@
 
 .stats-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 12px;
+}
+
+.ws-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--brand);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--on-surface);
+  line-height: 1;
+}
+
+.ws-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.ws-dot.pulsing {
+  animation: breathe 2s ease-in-out infinite;
 }
 
 .stat-card {

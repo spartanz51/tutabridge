@@ -9,7 +9,11 @@ const POLL_INTERVAL = 1000;
 export function useBridge() {
   const [config, setConfig] = useState<Config | null>(null);
   const [status, setStatus] = useState<BridgeStatus | null>(null);
-  const [stats, setStats] = useState<BridgeStats>({ uptime_secs: null, mails_synced: 0 });
+  const [stats, setStats] = useState<BridgeStats>({
+    uptime_secs: null,
+    mails_synced: 0,
+    ws_status: "Stopped",
+  });
   const [hasSavedSession, setHasSavedSession] = useState(false);
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);

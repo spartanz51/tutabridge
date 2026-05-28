@@ -9,9 +9,12 @@ export interface Config {
 
 export type BridgeStatus = "Stopped" | "Starting" | "Running" | { Error: string };
 
+export type WsStatus = "Stopped" | "Connecting" | "Connected" | "Reconnecting";
+
 export interface BridgeStats {
   uptime_secs: number | null;
   mails_synced: number;
+  ws_status: WsStatus;
 }
 
 export function statusLabel(status: BridgeStatus): string {

@@ -52,10 +52,32 @@ pub enum BridgeStatus {
     Error(String),
 }
 
+/// Live state of the event-bus WebSocket. Surfaces directly in the UI so the
+/// user can see at a glance whether realtime push is healthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum WsStatus {
+    Stopped,
+    Connecting,
+    Connected,
+    Reconnecting,
+}
+
+impl From<tutasdk::event_bus::WsState> for WsStatus {
+    fn from(s: tutasdk::event_bus::WsState) -> Self {
+        match s {
+            tutasdk::event_bus::WsState::Stopped => Self::Stopped,
+            tutasdk::event_bus::WsState::Connecting => Self::Connecting,
+            tutasdk::event_bus::WsState::Connected => Self::Connected,
+            tutasdk::event_bus::WsState::Reconnecting => Self::Reconnecting,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BridgeStats {
     pub uptime_secs: Option<u64>,
     pub mails_synced: usize,
+    pub ws_status: WsStatus,
 }
 
 pub struct BridgeHandle {
@@ -65,6 +87,8 @@ pub struct BridgeHandle {
     started_at: Option<std::time::Instant>,
     store: Option<Arc<MailStore>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// Latest event-bus state, populated at `start` and observed by `stats`.
+    ws_state_rx: Option<watch::Receiver<tutasdk::event_bus::WsState>>,
 }
 
 impl BridgeHandle {
@@ -77,6 +101,7 @@ impl BridgeHandle {
             started_at: None,
             store: None,
             task: None,
+            ws_state_rx: None,
         }
     }
 
@@ -97,9 +122,15 @@ impl BridgeHandle {
             Some(store) => store.total_mail_count().await,
             None => 0,
         };
+        let ws_status = self
+            .ws_state_rx
+            .as_ref()
+            .map(|rx| WsStatus::from(*rx.borrow()))
+            .unwrap_or(WsStatus::Stopped);
         BridgeStats {
             uptime_secs: self.started_at.map(|t| t.elapsed().as_secs()),
             mails_synced: count,
+            ws_status,
         }
     }
 
@@ -235,6 +266,7 @@ impl BridgeHandle {
             }
         }
         let bus_ids_for_handler = bus_client.last_batch_ids();
+        self.ws_state_rx = Some(bus_client.state());
 
         let task = tokio::spawn(async move {
             let imap_tls = tls_acceptor.clone();
@@ -343,6 +375,7 @@ impl BridgeHandle {
             let _ = task.await;
         }
         self.started_at = None;
+        self.ws_state_rx = None;
     }
 
     fn emit_log(&self, msg: &str) {

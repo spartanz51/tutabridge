@@ -1,6 +1,20 @@
 import { useState } from "react";
-import type { BridgeStatus, BridgeStats } from "../types";
+import type { BridgeStatus, BridgeStats, WsStatus } from "../types";
 import { isError } from "../types";
+
+function wsBadge(status: WsStatus): { color: string; label: string; pulsing: boolean } {
+  switch (status) {
+    case "Connected":
+      return { color: "var(--green)", label: "Connected", pulsing: false };
+    case "Connecting":
+      return { color: "var(--orange)", label: "Connecting…", pulsing: true };
+    case "Reconnecting":
+      return { color: "var(--orange)", label: "Reconnecting…", pulsing: true };
+    case "Stopped":
+    default:
+      return { color: "var(--gray)", label: "Off", pulsing: false };
+  }
+}
 
 interface Props {
   status: BridgeStatus | null;
@@ -121,6 +135,23 @@ export function Dashboard({ status, stats, hasSavedSession, loading, onStart, on
             {stats.uptime_secs != null ? formatUptime(stats.uptime_secs) : "--"}
           </span>
           <span className="stat-label">Uptime</span>
+        </div>
+        <div className="stat-card">
+          <span className="ws-badge">
+            {(() => {
+              const b = wsBadge(stats.ws_status);
+              return (
+                <>
+                  <span
+                    className={"ws-dot" + (b.pulsing ? " pulsing" : "")}
+                    style={{ background: b.color }}
+                  />
+                  <span className="ws-text">{b.label}</span>
+                </>
+              );
+            })()}
+          </span>
+          <span className="stat-label">Realtime</span>
         </div>
       </div>
     </div>

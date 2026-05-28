@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-primitives"
-version = "348.260526.0"
+version = "348.260528.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -5304,7 +5304,7 @@ dependencies = [
 
 [[package]]
 name = "tuta-sdk"
-version = "348.260526.0"
+version = "348.260528.0"
 dependencies = [
  "android_log",
  "argon2",
@@ -5657,7 +5657,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "util"
-version = "348.260526.0"
+version = "348.260528.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
