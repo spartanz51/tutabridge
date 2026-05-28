@@ -12,7 +12,6 @@ use crate::tuta::{FolderInfo, MailBackend};
 
 const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
 const INTER_FOLDER_DELAY: Duration = Duration::from_millis(300);
-const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 /// Pause between background body-prefetch sweeps.
 const PREFETCH_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RETRIES: u32 = 3;
@@ -115,6 +114,61 @@ impl MailStore {
         self.bump_generation();
     }
 
+    /// Refresh an existing mail's metadata in every folder that holds it
+    /// (body/details preserved). No-op if the mail is not cached.
+    pub async fn refresh_mail_in_place(&self, mail: &Mail) {
+        let Some(eid) = mail
+            ._id
+            .as_ref()
+            .map(|id| id.element_id.to_string())
+        else {
+            return;
+        };
+        let mut folders = self.folders.write().await;
+        let mut changed = false;
+        for mails in folders.values_mut() {
+            if let Some(m) = mails.iter_mut().find(|m| {
+                m.mail
+                    ._id
+                    .as_ref()
+                    .map(|id| id.element_id.to_string())
+                    .as_deref()
+                    == Some(&eid)
+            }) {
+                m.mail = mail.clone();
+                changed = true;
+            }
+        }
+        drop(folders);
+        if changed {
+            self.bump_generation();
+        }
+    }
+
+    /// Drop a mail from every folder it appears in (handles DELETE events).
+    pub async fn remove_mail_everywhere(&self, element_id: &str) {
+        let mut folders = self.folders.write().await;
+        let mut changed = false;
+        for mails in folders.values_mut() {
+            let before = mails.len();
+            mails.retain(|m| {
+                m.mail
+                    ._id
+                    .as_ref()
+                    .map(|id| id.element_id.to_string())
+                    .as_deref()
+                    != Some(element_id)
+            });
+            if mails.len() != before {
+                changed = true;
+            }
+        }
+        drop(folders);
+        if changed {
+            self.bump_generation();
+        }
+    }
+
     async fn update_mail_details(
         &self,
         folder_id: &str,
@@ -186,68 +240,36 @@ pub async fn run_syncer(
         }
     }
 
-    // Run the fast list/folder sync and the slow body prefetch as independent
-    // loops: a long prefetch pass must never block folder / new-mail refresh.
-    tokio::join!(
-        list_sync_loop(&store, &local_store, &*backend, sync_limit, shutdown.clone()),
-        prefetch_loop(&store, &local_store, &*backend, shutdown.clone()),
-    );
-    info!("Mail syncer shutting down");
-}
-
-/// Fast loop: refresh the folder list and sync the mail-id list for every
-/// folder. This is what surfaces new folders and new mail (~every
-/// `SYNC_INTERVAL`), independent of the slow body prefetch.
-async fn list_sync_loop(
-    store: &MailStore,
-    local_store: &LocalStore,
-    backend: &dyn MailBackend,
-    sync_limit: usize,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    let mut cycle_backoff = Duration::ZERO;
-    loop {
-        if *shutdown.borrow() {
-            return;
+    // Bootstrap: if we have no cached event-bus catch-up state, the on-disk
+    // cache may be stale or empty. Run a one-shot full list sync of every
+    // folder so the store reflects current server state; from then on the
+    // event bus drives all updates (no periodic polling).
+    let needs_bootstrap = match local_store.load_event_bus_state() {
+        Ok(s) => s.is_empty(),
+        Err(e) => {
+            warn!("Could not read event_bus_state ({e}); assuming bootstrap needed");
+            true
         }
-        let mut had_error = false;
-
-        let folders = match retry(|| backend.list_folders()).await {
-            Ok(folders) => {
-                store.set_folder_list(folders.clone()).await;
-                folders
-            }
-            Err(e) => {
-                warn!("Failed to refresh folder list: {e}");
-                had_error = true;
-                store.list_folders().await
-            }
-        };
-
+    };
+    if needs_bootstrap && !folders.is_empty() {
+        info!("Bootstrap sync (no cached event-bus state)");
         for folder in &folders {
             if *shutdown.borrow() {
                 return;
             }
-            if let Err(e) = sync_folder(store, local_store, backend, folder, sync_limit).await {
-                warn!("Sync error for {}: {}", folder.imap_path, e);
-                had_error = true;
+            if let Err(e) = sync_folder(&store, &local_store, &*backend, folder, sync_limit).await {
+                warn!("Bootstrap sync failed for {}: {}", folder.imap_path, e);
             }
             tokio::time::sleep(INTER_FOLDER_DELAY).await;
         }
-
-        cycle_backoff = if had_error {
-            backoff(cycle_backoff)
-        } else {
-            Duration::ZERO
-        };
-        let wait = SYNC_INTERVAL + cycle_backoff;
-        debug!("Next list sync in {:?}", wait);
-
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            _ = shutdown.changed() => return,
-        }
+    } else if !needs_bootstrap {
+        debug!("Skipping bootstrap sync — event-bus catch-up will reconcile");
     }
+
+    // From here on the syncer only owns the slow body prefetch. Folder /
+    // new-mail refresh is driven by the event bus + `event_handler`.
+    prefetch_loop(&store, &local_store, &*backend, shutdown.clone()).await;
+    info!("Mail syncer shutting down");
 }
 
 /// Slow loop: progressively prefetch mail bodies in the background, on its own
@@ -320,7 +342,7 @@ async fn load_cached_folder(
     Ok(count)
 }
 
-async fn sync_folder(
+pub(crate) async fn sync_folder(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,

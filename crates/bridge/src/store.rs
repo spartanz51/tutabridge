@@ -8,9 +8,9 @@ use log::{debug, warn};
 use rusqlite::{Connection, OptionalExtension};
 
 /// Bumped when the on-disk schema changes. A mismatch drops the cached tables
-/// (mails + sync_state) and triggers a full re-sync; encrypted .eml files are
-/// keyed by element id and survive the migration.
-const SCHEMA_VERSION: &str = "3";
+/// (mails + sync_state + event_bus_state) and triggers a full re-sync;
+/// encrypted .eml files are keyed by element id and survive the migration.
+const SCHEMA_VERSION: &str = "4";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -82,7 +82,11 @@ impl LocalStore {
                 "Local store schema {:?} != {SCHEMA_VERSION}, dropping cache tables",
                 version
             );
-            conn.execute_batch("DROP TABLE IF EXISTS mails; DROP TABLE IF EXISTS sync_state;")?;
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS mails;
+                 DROP TABLE IF EXISTS sync_state;
+                 DROP TABLE IF EXISTS event_bus_state;",
+            )?;
         }
 
         conn.execute_batch(&format!(
@@ -105,6 +109,11 @@ impl LocalStore {
                 folder_id     TEXT PRIMARY KEY,
                 last_sync_ms  INTEGER NOT NULL DEFAULT 0,
                 next_uid      INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS event_bus_state (
+                group_id       TEXT PRIMARY KEY,
+                last_batch_id  TEXT NOT NULL,
+                updated_at_ms  INTEGER NOT NULL DEFAULT 0
             );
             INSERT OR REPLACE INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
@@ -392,6 +401,92 @@ impl LocalStore {
             conn.query_row("SELECT COUNT(*) FROM mails", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    /// Load the last processed event-batch id for every known group.
+    pub fn load_event_bus_state(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT group_id, last_batch_id FROM event_bus_state")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (g, b) = row?;
+            out.insert(g, b);
+        }
+        Ok(out)
+    }
+
+    /// Persist the last processed batch id for a group (event-bus catch-up
+    /// resumes from this point on the next reconnect).
+    pub fn set_event_bus_batch_id(
+        &self,
+        group_id: &str,
+        batch_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO event_bus_state(group_id, last_batch_id, updated_at_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(group_id) DO UPDATE SET
+                last_batch_id = excluded.last_batch_id,
+                updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![group_id, batch_id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Refresh the per-mail fields (read/unread, subject, sender, JSON blob)
+    /// for every row of this `element_id` — typically a mail lives in one
+    /// folder, but Tuta's model allows multi-folder placement, so we update
+    /// all matching rows. Folder placement itself is governed by
+    /// `MailSetEntry` events.
+    pub fn refresh_mail_fields(
+        &self,
+        element_id: &str,
+        subject: &str,
+        sender_name: &str,
+        sender_address: &str,
+        unread: bool,
+        mail_json: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mails SET
+                subject = ?1,
+                sender_name = ?2,
+                sender_address = ?3,
+                unread = ?4,
+                mail_json = ?5
+             WHERE element_id = ?6",
+            rusqlite::params![
+                subject,
+                sender_name,
+                sender_address,
+                unread as i64,
+                mail_json,
+                element_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a mail entirely (metadata + .eml). Used by the event handler on a
+    /// `DELETE` of the underlying mail entity.
+    pub fn delete_mail(&self, element_id: &str) -> Result<(), StoreError> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM mails WHERE element_id = ?1", [element_id])?;
+        }
+        self.delete_eml(element_id)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +630,37 @@ mod tests {
         assert_eq!(store.total_count().unwrap(), 0);
         assert!(store.read_eml("abc").unwrap().is_none());
         assert!(store.verify_key());
+    }
+
+    #[test]
+    fn event_bus_state_roundtrip() {
+        let store = open_memory_store();
+        assert!(store.load_event_bus_state().unwrap().is_empty());
+
+        store.set_event_bus_batch_id("group1", "batchA").unwrap();
+        store.set_event_bus_batch_id("group2", "batchX").unwrap();
+
+        let s = store.load_event_bus_state().unwrap();
+        assert_eq!(s.get("group1"), Some(&"batchA".to_string()));
+        assert_eq!(s.get("group2"), Some(&"batchX".to_string()));
+
+        // Upsert overwrites.
+        store.set_event_bus_batch_id("group1", "batchB").unwrap();
+        let s = store.load_event_bus_state().unwrap();
+        assert_eq!(s.get("group1"), Some(&"batchB".to_string()));
+    }
+
+    #[test]
+    fn delete_mail_removes_metadata_and_eml() {
+        let store = open_memory_store();
+        store.upsert_mail_metadata(&meta("del1", "inbox", 0)).unwrap();
+        store.write_eml("del1", "content").unwrap();
+        assert_eq!(store.mail_count("inbox").unwrap(), 1);
+        assert!(store.has_eml("del1"));
+
+        store.delete_mail("del1").unwrap();
+        assert_eq!(store.mail_count("inbox").unwrap(), 0);
+        assert!(!store.has_eml("del1"));
     }
 
     #[test]

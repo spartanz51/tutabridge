@@ -1397,6 +1397,21 @@ mod tests {
         async fn load_mail_ids_for_folder(&self, _folder: &FolderInfo, _limit: usize) -> Result<Vec<Mail>, String> {
             Ok(self.mails.lock().unwrap().clone())
         }
+        async fn load_mail(&self, _list_id: &str, element_id: &str) -> Result<Option<Mail>, String> {
+            Ok(self
+                .mails
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|m| {
+                    m._id
+                        .as_ref()
+                        .map(|id| id.element_id.to_string())
+                        .as_deref()
+                        == Some(element_id)
+                })
+                .cloned())
+        }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
             let key = mail._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
             Ok(self.details.lock().unwrap().get(&key).cloned())

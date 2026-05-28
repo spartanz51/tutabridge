@@ -2,10 +2,19 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::config::{self, Config};
+use crate::event_handler;
 use crate::store::LocalStore;
 use crate::sync::{self, MailStore};
 use crate::tuta::{self, MailBackend, TwoFactorCallback};
 use crate::{imap, smtp, tls};
+
+// Tuta `modelVersions=` for the event-bus URL. The server uses these to
+// validate compatibility. Keep in sync with the vendored SDK
+// (`tuta-sdk/.../type_models/{sys,tutanota}.json` `version`).
+const SYS_MODEL_VERSION: u32 = 150;
+const TUTANOTA_MODEL_VERSION: u32 = 108;
+/// Identifier the server uses for telemetry/rate-limit bucketing.
+const CLIENT_NAME: &str = "tutabridge";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum BridgeStatus {
@@ -127,6 +136,15 @@ impl BridgeHandle {
         let local_store = Arc::new(local_store);
         self.emit_log("Local store opened");
 
+        // Seed the realtime event bus before we move `session` into the
+        // backend Arc: we need its access_token / user_id / membership groups.
+        let bus_access_token = session.access_token.clone();
+        let bus_user_id = session
+            .user_id()
+            .ok_or_else(|| "Missing user id from session".to_string())?;
+        let bus_event_groups = session.event_groups();
+        let bus_base_url = config.api_url.clone();
+
         let backend: Arc<dyn MailBackend> = Arc::new(session);
         let store = MailStore::new();
         self.store = Some(store.clone());
@@ -142,6 +160,32 @@ impl BridgeHandle {
         let sync_limit = config.sync_limit;
         let pw = config.bridge_password.clone();
 
+        // Build the realtime event bus and hydrate its catch-up state from
+        // disk so the next reconnect resumes from the last processed batch.
+        let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
+            bus_base_url,
+            SYS_MODEL_VERSION,
+            TUTANOTA_MODEL_VERSION,
+            tutasdk::CLIENT_VERSION.to_string(),
+            CLIENT_NAME.to_string(),
+        ));
+        {
+            let ids_handle = bus_client.last_batch_ids();
+            match local_store.load_event_bus_state() {
+                Ok(s) if !s.is_empty() => {
+                    let mut m = ids_handle.lock().unwrap();
+                    m.extend(s);
+                    self.emit_log(&format!(
+                        "Event bus catch-up state loaded ({} group(s))",
+                        m.len()
+                    ));
+                },
+                Ok(_) => self.emit_log("Event bus catch-up state is empty (first launch)"),
+                Err(e) => self.emit_log(&format!("Could not load event_bus_state: {e}")),
+            }
+        }
+        let bus_ids_for_handler = bus_client.last_batch_ids();
+
         let task = tokio::spawn(async move {
             let imap_tls = tls_acceptor.clone();
             let smtp_tls = tls_acceptor;
@@ -149,12 +193,44 @@ impl BridgeHandle {
             let _ = log_tx.send(format!("IMAP listening on 127.0.0.1:{imap_port}"));
             let _ = log_tx.send(format!("SMTP listening on 127.0.0.1:{smtp_port}"));
 
+            // mpsc channel from event bus -> handler.
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+
             let syncer_handle = tokio::spawn(sync::run_syncer(
+                store.clone(),
+                local_store.clone(),
+                backend.clone(),
+                sync_limit,
+                shutdown_sync_rx.clone(),
+            ));
+            let bus_handle = {
+                let client = Arc::clone(&bus_client);
+                let token = bus_access_token;
+                let uid = bus_user_id;
+                let shutdown = shutdown_sync_rx.clone();
+                // Multiple memberships are still surfaced as their group ids
+                // via `bus_event_groups`; even if our handler only acts on
+                // mail-related events, the bus query string already lists
+                // every group from `last_batch_ids`, so the server replays
+                // missed events for all of them.
+                let _ = bus_event_groups;
+                tokio::spawn(async move {
+                    if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
+                        match e {
+                            tutasdk::event_bus::EventBusError::Stopped => {},
+                            _ => log::warn!("Event bus exited: {e}"),
+                        }
+                    }
+                })
+            };
+            let handler_handle = tokio::spawn(event_handler::run_event_handler(
                 store.clone(),
                 local_store,
                 backend.clone(),
                 sync_limit,
-                shutdown_sync_rx,
+                bus_ids_for_handler,
+                event_rx,
+                shutdown_sync_rx.clone(),
             ));
             let mut imap_handle = tokio::spawn(imap::serve(
                 imap_port,
@@ -186,10 +262,18 @@ impl BridgeHandle {
             // a subsequent start rebinds them. Skip awaiting a handle that already
             // resolved in the select above (re-polling it would panic).
             syncer_handle.abort();
+            bus_handle.abort();
+            handler_handle.abort();
             imap_handle.abort();
             smtp_handle.abort();
             if !syncer_handle.is_finished() {
                 let _ = syncer_handle.await;
+            }
+            if !bus_handle.is_finished() {
+                let _ = bus_handle.await;
+            }
+            if !handler_handle.is_finished() {
+                let _ = handler_handle.await;
             }
             if !imap_handle.is_finished() {
                 let _ = imap_handle.await;

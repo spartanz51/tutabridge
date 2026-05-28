@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod config;
+pub mod event_handler;
 pub mod store;
 pub mod sync;
 pub mod tuta;

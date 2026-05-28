@@ -44,6 +44,10 @@ pub const IMAP_DELIMITER: char = '/';
 #[async_trait::async_trait]
 pub trait MailBackend: Send + Sync {
     async fn load_mail_ids_for_folder(&self, folder: &FolderInfo, limit: usize) -> Result<Vec<Mail>, String>;
+    /// Load a single mail by `(list_id, element_id)` — used by the event-bus
+    /// handler to fetch a freshly-created or updated mail without re-listing
+    /// its folder. `Ok(None)` means the entity is no longer on the server.
+    async fn load_mail(&self, list_id: &str, element_id: &str) -> Result<Option<Mail>, String>;
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String>;
     /// Enumerate all mail folders (system + custom, with hierarchy).
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
@@ -82,6 +86,9 @@ fn system_special_use(kind: MailSetKind) -> Option<&'static str> {
 pub struct TutaSession {
     pub logged_in: Arc<LoggedInSdk>,
     pub email: String,
+    /// Bearer token issued at login; used to authenticate REST requests and
+    /// the realtime event-bus WebSocket query string.
+    pub access_token: String,
 }
 
 impl TutaSession {
@@ -94,6 +101,46 @@ impl TutaSession {
             .mail_facade()
             .load_folders_for_mailbox(mailbox)
             .await
+    }
+
+    pub fn user_id(&self) -> Option<String> {
+        self.logged_in.get_user_id().map(|id| id.0)
+    }
+
+    /// Group ids the event bus should subscribe to: all of the user's
+    /// memberships except mailing lists, plus the user group itself
+    /// (mirrors `EventBusClient.eventGroups()` in the TS worker).
+    pub fn event_groups(&self) -> Vec<String> {
+        use tutasdk::tutanota_constants::GroupType;
+        let user = self.logged_in.get_user();
+        let mut groups: Vec<String> = user
+            .memberships
+            .iter()
+            .filter(|m| m.groupType != Some(GroupType::MailingList as i64))
+            .map(|m| m.group.to_string())
+            .collect();
+        groups.push(user.userGroup.group.to_string());
+        groups
+    }
+
+    pub async fn load_mail_by_id(
+        &self,
+        list_id: &str,
+        element_id: &str,
+    ) -> Result<Option<Mail>, ApiCallError> {
+        let id = IdTupleGenerated {
+            list_id: tutasdk::GeneratedId(list_id.to_string()),
+            element_id: tutasdk::GeneratedId(element_id.to_string()),
+        };
+        match self.crypto_client().load::<Mail, _>(&id).await {
+            Ok(mail) => Ok(Some(mail)),
+            // Treat "not found" gracefully — the entity may have just been
+            // deleted server-side between the event and our follow-up load.
+            Err(ApiCallError::ServerResponseError {
+                source: tutasdk::rest_error::HttpError::NotFoundError,
+            }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn derive_storage_key(&self) -> Result<GenericAesKey, String> {
@@ -249,6 +296,12 @@ impl MailBackend for TutaSession {
             .map_err(|e| format!("{e}"))
     }
 
+    async fn load_mail(&self, list_id: &str, element_id: &str) -> Result<Option<Mail>, String> {
+        self.load_mail_by_id(list_id, element_id)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
     async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
         self.load_mail_details_impl(mail)
             .await
@@ -396,11 +449,13 @@ pub async fn login_with_2fa(
 
     if let Some(credentials) = load_credentials(&cfg.email) {
         log::info!("Resuming saved session...");
+        let access_token = credentials.access_token.clone();
         match sdk.login(credentials).await {
             Ok(logged_in) => {
                 return Ok(TutaSession {
                     logged_in,
                     email: cfg.email.clone(),
+                    access_token,
                 });
             }
             Err(e) => {
@@ -474,6 +529,7 @@ pub async fn login_with_2fa(
     Ok(TutaSession {
         logged_in,
         email: cfg.email.clone(),
+        access_token: credentials.access_token,
     })
 }
 
