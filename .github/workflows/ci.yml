@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # macOS runner: TutaBridge is a Mac desktop app and depends on
+    # platform crates (keyring apple-native, the Security framework, …).
+    runs-on: macos-latest
+    steps:
+      - name: Checkout (with vendored SDK submodule)
+        uses: actions/checkout@v4
+        with:
+          # The Tuta Rust SDK is vendored as the `tuta-repo` submodule and
+          # the build does not work without it.
+          submodules: recursive
+          # Full history so the submodule's pinned commit (which lives on a
+          # fork branch, not necessarily a branch tip) is always reachable —
+          # a shallow fetch can miss it.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo and ./target — the SDK + aws-lc-sys + pqcrypto are
+      # heavy, so without this a run takes ~10 min.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # The GUI crate's build script (tauri-build) needs the frontend bundle
+      # at ui/dist, so the frontend has to be built before any cargo step
+      # that compiles `tutabridge-gui`.
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Typecheck frontend
+        working-directory: ui
+        run: npx tsc --noEmit
+
+      - name: Rustfmt
+        run: cargo fmt --all --check
+
+      # Advisory for now — the codebase still has a handful of clippy lints.
+      # Tighten to `-- -D warnings` once they're cleared.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
