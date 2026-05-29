@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use log::{info, warn};
 use tutabridge_core::{
-    bridge as bridge_helpers, config, event_handler, imap, smtp, store::LocalStore, sync, tls,
-    tuta,
+    backup, bridge as bridge_helpers, config, event_handler, imap, smtp, store::LocalStore, sync,
+    tls, tuta,
 };
 
 #[tokio::main]
@@ -12,6 +12,26 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Failed to install TLS crypto provider"))?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Subcommand dispatch. With no subcommand we run the bridge (the default
+    // and overwhelmingly common case); `backup <dir>` does a one-shot export
+    // and exits.
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("backup") => {
+            let Some(output) = args.get(2) else {
+                eprintln!("usage: tutabridge backup <output-directory>");
+                std::process::exit(2);
+            };
+            return run_backup(output).await;
+        }
+        Some("--help") | Some("-h") | Some("help") => {
+            println!("tutabridge                 run the IMAP/SMTP bridge (default)");
+            println!("tutabridge backup <dir>    export every mail to <dir> as .eml files");
+            return Ok(());
+        }
+        _ => {}
+    }
 
     let mut cfg = match config::load_config().map_err(|e| anyhow::anyhow!("{e}"))? {
         Some(cfg) if !cfg.email.is_empty() => cfg,
@@ -45,41 +65,7 @@ async fn main() -> anyhow::Result<()> {
     info!("IMAP will listen on 127.0.0.1:{}", cfg.imap_port);
     info!("SMTP will listen on 127.0.0.1:{}", cfg.smtp_port);
 
-    let totp_cb = tuta::TwoFactorCallback::Totp(Box::new(|| {
-        use std::io::{BufRead, Write};
-        print!("TOTP code: ");
-        std::io::stdout().flush()?;
-        let mut code_str = String::new();
-        std::io::stdin().lock().read_line(&mut code_str)?;
-        let code: u32 = code_str
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid TOTP code — must be a number")?;
-        Ok(code)
-    }));
-
-    // Try keyring session first, only prompt for password if needed
-    let session = match tuta::login_with_2fa(&cfg, None, Some(totp_cb)).await {
-        Ok(s) => s,
-        Err(_) => {
-            let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email))?;
-            let totp_cb2 = tuta::TwoFactorCallback::Totp(Box::new(|| {
-                use std::io::{BufRead, Write};
-                print!("TOTP code: ");
-                std::io::stdout().flush()?;
-                let mut code_str = String::new();
-                std::io::stdin().lock().read_line(&mut code_str)?;
-                let code: u32 = code_str
-                    .trim()
-                    .parse()
-                    .map_err(|_| "Invalid TOTP code — must be a number")?;
-                Ok(code)
-            }));
-            tuta::login_with_2fa(&cfg, Some(&password), Some(totp_cb2))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-        }
-    };
+    let session = login_session(&cfg).await?;
     info!("Logged in as {}", cfg.email);
 
     let storage_key = session.derive_storage_key().await
@@ -232,4 +218,105 @@ async fn main() -> anyhow::Result<()> {
         r = imap_handle => r.map_err(|e| anyhow::anyhow!("{e}"))?.map_err(|e| anyhow::anyhow!("{e}")),
         r = smtp_handle => r.map_err(|e| anyhow::anyhow!("{e}"))?.map_err(|e| anyhow::anyhow!("{e}")),
     }
+}
+
+/// Interactive TOTP prompt used during a fresh (non-keyring) login.
+fn make_totp_cb() -> tuta::TwoFactorCallback {
+    tuta::TwoFactorCallback::Totp(Box::new(|| {
+        use std::io::{BufRead, Write};
+        print!("TOTP code: ");
+        std::io::stdout().flush()?;
+        let mut code_str = String::new();
+        std::io::stdin().lock().read_line(&mut code_str)?;
+        let code: u32 = code_str
+            .trim()
+            .parse()
+            .map_err(|_| "Invalid TOTP code — must be a number")?;
+        Ok(code)
+    }))
+}
+
+/// Resume the saved keychain session if possible, otherwise prompt for the
+/// Tuta password (and TOTP). Shared by the bridge-run path and `backup`.
+async fn login_session(cfg: &config::Config) -> anyhow::Result<tuta::TutaSession> {
+    match tuta::login_with_2fa(cfg, None, Some(make_totp_cb())).await {
+        Ok(s) => Ok(s),
+        Err(_) => {
+            let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email))?;
+            tuta::login_with_2fa(cfg, Some(&password), Some(make_totp_cb()))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// `tutabridge backup <dir>` — export every mail of every folder to a tree of
+/// `.eml` files under `output`. This is a one-shot operation: it logs in,
+/// opens the local cache read-only (no reset on key mismatch — a backup must
+/// never destroy the cache), runs the export with a live progress line, and
+/// exits.
+async fn run_backup(output: &str) -> anyhow::Result<()> {
+    let cfg = config::load_config()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .filter(|c| !c.email.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("No account configured — run `tutabridge` once to sign in first")
+        })?;
+
+    let session = login_session(&cfg).await?;
+    info!("Logged in as {}", cfg.email);
+
+    let storage_key = session
+        .derive_storage_key()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Open the cache without the reset-on-mismatch the bridge uses: a wrong
+    // key just makes `read_eml` miss and fall through to a server fetch,
+    // which is safe; wiping the cache during a backup would be destructive.
+    let local_store = LocalStore::open(
+        &config::store_db_path(),
+        &config::store_mails_dir(),
+        storage_key,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let output_path = std::path::Path::new(output);
+    info!("Backing up all mail to {} ...", output_path.display());
+
+    use std::io::Write;
+    let mut last_folder = String::new();
+    let stats = backup::export_eml(&session, &local_store, output_path, |p| {
+        if p.folder != last_folder {
+            if !last_folder.is_empty() {
+                eprintln!();
+            }
+            last_folder = p.folder.clone();
+        }
+        eprint!("\r  {}: {}/{}     ", p.folder, p.done, p.total);
+        let _ = std::io::stderr().flush();
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if !last_folder.is_empty() {
+        eprintln!();
+    }
+
+    info!(
+        "Backup complete: {} mails written ({} from cache, {} fetched) across {} folder(s), {:.1} MB",
+        stats.mails_written,
+        stats.from_cache,
+        stats.from_server,
+        stats.folders,
+        stats.bytes as f64 / 1_000_000.0,
+    );
+    if !stats.errors.is_empty() {
+        warn!("{} mail(s) could not be exported:", stats.errors.len());
+        for e in stats.errors.iter().take(20) {
+            warn!("  {e}");
+        }
+        if stats.errors.len() > 20 {
+            warn!("  … and {} more", stats.errors.len() - 20);
+        }
+    }
+    Ok(())
 }

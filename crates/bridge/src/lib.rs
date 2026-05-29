@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod bridge;
 pub mod config;
 pub mod event_handler;
