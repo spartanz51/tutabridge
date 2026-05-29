@@ -1,0 +1,26 @@
+# systemd *user* service for the TutaBridge daemon.
+#
+# TutaBridge runs per-user (it binds localhost IMAP/SMTP and uses the user's
+# login keyring), so it belongs in the user manager, not the system one.
+#
+# First run interactively once to sign in (this seeds the keyring session):
+#     tutabridge
+# then enable the background service:
+#     systemctl --user enable --now tutabridge.service
+#
+# It will resume the saved keyring session on start — no password prompt.
+
+[Unit]
+Description=TutaBridge — local IMAP/SMTP bridge for Tuta encrypted email
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/tutabridge
+Restart=on-failure
+RestartSec=5
+# Keep logs at info; override with `systemctl --user edit tutabridge` if needed.
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
