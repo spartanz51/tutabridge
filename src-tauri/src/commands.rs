@@ -1,11 +1,21 @@
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
+use tutabridge_core::backup;
 use tutabridge_core::bridge::{BridgeHandle, BridgeStats, BridgeStatus};
 use tutabridge_core::config::{self, Config};
 use tutabridge_core::tuta;
 
 pub type BridgeState = Arc<Mutex<BridgeHandle>>;
+
+/// Progress event pushed to the UI during a backup (`bridge://backup-progress`).
+#[derive(Clone, serde::Serialize)]
+struct BackupProgressEvent {
+    folder: String,
+    done: usize,
+    total: usize,
+    finished: bool,
+}
 
 #[tauri::command]
 pub async fn get_config() -> Result<Config, String> {
@@ -77,4 +87,51 @@ pub async fn regenerate_bridge_password() -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .ok_or("No config found")?;
     config::regenerate_bridge_password(&mut cfg).map_err(|e| e.to_string())
+}
+
+/// Export every mail to `output_dir` as a tree of `.eml` files. Requires the
+/// bridge to be running (reuses its live session + cache). Streams progress
+/// via `bridge://backup-progress` events and resolves with the final stats.
+#[tauri::command]
+pub async fn export_mails(
+    output_dir: String,
+    app: AppHandle,
+    state: State<'_, BridgeState>,
+) -> Result<backup::BackupStats, String> {
+    // Grab the live backend + cache, then drop the lock immediately — a
+    // backup can run for minutes and must not block status/stats reads.
+    let (backend, local_store) = {
+        let handle = state.lock().await;
+        handle
+            .backend_and_store()
+            .ok_or("Start the bridge before backing up")?
+    };
+
+    let out = std::path::Path::new(&output_dir);
+    let stats = backup::export_eml(&*backend, &local_store, out, |p| {
+        // Throttle: emit every 20 mails plus the last one of each folder.
+        if p.done == p.total || p.done % 20 == 0 {
+            let _ = app.emit(
+                "bridge://backup-progress",
+                BackupProgressEvent {
+                    folder: p.folder.clone(),
+                    done: p.done,
+                    total: p.total,
+                    finished: false,
+                },
+            );
+        }
+    })
+    .await?;
+
+    let _ = app.emit(
+        "bridge://backup-progress",
+        BackupProgressEvent {
+            folder: String::new(),
+            done: 0,
+            total: 0,
+            finished: true,
+        },
+    );
+    Ok(stats)
 }

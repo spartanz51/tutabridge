@@ -23,6 +23,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(shared as BridgeState)
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
@@ -34,6 +35,7 @@ fn main() {
             commands::get_stats,
             commands::get_bridge_password,
             commands::regenerate_bridge_password,
+            commands::export_mails,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();

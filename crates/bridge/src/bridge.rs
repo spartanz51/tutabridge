@@ -90,6 +90,10 @@ pub struct BridgeHandle {
     stats_dirty_tx: broadcast::Sender<()>,
     started_at: Option<std::time::Instant>,
     store: Option<Arc<MailStore>>,
+    /// Logged-in backend + local cache, kept after `start` so a backup can
+    /// reuse the live session instead of opening a second one.
+    backend: Option<Arc<dyn MailBackend>>,
+    local_store: Option<Arc<LocalStore>>,
     task: Option<tokio::task::JoinHandle<()>>,
     /// Latest event-bus state, populated at `start` and observed by `stats`.
     ws_state_rx: Option<watch::Receiver<tutasdk::event_bus::WsState>>,
@@ -106,8 +110,19 @@ impl BridgeHandle {
             stats_dirty_tx,
             started_at: None,
             store: None,
+            backend: None,
+            local_store: None,
             task: None,
             ws_state_rx: None,
+        }
+    }
+
+    /// The logged-in backend + local cache, available while the bridge is
+    /// running. Used by the GUI's backup command to reuse the live session.
+    pub fn backend_and_store(&self) -> Option<(Arc<dyn MailBackend>, Arc<LocalStore>)> {
+        match (&self.backend, &self.local_store) {
+            (Some(b), Some(s)) => Some((b.clone(), s.clone())),
+            _ => None,
         }
     }
 
@@ -222,6 +237,8 @@ impl BridgeHandle {
         let backend: Arc<dyn MailBackend> = Arc::new(session);
         let store = MailStore::new();
         self.store = Some(store.clone());
+        self.backend = Some(backend.clone());
+        self.local_store = Some(local_store.clone());
         let (tx, rx) = oneshot::channel::<()>();
         let (shutdown_sync_tx, shutdown_sync_rx) = watch::channel(false);
         self.shutdown_tx = Some(tx);
@@ -424,6 +441,8 @@ impl BridgeHandle {
         }
         self.started_at = None;
         self.ws_state_rx = None;
+        self.backend = None;
+        self.local_store = None;
         // Final pulse so the UI re-reads `stats()` (now reporting Stopped /
         // zero uptime / zero mails) without waiting for a poll.
         let _ = self.stats_dirty_tx.send(());
