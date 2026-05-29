@@ -1,0 +1,108 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build installers for all three desktop OSes and
+# attach them (plus the headless CLI binary) to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    permissions:
+      contents: write # create the release + upload assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri_args: --target universal-apple-darwin
+            cli_asset: tutabridge-macos-arm64
+          - platform: ubuntu-latest
+            rust_targets: ""
+            tauri_args: ""
+            cli_asset: tutabridge-linux-x86_64
+          - platform: windows-latest
+            rust_targets: ""
+            tauri_args: ""
+            cli_asset: tutabridge-windows-x86_64.exe
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout (with vendored SDK submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # Linux: Tauri's webkit/gtk stack + our build deps (aws-lc-sys, the
+      # keyring Secret Service backend's libdbus).
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            cmake nasm libdbus-1-dev pkg-config
+
+      # Windows: NASM for aws-lc-sys's assembly.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Install frontend deps
+        working-directory: ui
+        run: npm ci
+
+      # Builds the GUI bundles (.dmg / .msi+.exe / .deb+.AppImage), creates or
+      # updates the Release for this tag, and uploads them. Draft so assets can
+      # be reviewed before publishing.
+      - name: Build & release GUI bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "TutaBridge ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.tauri_args }}
+
+      # The headless CLI — the AUR/daemon target — as a standalone binary.
+      - name: Build CLI
+        run: cargo build --release -p tutabridge
+
+      - name: Attach CLI binary to the release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            src="target/release/tutabridge.exe"
+          else
+            src="target/release/tutabridge"
+          fi
+          cp "$src" "${{ matrix.cli_asset }}"
+          gh release upload "${{ github.ref_name }}" "${{ matrix.cli_asset }}" --clobber
