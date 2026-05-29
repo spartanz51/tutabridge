@@ -281,7 +281,7 @@ impl MailStore {
         }
     }
 
-    async fn update_mail_details(
+    pub(crate) async fn update_mail_details(
         &self,
         folder_id: &str,
         element_id: &str,
@@ -349,7 +349,7 @@ pub async fn run_syncer(
     shutdown: watch::Receiver<bool>,
 ) {
     info!(
-        "Mail syncer started (limit={})",
+        "Mail syncer started (body prefetch depth={})",
         if sync_limit == 0 {
             "all".to_string()
         } else {
@@ -378,10 +378,15 @@ pub async fn run_syncer(
         }
     }
 
-    // Bootstrap: if we have no cached event-bus catch-up state, the on-disk
-    // cache may be stale or empty. Run a one-shot full list sync of every
-    // folder so the store reflects current server state; from then on the
-    // event bus drives all updates (no periodic polling).
+    // We run a one-shot full **metadata** sync (the whole mail list of every
+    // folder) when either:
+    //   * there's no cached event-bus state (fresh install / cache wiped), or
+    //   * we've never completed a full-metadata sync before — the marker
+    //     below. This second case migrates existing installs that were synced
+    //     under the old `sync_limit`-truncated model up to a complete mailbox.
+    // After it runs once, the event bus keeps the list current; we don't
+    // re-list every launch (the metadata is persisted + loaded in Phase 0).
+    const FULL_METADATA_MARKER: &str = "full_metadata_synced_v1";
     let needs_bootstrap = match local_store.load_event_bus_state() {
         Ok(s) => s.is_empty(),
         Err(e) => {
@@ -389,24 +394,49 @@ pub async fn run_syncer(
             true
         }
     };
-    if needs_bootstrap && !folders.is_empty() {
-        info!("Bootstrap sync (no cached event-bus state)");
+    let full_metadata_done = local_store.get_meta(FULL_METADATA_MARKER).is_some();
+    let do_full_sync = (needs_bootstrap || !full_metadata_done) && !folders.is_empty();
+
+    if do_full_sync {
+        if needs_bootstrap {
+            info!("Bootstrap sync (no cached event-bus state)");
+        } else {
+            info!("One-time full-metadata sync (completing the mailbox view)");
+        }
+        let mut all_ok = true;
         for folder in &folders {
             if *shutdown.borrow() {
                 return;
             }
-            if let Err(e) = sync_folder(&store, &local_store, &*backend, folder, sync_limit).await {
-                warn!("Bootstrap sync failed for {}: {}", folder.imap_path, e);
+            if let Err(e) = sync_folder(&store, &local_store, &*backend, folder).await {
+                warn!("Full-metadata sync failed for {}: {}", folder.imap_path, e);
+                all_ok = false;
             }
             tokio::time::sleep(INTER_FOLDER_DELAY).await;
         }
-    } else if !needs_bootstrap {
-        debug!("Skipping bootstrap sync — event-bus catch-up will reconcile");
+        // Only set the marker if every folder synced, so a transient failure
+        // gets retried on the next launch rather than silently leaving the
+        // mailbox incomplete.
+        if all_ok {
+            if let Err(e) = local_store.set_meta(FULL_METADATA_MARKER, "1") {
+                warn!("Could not persist full-metadata marker: {e}");
+            }
+        }
+    } else {
+        debug!("Skipping full-metadata sync — already complete, event bus reconciles");
     }
 
-    // From here on the syncer only owns the slow body prefetch. Folder /
-    // new-mail refresh is driven by the event bus + `event_handler`.
-    prefetch_loop(&store, &local_store, &*backend, shutdown.clone()).await;
+    // From here on the syncer only owns the slow body prefetch (capped at
+    // `sync_limit` — the body-prefetch depth). Folder / new-mail refresh is
+    // driven by the event bus + `event_handler`.
+    prefetch_loop(
+        &store,
+        &local_store,
+        &*backend,
+        sync_limit,
+        shutdown.clone(),
+    )
+    .await;
     info!("Mail syncer shutting down");
 }
 
@@ -420,6 +450,7 @@ async fn prefetch_loop(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
+    body_prefetch_limit: usize,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut store_watch = store.subscribe();
@@ -442,6 +473,7 @@ async fn prefetch_loop(
                 local_store,
                 backend,
                 &folder,
+                body_prefetch_limit,
                 &mut attachment_retry_history,
             )
             .await;
@@ -509,10 +541,14 @@ async fn load_cached_folder(
                 }
                 Some(eml)
             }
-            Ok(None) => Some(mail_to_rfc2822(&mail, None, &[])),
+            // No cached body — leave `rfc2822` empty rather than baking in a
+            // placeholder. A placeholder would look like a real body to the
+            // IMAP layer and suppress the on-demand fetch; `None` is what tells
+            // it the body still has to be pulled the first time it's opened.
+            Ok(None) => None,
             Err(e) => {
                 warn!("Failed to read cached eml {}: {e}", meta.element_id);
-                Some(mail_to_rfc2822(&mail, None, &[]))
+                None
             }
         };
 
@@ -530,14 +566,19 @@ async fn load_cached_folder(
     Ok(count)
 }
 
+/// Sync a folder's full mail-list **metadata** (subject / sender / date /
+/// flags) — every message, not a `sync_limit`-capped slice. This is what
+/// makes the whole mailbox visible over IMAP; message *bodies* are fetched
+/// separately and lazily (see [`prefetch_details`] + on-demand FETCH).
 pub(crate) async fn sync_folder(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
     folder: &FolderInfo,
-    limit: usize,
 ) -> Result<(), String> {
-    let new_mails = retry(|| backend.load_mail_ids_for_folder(folder, limit)).await?;
+    // `0` = load every entry (the SDK paginates). Metadata is cheap relative
+    // to bodies (no blob fetch), so we never truncate the list.
+    let new_mails = retry(|| backend.load_mail_ids_for_folder(folder, 0)).await?;
 
     let existing = store.get_folder(&folder.id).await;
     let existing_map: HashMap<String, StoredMail> = existing
@@ -592,11 +633,12 @@ pub(crate) async fn sync_folder(
                 attachments_pending: existing.attachments_pending,
             });
         } else {
-            let rfc2822 = mail_to_rfc2822(mail, None, &[]);
+            // New mail, body not fetched yet — leave `rfc2822` empty so the
+            // IMAP layer fetches it on demand (a placeholder would mask that).
             updated.push(StoredMail {
                 mail: mail.clone(),
                 details: None,
-                rfc2822: Some(rfc2822),
+                rfc2822: None,
                 uid,
                 attachments_pending: false,
             });
@@ -644,12 +686,24 @@ async fn prefetch_details(
     local_store: &LocalStore,
     backend: &dyn MailBackend,
     folder: &FolderInfo,
+    body_prefetch_limit: usize,
     attachment_retry_history: &mut HashMap<String, std::time::Instant>,
 ) {
     let mails = store.get_folder(&folder.id).await;
 
-    // First pass — fresh mails still missing their `.eml` on disk.
-    let api_needed: Vec<Mail> = mails
+    // Body prefetch is the *capped* part: eagerly pull bodies only for the
+    // newest `body_prefetch_limit` messages (the store is newest-first).
+    // `0` = no cap (prefetch every body). Bodies beyond the window are fetched
+    // on demand when the client FETCHes them. (Metadata for the whole folder
+    // is always present — see `sync_folder`.)
+    let prefetch_window: &[StoredMail] = if body_prefetch_limit == 0 {
+        &mails
+    } else {
+        &mails[..mails.len().min(body_prefetch_limit)]
+    };
+
+    // First pass — messages in the prefetch window still missing their `.eml`.
+    let api_needed: Vec<Mail> = prefetch_window
         .iter()
         .filter(|m| m.details.is_none())
         .filter_map(|m| {

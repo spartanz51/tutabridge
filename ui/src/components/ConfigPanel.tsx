@@ -82,18 +82,23 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
         />
       </div>
       <div className="form-group">
-        <label>Mail to sync</label>
+        <label>Offline message bodies</label>
+        <small className="field-hint">
+          Your whole mailbox is always listed and searchable by subject, sender
+          and date. This only sets how many recent message <em>bodies</em> are
+          kept ready offline — older ones load on demand when you open them.
+        </small>
         <label className="checkbox-field">
           <input
             type="checkbox"
             checked={fetchAll}
             onChange={(e) => setFetchAll(e.target.checked)}
           />
-          <span>Fetch all mail (entire account, kept locally)</span>
+          <span>Keep every message body offline (full local copy)</span>
         </label>
         {fetchAll ? (
           <small className="field-hint">
-            Downloads every mail from the start — can be slow on large accounts.
+            Downloads every body — slow + uses the most disk on large accounts.
           </small>
         ) : (
           <input
@@ -101,7 +106,7 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
             min={1}
             value={syncLimit}
             onChange={(e) => setSyncLimit(Math.max(1, Number(e.target.value)))}
-            placeholder="Max mails per folder"
+            placeholder="Bodies to keep offline (most recent)"
           />
         )}
       </div>

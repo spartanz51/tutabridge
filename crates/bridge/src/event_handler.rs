@@ -44,7 +44,6 @@ pub async fn run_event_handler(
     store: Arc<MailStore>,
     local_store: Arc<LocalStore>,
     backend: Arc<dyn MailBackend>,
-    sync_limit: usize,
     last_batch_ids: Arc<Mutex<HashMap<String, String>>>,
     mut rx: mpsc::Receiver<EventBusMessage>,
     mut shutdown: watch::Receiver<bool>,
@@ -56,7 +55,7 @@ pub async fn run_event_handler(
             _ = shutdown.changed() => break,
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
-                process(&store, &local_store, &*backend, sync_limit, &last_batch_ids, msg).await;
+                process(&store, &local_store, &*backend, &last_batch_ids, msg).await;
             }
         }
     }
@@ -67,7 +66,6 @@ async fn process(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
-    sync_limit: usize,
     last_batch_ids: &Mutex<HashMap<String, String>>,
     msg: EventBusMessage,
 ) {
@@ -82,7 +80,7 @@ async fn process(
         _ => return,
     };
 
-    apply_batch(store, local_store, backend, sync_limit, &batch).await;
+    apply_batch(store, local_store, backend, &batch).await;
 
     // Advance the in-memory catch-up state and persist it. The two must stay
     // in sync — the in-memory map drives the next reconnect's query string,
@@ -165,7 +163,6 @@ async fn apply_batch(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
-    sync_limit: usize,
     batch: &EntityUpdateBatch,
 ) {
     let Bucketed {
@@ -244,7 +241,7 @@ async fn apply_batch(
             "Event bus: fallback full sync for {} (batch {})",
             folder.imap_path, batch.batch_id
         );
-        if let Err(e) = sync_folder(store, local_store, backend, folder, sync_limit).await {
+        if let Err(e) = sync_folder(store, local_store, backend, folder).await {
             warn!(
                 "Event bus fallback sync failed for {}: {}",
                 folder.imap_path, e

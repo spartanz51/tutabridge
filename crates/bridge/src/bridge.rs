@@ -367,7 +367,6 @@ impl BridgeHandle {
                 store.clone(),
                 local_store,
                 backend.clone(),
-                sync_limit,
                 bus_ids_for_handler,
                 event_rx,
                 shutdown_sync_rx.clone(),

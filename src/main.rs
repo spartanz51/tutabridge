@@ -192,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
         store.clone(),
         local_store.clone(),
         backend.clone(),
-        cfg.sync_limit,
         bus_ids_for_handler,
         event_rx,
         shutdown_rx.clone(),

@@ -137,6 +137,27 @@ impl LocalStore {
         .is_ok()
     }
 
+    /// Read a value from the generic `store_meta` key-value table.
+    pub fn get_meta(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM store_meta WHERE key = ?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    /// Write a value into the generic `store_meta` key-value table.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO store_meta(key, value) VALUES (?1, ?2)",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn reset(&self) -> Result<(), StoreError> {
         warn!("Resetting local store — all cached data will be deleted");
         let conn = self.conn.lock().unwrap();

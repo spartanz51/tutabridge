@@ -1,6 +1,6 @@
 use log::{debug, info};
 use std::sync::Arc;
-use tutasdk::entities::generated::tutanota::{Mail, MailDetails};
+use tutasdk::entities::generated::tutanota::{Mail, MailDetails, TutanotaFile};
 
 use crate::mail::mail_to_rfc2822;
 use crate::mail::rfc2822::{extract_headers, format_internal_date};
@@ -19,6 +19,12 @@ struct CachedMail {
     mail: Mail,
     details: Option<MailDetails>,
     rfc2822: Option<String>,
+    /// `rfc2822` always carries the real headers, but for messages outside the
+    /// body-prefetch window it holds a placeholder body. `body_loaded` tracks
+    /// whether the *body* is final: `true` once we have real details (or have
+    /// confirmed the message has no body source), `false` while a body FETCH
+    /// still needs to pull it on demand.
+    body_loaded: bool,
     uid: u32,
     deleted: bool,
 }
@@ -368,44 +374,77 @@ impl ImapSession {
                 continue;
             }
 
-            if self.mails[idx].details.is_none() && needs_body(&items) {
+            // Make sure we have a renderable body before answering a body
+            // FETCH. The mailbox lists every message, but only the newest
+            // `sync_limit` bodies are pre-warmed — older ones are fetched
+            // here, on demand, the first time a client opens them.
+            if needs_body(&items) && !self.mails[idx].body_loaded {
                 let elem_id = self.mails[idx]
                     .mail
                     ._id
                     .as_ref()
                     .map(|id| id.element_id.to_string());
-                // Check store — syncer may have loaded details since our snapshot
-                let from_store = match (&elem_id, &self.selected_folder) {
-                    (Some(eid), Some(folder)) => self.store.get_details(&folder.id, eid).await,
-                    _ => None,
-                };
 
-                if let Some((details, rfc)) = from_store {
-                    self.mails[idx].details = Some(details);
-                    self.mails[idx].rfc2822 = Some(rfc);
-                } else {
-                    debug!("Details not yet synced for uid={}", self.mails[idx].uid);
-                }
-            }
-
-            if needs_body(&items) {
-                if self.mails[idx].details.is_some() && self.mails[idx].rfc2822.is_none() {
+                if self.mails[idx].details.is_some() {
+                    // Have details already, just render the envelope.
                     let rfc = mail_to_rfc2822(
                         &self.mails[idx].mail,
                         self.mails[idx].details.as_ref(),
                         &[],
                     );
                     self.mails[idx].rfc2822 = Some(rfc);
-                } else if self.mails[idx].rfc2822.is_none() {
-                    log::warn!(
-                        "No body for uid={}, will serve headers-only placeholder",
-                        self.mails[idx].uid,
-                    );
+                    self.mails[idx].body_loaded = true;
+                } else if let Some((details, rfc)) = match (&elem_id, &self.selected_folder) {
+                    // The syncer may have filled it in since our snapshot.
+                    (Some(eid), Some(folder)) => self.store.get_details(&folder.id, eid).await,
+                    _ => None,
+                } {
+                    self.mails[idx].details = Some(details);
+                    self.mails[idx].rfc2822 = Some(rfc);
+                    self.mails[idx].body_loaded = true;
+                } else {
+                    // Out of the prefetch window — fetch the body on demand.
+                    let mail = self.mails[idx].mail.clone();
+                    match self.backend.load_mail_details(&mail).await {
+                        Ok(Some(details)) => {
+                            let atts = self
+                                .backend
+                                .load_attachments(&mail)
+                                .await
+                                .unwrap_or_default();
+                            let refs: Vec<(&TutanotaFile, &[u8])> =
+                                atts.iter().map(|(f, d)| (f, d.as_slice())).collect();
+                            let rfc = mail_to_rfc2822(&mail, Some(&details), &refs);
+                            // Share into the in-memory store so other
+                            // connections (and stats) see it too.
+                            if let (Some(eid), Some(folder)) = (&elem_id, &self.selected_folder) {
+                                self.store
+                                    .update_mail_details(
+                                        &folder.id,
+                                        eid,
+                                        details.clone(),
+                                        rfc.clone(),
+                                        false,
+                                    )
+                                    .await;
+                            }
+                            self.mails[idx].details = Some(details);
+                            self.mails[idx].rfc2822 = Some(rfc);
+                            self.mails[idx].body_loaded = true;
+                        }
+                        Ok(None) => {
+                            // Legacy mail with no body reference — headers only.
+                            // Mark loaded so we don't re-hit the network on
+                            // every body FETCH of a message that has no body.
+                            self.mails[idx].body_loaded = true;
+                            debug!("uid={} has no body source", self.mails[idx].uid);
+                        }
+                        Err(e) => log::warn!(
+                            "On-demand body fetch failed for uid={}: {e}",
+                            self.mails[idx].uid
+                        ),
+                    }
                 }
-                // If `rfc2822` is already populated (Phase 0 read it from
-                // disk), there is nothing else to do — the body will be
-                // served from it; `details` being None is normal and not a
-                // placeholder situation.
             }
 
             let cached = &self.mails[idx];
@@ -661,6 +700,12 @@ impl ImapSession {
             }
 
             let details = sm.details.or(old_details);
+            // The body is final if we have real details, or a previously
+            // rendered rfc2822 (from the store or this session) — those always
+            // carry a real body. With none of those, the rfc2822 we render
+            // below has a placeholder body, so the body still needs an
+            // on-demand fetch the first time a client opens the message.
+            let body_loaded = details.is_some() || sm.rfc2822.is_some() || old_rfc.is_some();
             let rfc2822 = sm
                 .rfc2822
                 .or(old_rfc)
@@ -670,6 +715,7 @@ impl ImapSession {
                 mail: sm.mail,
                 details,
                 rfc2822: Some(rfc2822),
+                body_loaded,
                 uid,
                 deleted: false,
             });
@@ -994,6 +1040,7 @@ mod tests {
             },
             details: None,
             rfc2822: Some("Date: Wed, 25 Dec 2024 12:30:45 +0000\r\nFrom: sender@tuta.com\r\nSubject: Test\r\n\r\nBody\r\n".to_string()),
+            body_loaded: true,
             uid,
             deleted: false,
         }
