@@ -6,6 +6,7 @@ import { ConfigPanel } from "./components/ConfigPanel";
 import { LogsPanel } from "./components/LogsPanel";
 import { BackupPanel } from "./components/BackupPanel";
 import { statusLabel, isError } from "./types";
+import logo from "./assets/tuta-logo.svg";
 import "./App.css";
 
 type Tab = "dashboard" | "connection" | "config" | "backup" | "logs";
@@ -29,6 +30,7 @@ function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-left">
+          <img src={logo} alt="" className="app-logo" width={24} height={24} />
           <h1>TutaBridge</h1>
           <div className="header-status">
             <span className="status-dot" style={{ background: statusColor }} />

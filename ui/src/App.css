@@ -23,6 +23,12 @@
   gap: 14px;
 }
 
+.app-logo {
+  display: block;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
 .app-header h1 {
   font-family: var(--brand);
   font-size: 16px;
