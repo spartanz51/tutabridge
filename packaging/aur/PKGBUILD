@@ -11,8 +11,8 @@ pkgdesc="Local IMAP/SMTP bridge for Tuta encrypted email (headless CLI/daemon)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/spartanz51/tutabridge"
 license=('GPL-3.0-or-later')
-depends=('gcc-libs')
-makedepends=('rust' 'cargo' 'git' 'cmake' 'nasm')
+depends=('gcc-libs' 'dbus')
+makedepends=('rust' 'cargo' 'git' 'cmake' 'nasm' 'dbus' 'pkgconf')
 optdepends=('gnome-keyring: persist the Tuta session across reboots (Secret Service)'
             'kwallet: alternative Secret Service provider')
 provides=('tutabridge')

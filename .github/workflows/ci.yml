@@ -91,10 +91,11 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # aws-lc-sys (pulled transitively by the rustls stack) needs cmake +
-      # nasm to build its assembly on Linux x86_64.
+      # aws-lc-sys (rustls stack) needs cmake + nasm; libdbus-1-dev +
+      # pkg-config are needed by libdbus-sys, pulled in by the keyring
+      # Secret Service backend on Linux.
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake nasm
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm libdbus-1-dev pkg-config
 
       - name: Build CLI (lean, no GUI)
         run: cargo build --release -p tutabridge

@@ -45,7 +45,10 @@ git commit -m "Initial import" && git push
 
 - `pkgver()` derives `0.r<commits>.<short-sha>` from git; `makepkg` rewrites the
   `pkgver=` line on each build.
-- Linux secret-service (keyring persistence) needs a running provider
+- The keyring Secret Service backend links system `libdbus` (via
+  `libdbus-sys`), so `dbus` is a build + runtime dependency. It's present on
+  essentially every Linux desktop already.
+- Keyring *persistence* additionally needs a running Secret Service provider
   (gnome-keyring / kwallet) — listed as optdepends. Without one the daemon
   still works but will ask for the Tuta password on every start.
 - A future tagged release can add a non-`-git` `tutabridge` package built from
