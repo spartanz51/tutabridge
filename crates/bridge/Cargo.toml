@@ -23,7 +23,6 @@ rcgen = "0.13"
 
 crypto-primitives = { path = "../../tuta-repo/tuta-sdk/rust/crypto-primitives" }
 
-keyring = { version = "3", features = ["apple-native"] }
 rand = "0.8"
 
 thiserror = "2.0"
@@ -33,6 +32,19 @@ anyhow = "1"
 rand_core = "0.6"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
 hex = "0.4"
+
+# OS keychain backend — one per platform so the CLI builds (and packages,
+# e.g. on the AUR) on Linux/Windows, not just macOS. Linux uses the
+# Secret Service (gnome-keyring / KWallet) with pure-Rust crypto so there's
+# no OpenSSL build dependency.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["net", "logging", "testing"] }
