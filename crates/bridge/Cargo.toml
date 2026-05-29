@@ -30,7 +30,10 @@ base64 = "0.22"
 dirs = "6"
 anyhow = "1"
 rand_core = "0.6"
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
+# Vendor OpenSSL for SQLCipher so the build needs no system OpenSSL — works
+# identically on macOS / Linux / Windows (Windows has none) and keeps the AUR
+# package self-contained.
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 hex = "0.4"
 
 # OS keychain backend — one per platform so the CLI builds (and packages,
