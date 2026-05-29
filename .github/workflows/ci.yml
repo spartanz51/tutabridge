@@ -14,9 +14,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    # macOS runner: TutaBridge is a Mac desktop app and depends on
-    # platform crates (keyring apple-native, the Security framework, …).
+  macos:
+    # Full check on macOS: the GUI (Tauri) builds here, plus fmt / clippy /
+    # tests for the whole workspace.
     runs-on: macos-latest
     steps:
       - name: Checkout (with vendored SDK submodule)
@@ -72,3 +72,32 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  linux-cli:
+    # Proves the headless CLI + core build and test on Linux — i.e. that the
+    # AUR / daemon target is buildable without the GUI's native deps
+    # (no gtk / webkit). The GUI is intentionally not built here.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with vendored SDK submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # aws-lc-sys (pulled transitively by the rustls stack) needs cmake +
+      # nasm to build its assembly on Linux x86_64.
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm
+
+      - name: Build CLI (lean, no GUI)
+        run: cargo build --release -p tutabridge
+
+      - name: Test core
+        run: cargo test -p tutabridge-core
