@@ -1,74 +1,15 @@
-import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-
-interface BackupStats {
-  folders: number;
-  mails_written: number;
-  from_cache: number;
-  from_server: number;
-  skipped: number;
-  bytes: number;
-  errors: string[];
-}
-
-interface Progress {
-  folder: string;
-  done: number;
-  total: number;
-  finished: boolean;
-}
+import type { BackupStats, BackupProgress } from "../hooks/useBridge";
 
 interface Props {
   isRunning: boolean;
+  busy: boolean;
+  progress: BackupProgress | null;
+  result: BackupStats | null;
+  error: string | null;
+  onBackup: () => void;
 }
 
-export function BackupPanel({ isRunning }: Props) {
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<Progress | null>(null);
-  const [result, setResult] = useState<BackupStats | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const unlisten = listen<Progress>("bridge://backup-progress", (e) => {
-      if (e.payload.finished) {
-        setProgress(null);
-      } else {
-        setProgress(e.payload);
-      }
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
-
-  const runBackup = async () => {
-    setError(null);
-    setResult(null);
-    let dir: string | null = null;
-    try {
-      const picked = await open({ directory: true, title: "Choose a backup folder" });
-      dir = typeof picked === "string" ? picked : null;
-    } catch (e) {
-      setError(String(e));
-      return;
-    }
-    if (!dir) return;
-
-    setBusy(true);
-    setProgress(null);
-    try {
-      const stats = await invoke<BackupStats>("export_mails", { outputDir: dir });
-      setResult(stats);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-      setProgress(null);
-    }
-  };
-
+export function BackupPanel({ isRunning, busy, progress, result, error, onBackup }: Props) {
   const pct =
     progress && progress.total > 0
       ? Math.round((progress.done / progress.total) * 100)
@@ -81,7 +22,8 @@ export function BackupPanel({ isRunning }: Props) {
         <p className="muted">
           Export <strong>every</strong> email to a folder of <code>.eml</code> files —
           your complete mailbox, not just the messages currently synced. The files
-          open in any mail client (Thunderbird, Apple Mail, Outlook).
+          open in any mail client (Thunderbird, Apple Mail, Outlook). Re-running into
+          the same folder resumes where it left off and only fetches new mail.
         </p>
 
         {!isRunning && (
@@ -93,7 +35,7 @@ export function BackupPanel({ isRunning }: Props) {
         <button
           className="primary"
           disabled={!isRunning || busy}
-          onClick={runBackup}
+          onClick={onBackup}
           style={{ marginTop: "0.75rem" }}
         >
           {busy ? "Backing up…" : "Choose folder & back up"}

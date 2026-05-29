@@ -98,7 +98,16 @@ function App() {
             onRestart={bridge.restartBridge}
           />
         )}
-        {tab === "backup" && <BackupPanel isRunning={isRunning} />}
+        {tab === "backup" && (
+          <BackupPanel
+            isRunning={isRunning}
+            busy={bridge.backupBusy}
+            progress={bridge.backupProgress}
+            result={bridge.backupResult}
+            error={bridge.backupError}
+            onBackup={bridge.startBackup}
+          />
+        )}
         {tab === "logs" && (
           <LogsPanel logs={bridge.logs} onClear={bridge.clearLogs} />
         )}

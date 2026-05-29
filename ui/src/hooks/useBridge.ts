@@ -1,9 +1,26 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { Config, BridgeStatus, BridgeStats } from "../types";
 
 const MAX_LOG_LINES = 500;
+
+export interface BackupStats {
+  folders: number;
+  mails_written: number;
+  from_cache: number;
+  from_server: number;
+  skipped: number;
+  bytes: number;
+  errors: string[];
+}
+
+export interface BackupProgress {
+  folder: string;
+  done: number;
+  total: number;
+}
 
 export function useBridge() {
   const [config, setConfig] = useState<Config | null>(null);
@@ -17,6 +34,15 @@ export function useBridge() {
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Backup state lives here (not in BackupPanel) so it survives tab
+  // switches — the panel is conditionally rendered and would otherwise
+  // unmount mid-export, dropping its progress + the event listener while
+  // the Rust task keeps running.
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupProgress, setBackupProgress] = useState<BackupProgress | null>(null);
+  const [backupResult, setBackupResult] = useState<BackupStats | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     invoke<BridgeStatus>("get_status").then(setStatus);
@@ -46,6 +72,28 @@ export function useBridge() {
         return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next;
       });
     });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Always-on backup progress listener — independent of which tab is
+  // mounted, so progress keeps flowing even when the Backup tab is hidden.
+  useEffect(() => {
+    const unlisten = listen<BackupProgress & { finished: boolean }>(
+      "bridge://backup-progress",
+      (e) => {
+        if (e.payload.finished) {
+          setBackupProgress(null);
+        } else {
+          setBackupProgress({
+            folder: e.payload.folder,
+            done: e.payload.done,
+            total: e.payload.total,
+          });
+        }
+      },
+    );
     return () => {
       unlisten.then((fn) => fn());
     };
@@ -102,6 +150,33 @@ export function useBridge() {
     return newPassword;
   }, []);
 
+  const startBackup = useCallback(async () => {
+    if (backupBusy) return;
+    setBackupError(null);
+    setBackupResult(null);
+    let dir: string | null = null;
+    try {
+      const picked = await open({ directory: true, title: "Choose a backup folder" });
+      dir = typeof picked === "string" ? picked : null;
+    } catch (e) {
+      setBackupError(String(e));
+      return;
+    }
+    if (!dir) return;
+
+    setBackupBusy(true);
+    setBackupProgress(null);
+    try {
+      const stats = await invoke<BackupStats>("export_mails", { outputDir: dir });
+      setBackupResult(stats);
+    } catch (e) {
+      setBackupError(String(e));
+    } finally {
+      setBackupBusy(false);
+      setBackupProgress(null);
+    }
+  }, [backupBusy]);
+
   return {
     config,
     status,
@@ -116,5 +191,10 @@ export function useBridge() {
     restartBridge,
     clearLogs,
     regenerateBridgePassword,
+    backupBusy,
+    backupProgress,
+    backupResult,
+    backupError,
+    startBackup,
   };
 }
