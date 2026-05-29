@@ -535,6 +535,14 @@ impl TutaSession {
     }
 
     async fn send_mail_impl(&self, msg: &ParsedMessage) -> Result<(), ApiCallError> {
+        // Pre-populate the self-send cache *before* we hit any Tuta API,
+        // so the inbox-side WS event has zero chance of beating the
+        // insert (`SendDraftService.post` on the server emits the event
+        // before its own response reaches us).
+        if !msg.attachments.is_empty() && is_self_recipient(msg, &self.email) {
+            self.cache_self_send_attachments(msg).await;
+        }
+
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
         let session_key: GenericAesKey = Aes256Key::generate(&randomizer).into();
 
@@ -620,18 +628,6 @@ impl TutaSession {
             .await?;
 
         log::info!("Mail sent, message_id: {}", send_return.messageId);
-
-        // Cache attachments for self-sends — the inbox copy of the mail
-        // that is about to arrive via the event bus will try to decrypt
-        // these blobs via `crypto_client.load::<TutanotaFile>()`, which
-        // perpetually fails because Tuta's server never populates
-        // `File._ownerEncSessionKey` for the recipient-side copy when the
-        // recipient is also the sender. We already hold the plaintext bytes
-        // and session keys here; cache them keyed by the same envelope
-        // metadata that will appear on the inbox copy.
-        if !msg.attachments.is_empty() && is_self_recipient(msg, &self.email) {
-            self.cache_self_send_attachments(msg).await;
-        }
         Ok(())
     }
 
@@ -691,9 +687,10 @@ impl TutaSession {
             cache.remove(&key);
             return None;
         }
-        // The cache entry is consumed: once we've materialised the
-        // multipart envelope on disk, future fetches read it from there.
-        let attachments = cache.remove(&key)?.attachments;
+        // Clone, do NOT consume — a self-send produces two `load_attachments`
+        // calls (one for the Sent copy, one for the Inbox copy) and both
+        // need to render multipart. The TTL handles eviction.
+        let attachments = entry.attachments.clone();
         log::info!(
             "Self-send cache hit for {:?} ({} attachment(s))",
             mail.subject,
