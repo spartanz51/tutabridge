@@ -8,6 +8,7 @@ name = "tutabridge"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.84.0"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 tutabridge-core = { path = "crates/bridge" }

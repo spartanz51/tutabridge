@@ -146,3 +146,9 @@ TutaBridge depends on a few additions to Tuta's Rust SDK, vendored as the
 `tuta-repo` submodule. Each change is kept as its own single-commit branch off
 upstream for easy review / upstreaming — see [`SDK_PRS.md`](SDK_PRS.md) for the
 status of each.
+
+## License
+
+[GPL-3.0-or-later](LICENSE). TutaBridge links Tuta's Rust SDK (part of the
+GPLv3-licensed [tutanota](https://github.com/tutao/tutanota) project), so it is
+distributed under the same license.
