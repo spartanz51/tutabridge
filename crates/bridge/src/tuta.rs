@@ -1,4 +1,5 @@
 use base64::Engine;
+use std::collections::HashMap;
 use std::sync::Arc;
 use crypto_primitives::aes::{Aes256Key, Iv, AES_256_KEY_SIZE};
 use crypto_primitives::blake3::blake3_kdf;
@@ -114,12 +115,46 @@ fn system_special_use(kind: MailSetKind) -> Option<&'static str> {
     }
 }
 
+/// One attachment held in the self-send cache, mirroring what we received
+/// over SMTP from Thunderbird. Used to bypass the never-propagated
+/// `File._ownerEncSessionKey` race on the Inbox copy of a self-sent mail.
+#[derive(Clone)]
+struct CachedAttachment {
+    filename: String,
+    mime_type: String,
+    data: Vec<u8>,
+}
+
+/// A self-send cache entry — the attachments and when they were stored.
+struct SelfSendCacheEntry {
+    stored_at: std::time::Instant,
+    attachments: Vec<CachedAttachment>,
+}
+
+/// How long the self-send cache holds an entry. Tuta's server never
+/// populates the inbox-side `File._ownerEncSessionKey` for self-sends in
+/// practice, but capping the cache lifetime keeps memory bounded for
+/// long-running bridges.
+const SELF_SEND_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Soft cap on number of cached self-sends. When exceeded on insert, the
+/// oldest entry is evicted regardless of TTL.
+const SELF_SEND_CACHE_MAX_ENTRIES: usize = 50;
+
 pub struct TutaSession {
     pub logged_in: Arc<LoggedInSdk>,
     pub email: String,
     /// Bearer token issued at login; used to authenticate REST requests and
     /// the realtime event-bus WebSocket query string.
     pub access_token: String,
+    /// Attachments we just sent to ourselves over SMTP, indexed by
+    /// `(subject + sender + first_recipient)`. The Inbox copy of a
+    /// self-sent mail can take an indefinite amount of time to surface a
+    /// usable `File._ownerEncSessionKey`, but we already know each file's
+    /// session key (we generated it locally on the send path), so we
+    /// short-circuit `load_attachments` for self-sends and serve the
+    /// cached bytes directly.
+    self_send_cache: Arc<tokio::sync::Mutex<HashMap<String, SelfSendCacheEntry>>>,
 }
 
 impl TutaSession {
@@ -311,6 +346,13 @@ impl TutaSession {
     ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, ApiCallError> {
         if mail.attachments.is_empty() {
             return Ok(Vec::new());
+        }
+        // Fast path: an inbox copy of a self-sent mail. The server never
+        // populates its File entities' `_ownerEncSessionKey`, but we still
+        // hold the plaintext bytes we passed to SMTP — return them and
+        // skip the REST round-trip entirely.
+        if let Some(cached) = self.try_self_send_cache(mail).await {
+            return Ok(cached);
         }
         let mail_facade = self.logged_in.mail_facade();
         let mut out: Vec<(TutanotaFile, Vec<u8>)> = Vec::with_capacity(mail.attachments.len());
@@ -578,8 +620,145 @@ impl TutaSession {
             .await?;
 
         log::info!("Mail sent, message_id: {}", send_return.messageId);
+
+        // Cache attachments for self-sends — the inbox copy of the mail
+        // that is about to arrive via the event bus will try to decrypt
+        // these blobs via `crypto_client.load::<TutanotaFile>()`, which
+        // perpetually fails because Tuta's server never populates
+        // `File._ownerEncSessionKey` for the recipient-side copy when the
+        // recipient is also the sender. We already hold the plaintext bytes
+        // and session keys here; cache them keyed by the same envelope
+        // metadata that will appear on the inbox copy.
+        if !msg.attachments.is_empty() && is_self_recipient(msg, &self.email) {
+            self.cache_self_send_attachments(msg).await;
+        }
         Ok(())
     }
+
+    /// Insert this mail's attachments into the self-send cache so the
+    /// inbox-side `load_attachments` lookup can find them.
+    async fn cache_self_send_attachments(&self, msg: &ParsedMessage) {
+        let key = self_send_cache_key(&msg.subject, &msg.from_address, &self.email);
+        let attachments: Vec<CachedAttachment> = msg
+            .attachments
+            .iter()
+            .map(|a| CachedAttachment {
+                filename: a.filename.clone(),
+                mime_type: a.mime_type.clone(),
+                data: a.data.clone(),
+            })
+            .collect();
+        let mut cache = self.self_send_cache.lock().await;
+        // Soft eviction: drop the oldest entry when we cross the cap. The
+        // cache is tiny so a linear scan to find the min stored_at is fine.
+        if cache.len() >= SELF_SEND_CACHE_MAX_ENTRIES && !cache.contains_key(&key) {
+            if let Some((oldest_key, _)) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.stored_at)
+                .map(|(k, v)| (k.clone(), v.stored_at))
+            {
+                cache.remove(&oldest_key);
+            }
+        }
+        cache.insert(
+            key,
+            SelfSendCacheEntry {
+                stored_at: std::time::Instant::now(),
+                attachments,
+            },
+        );
+    }
+
+    /// Look up cached attachments for an incoming Mail whose own copy of
+    /// the File entities can't be decrypted. Returns `None` if this is not
+    /// a self-send, the cache has nothing for the envelope, or the entry
+    /// is older than the TTL.
+    async fn try_self_send_cache(
+        &self,
+        mail: &Mail,
+    ) -> Option<Vec<(TutanotaFile, Vec<u8>)>> {
+        if !mail.sender.address.eq_ignore_ascii_case(&self.email) {
+            return None;
+        }
+        let recipient = mail.firstRecipient.as_ref()?.address.clone();
+        if !recipient.eq_ignore_ascii_case(&self.email) {
+            return None;
+        }
+        let key = self_send_cache_key(&mail.subject, &mail.sender.address, &recipient);
+        let mut cache = self.self_send_cache.lock().await;
+        let entry = cache.get(&key)?;
+        if entry.stored_at.elapsed() > SELF_SEND_CACHE_TTL {
+            cache.remove(&key);
+            return None;
+        }
+        // The cache entry is consumed: once we've materialised the
+        // multipart envelope on disk, future fetches read it from there.
+        let attachments = cache.remove(&key)?.attachments;
+        log::info!(
+            "Self-send cache hit for {:?} ({} attachment(s))",
+            mail.subject,
+            attachments.len()
+        );
+        Some(
+            attachments
+                .into_iter()
+                .map(|a| (synthetic_file_for_cached(&a), a.data))
+                .collect(),
+        )
+    }
+}
+
+/// Build a synthetic `TutanotaFile` whose only consumer is
+/// `mail_to_rfc2822` — it just needs the name and MIME type to put a
+/// matching `Content-Type` / `Content-Disposition` on the part. The other
+/// fields stay at sensible defaults; nothing will REST-load this entity.
+fn synthetic_file_for_cached(a: &CachedAttachment) -> TutanotaFile {
+    TutanotaFile {
+        _id: None,
+        _permissions: tutasdk::GeneratedId::default(),
+        _format: 0,
+        _ownerEncSessionKey: None,
+        name: a.filename.clone(),
+        size: a.data.len() as i64,
+        mimeType: Some(a.mime_type.clone()),
+        _ownerGroup: None,
+        cid: None,
+        _ownerKeyVersion: None,
+        _kdfNonce: None,
+        parent: None,
+        subFiles: None,
+        blobs: vec![],
+        _errors: Default::default(),
+    }
+}
+
+/// True when the parsed SMTP message is a self-send: the sender (the
+/// `From:` we put on the wire) is the bridge's own email, and at least one
+/// of `to`/`cc`/`bcc` includes that same address. Only then is the inbox
+/// race relevant — third-party recipients hit Tuta's normal pipeline
+/// before our bridge ever sees the file.
+fn is_self_recipient(msg: &ParsedMessage, own_email: &str) -> bool {
+    if !msg.from_address.eq_ignore_ascii_case(own_email) {
+        return false;
+    }
+    let me = own_email.to_ascii_lowercase();
+    msg.to
+        .iter()
+        .chain(msg.cc.iter())
+        .chain(msg.bcc.iter())
+        .any(|(_, addr)| addr.to_ascii_lowercase() == me)
+}
+
+/// Stable, lowercase key for the self-send cache. The Sent and Inbox
+/// copies of a self-sent mail share these three header values verbatim, so
+/// the inbox side can find the entry the send side just dropped in.
+fn self_send_cache_key(subject: &str, sender: &str, recipient: &str) -> String {
+    format!(
+        "{}|{}|{}",
+        subject.trim().to_lowercase(),
+        sender.trim().to_lowercase(),
+        recipient.trim().to_lowercase()
+    )
 }
 
 #[async_trait::async_trait]
@@ -789,6 +968,7 @@ pub async fn login_with_2fa(
                     logged_in,
                     email: cfg.email.clone(),
                     access_token,
+                    self_send_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 });
             }
             Err(e) => {
@@ -863,6 +1043,7 @@ pub async fn login_with_2fa(
         logged_in,
         email: cfg.email.clone(),
         access_token: credentials.access_token,
+        self_send_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     })
 }
 
@@ -1069,6 +1250,77 @@ fn build_send_draft_data(
             symEncInternalRecipientKeyData: vec![],
             attachmentKeyData: attachment_key_data,
         }),
+    }
+}
+
+#[cfg(test)]
+mod self_send_cache_tests {
+    use super::*;
+
+    fn msg(from: &str, to: &str, subject: &str) -> ParsedMessage {
+        ParsedMessage {
+            from_address: from.to_string(),
+            from_name: "Me".to_string(),
+            to: vec![("".to_string(), to.to_string())],
+            cc: vec![],
+            bcc: vec![],
+            subject: subject.to_string(),
+            body_html: "<p>body</p>".to_string(),
+            attachments: vec![],
+        }
+    }
+
+    #[test]
+    fn cache_key_is_case_insensitive_and_trim_tolerant() {
+        let a = self_send_cache_key("  Hello World  ", "Me@Tuta.IO", "me@TUTA.io");
+        let b = self_send_cache_key("hello world", "me@tuta.io", "me@tuta.io");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cache_key_differs_on_subject() {
+        let a = self_send_cache_key("First", "me@tuta.io", "me@tuta.io");
+        let b = self_send_cache_key("Second", "me@tuta.io", "me@tuta.io");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn is_self_recipient_true_when_to_matches_from() {
+        assert!(is_self_recipient(
+            &msg("me@tuta.io", "me@tuta.io", "self"),
+            "me@tuta.io"
+        ));
+    }
+
+    #[test]
+    fn is_self_recipient_true_when_cc_matches_from() {
+        let mut m = msg("me@tuta.io", "other@example.com", "cc");
+        m.cc = vec![("".to_string(), "me@tuta.io".to_string())];
+        assert!(is_self_recipient(&m, "me@tuta.io"));
+    }
+
+    #[test]
+    fn is_self_recipient_false_when_from_differs() {
+        assert!(!is_self_recipient(
+            &msg("other@example.com", "me@tuta.io", "not self"),
+            "me@tuta.io"
+        ));
+    }
+
+    #[test]
+    fn is_self_recipient_false_when_recipient_differs() {
+        assert!(!is_self_recipient(
+            &msg("me@tuta.io", "friend@example.com", "to-friend"),
+            "me@tuta.io"
+        ));
+    }
+
+    #[test]
+    fn is_self_recipient_case_insensitive() {
+        assert!(is_self_recipient(
+            &msg("Me@Tuta.IO", "ME@tuta.io", "case"),
+            "me@tuta.io"
+        ));
     }
 }
 
