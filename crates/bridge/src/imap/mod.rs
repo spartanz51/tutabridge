@@ -1,3 +1,4 @@
+mod search;
 mod session;
 mod utf7;
 

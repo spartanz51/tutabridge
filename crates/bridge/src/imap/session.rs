@@ -1,9 +1,10 @@
 use log::{debug, info};
 use std::sync::Arc;
-use tutasdk::entities::generated::tutanota::{Mail, MailDetails, TutanotaFile};
+use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, TutanotaFile};
 
+use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
-use crate::mail::rfc2822::{extract_headers, format_internal_date};
+use crate::mail::rfc2822::{extract_headers, format_address, format_internal_date};
 use crate::sync::MailStore;
 use crate::tuta::{FolderInfo, MailBackend};
 
@@ -463,22 +464,18 @@ impl ImapSession {
             return vec![format!("{} NO No mailbox selected\r\n", tag)];
         }
 
-        let args_upper = args.to_uppercase();
+        let query = search::parse(args);
 
-        let ids: Vec<u32> = if args_upper.contains("UNSEEN") {
-            self.mails
-                .iter()
-                .enumerate()
-                .filter(|(_, m)| m.mail.unread)
-                .map(|(i, m)| if uid_mode { m.uid } else { (i + 1) as u32 })
-                .collect()
-        } else {
-            self.mails
-                .iter()
-                .enumerate()
-                .map(|(i, m)| if uid_mode { m.uid } else { (i + 1) as u32 })
-                .collect()
-        };
+        let ids: Vec<u32> = self
+            .mails
+            .iter()
+            .enumerate()
+            .filter(|(i, cached)| {
+                let view = Self::build_search_view(*i, cached);
+                search::matches(&query, &view)
+            })
+            .map(|(i, cached)| if uid_mode { cached.uid } else { (i + 1) as u32 })
+            .collect();
 
         let id_str = ids
             .iter()
@@ -491,6 +488,65 @@ impl ImapSession {
             format!("* SEARCH {}\r\n", id_str),
             format!("{} OK {} completed\r\n", tag, cmd),
         ]
+    }
+
+    /// Project a cached message onto the fields IMAP SEARCH compares. Derived
+    /// strings (From / To / Cc / Bcc / headers) are owned by the [`MsgView`];
+    /// the cheap ones (subject, body) borrow straight from `cached`.
+    fn build_search_view(idx: usize, cached: &CachedMail) -> MsgView<'_> {
+        let headers = cached
+            .rfc2822
+            .as_deref()
+            .map(extract_headers)
+            .unwrap_or_default();
+
+        let body = cached
+            .details
+            .as_ref()
+            .and_then(|d| d.body.compressedText.as_deref().or(d.body.text.as_deref()));
+
+        // To/Cc/Bcc come from details when the body is loaded; otherwise only
+        // the envelope `firstRecipient` (rendered as To) is available.
+        let (to, cc, bcc) = match cached.details.as_ref() {
+            Some(d) => (
+                join_addrs(&d.recipients.toRecipients),
+                join_addrs(&d.recipients.ccRecipients),
+                join_addrs(&d.recipients.bccRecipients),
+            ),
+            None => (
+                cached
+                    .mail
+                    .firstRecipient
+                    .as_ref()
+                    .map(format_address)
+                    .unwrap_or_default(),
+                String::new(),
+                String::new(),
+            ),
+        };
+
+        let sent_ms = cached
+            .details
+            .as_ref()
+            .map(|d| d.sentDate.as_millis())
+            .unwrap_or_else(|| cached.mail.receivedDate.as_millis());
+
+        MsgView {
+            seq: (idx + 1) as u32,
+            uid: cached.uid,
+            subject: &cached.mail.subject,
+            from: format_address(&cached.mail.sender),
+            to,
+            cc,
+            bcc,
+            headers,
+            date_ms: cached.mail.receivedDate.as_millis(),
+            sent_ms,
+            unread: cached.mail.unread,
+            deleted: cached.deleted,
+            size: cached.rfc2822.as_ref().map(|r| r.len() as u64).unwrap_or(0),
+            body,
+        }
     }
 
     async fn cmd_store(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
@@ -769,6 +825,15 @@ impl ImapSession {
             None
         }
     }
+}
+
+/// Join a recipient list into a single comparable string for SEARCH.
+fn join_addrs(addrs: &[MailAddress]) -> String {
+    addrs
+        .iter()
+        .map(format_address)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: bool) -> String {
@@ -1939,6 +2004,43 @@ mod tests {
         assert!(search_line.contains("* SEARCH"));
         // UID 2 (second mail)
         assert!(search_line.contains("2"));
+    }
+
+    #[tokio::test]
+    async fn test_search_subject_and_from() {
+        let backend = Arc::new(MockBackend::with_mails(vec![
+            make_mail("m1", "Invoice March", false),
+            make_mail("m2", "Holiday photos", true),
+            make_mail("m3", "Invoice April", false),
+        ]));
+        let (_store, mut session) = make_session(backend).await;
+        session.handle_command("A001 LOGIN user pass").await;
+        session.handle_command("A002 SELECT INBOX").await;
+
+        // SUBJECT matches only the two invoices (1 and 3), case-insensitively.
+        let resp = session
+            .handle_command(r#"A003 SEARCH SUBJECT "invoice""#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH 1 3\r\n");
+
+        // Combined with UNSEEN, nothing matches (both invoices are read).
+        let resp = session
+            .handle_command(r#"A004 SEARCH SUBJECT "invoice" UNSEEN"#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH \r\n");
+
+        // FROM matches the shared sender on every message.
+        let resp = session
+            .handle_command(r#"A005 SEARCH FROM "sender@tuta.com""#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH 1 2 3\r\n");
+
+        // A non-matching subject returns an empty set (the regression that
+        // motivated real SEARCH: it used to return everything).
+        let resp = session
+            .handle_command(r#"A006 SEARCH SUBJECT "nonexistent""#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH \r\n");
     }
 
     #[tokio::test]
