@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use base64::Engine;
-use log::{info, error, debug};
+use log::{debug, error, info};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -13,9 +13,15 @@ enum SmtpState {
     Init,
     Greeted,
     MailFrom(String),
-    RcptTo { from: String, to: Vec<String> },
+    RcptTo {
+        from: String,
+        to: Vec<String>,
+    },
     #[allow(dead_code)]
-    Data { from: String, to: Vec<String> },
+    Data {
+        from: String,
+        to: Vec<String>,
+    },
     Quit,
 }
 
@@ -139,9 +145,7 @@ async fn handle_connection(
                     }
                     Err(e) => {
                         error!("SMTP: failed to send via Tuta: {}", e);
-                        writer
-                            .write_all(b"451 Temporary failure\r\n")
-                            .await?;
+                        writer.write_all(b"451 Temporary failure\r\n").await?;
                     }
                 }
                 state = SmtpState::Greeted;
@@ -157,7 +161,11 @@ async fn handle_connection(
             continue;
         }
 
-        let cmd = trimmed.split_whitespace().next().unwrap_or("").to_uppercase();
+        let cmd = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_uppercase();
         let response = match cmd.as_str() {
             "EHLO" | "HELO" => {
                 state = SmtpState::Greeted;
@@ -208,19 +216,17 @@ async fn handle_connection(
                 }
                 "250 OK\r\n".to_string()
             }
-            "DATA" => {
-                match &state {
-                    SmtpState::RcptTo { from, to } => {
-                        state = SmtpState::Data {
-                            from: from.clone(),
-                            to: to.clone(),
-                        };
-                        in_data = true;
-                        "354 Start mail input; end with <CRLF>.<CRLF>\r\n".to_string()
-                    }
-                    _ => "503 Bad sequence\r\n".to_string(),
+            "DATA" => match &state {
+                SmtpState::RcptTo { from, to } => {
+                    state = SmtpState::Data {
+                        from: from.clone(),
+                        to: to.clone(),
+                    };
+                    in_data = true;
+                    "354 Start mail input; end with <CRLF>.<CRLF>\r\n".to_string()
                 }
-            }
+                _ => "503 Bad sequence\r\n".to_string(),
+            },
             "RSET" => {
                 state = SmtpState::Greeted;
                 "250 OK\r\n".to_string()
@@ -252,11 +258,7 @@ fn extract_address(line: &str) -> String {
             }
         }
     }
-    line.split(':')
-        .nth(1)
-        .unwrap_or("")
-        .trim()
-        .to_string()
+    line.split(':').nth(1).unwrap_or("").trim().to_string()
 }
 
 fn verify_smtp_plain_data(data: &str, expected: &Option<String>) -> String {

@@ -81,7 +81,9 @@ pub fn ensure_bridge_password(config: &mut Config) -> Result<String, Box<dyn std
     Ok(password)
 }
 
-pub fn regenerate_bridge_password(config: &mut Config) -> Result<String, Box<dyn std::error::Error>> {
+pub fn regenerate_bridge_password(
+    config: &mut Config,
+) -> Result<String, Box<dyn std::error::Error>> {
     let password = generate_bridge_password();
     config.bridge_password = Some(password.clone());
     save_config(config)?;

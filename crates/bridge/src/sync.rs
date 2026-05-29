@@ -121,11 +121,7 @@ impl MailStore {
     /// Refresh an existing mail's metadata in every folder that holds it
     /// (body/details preserved). No-op if the mail is not cached.
     pub async fn refresh_mail_in_place(&self, mail: &Mail) {
-        let Some(eid) = mail
-            ._id
-            .as_ref()
-            .map(|id| id.element_id.to_string())
-        else {
+        let Some(eid) = mail._id.as_ref().map(|id| id.element_id.to_string()) else {
             return;
         };
         let mut folders = self.folders.write().await;
@@ -508,19 +504,16 @@ async fn load_cached_folder(
             Ok(Some(eml)) => {
                 if !meta.has_details {
                     if let Err(e) = local_store.mark_has_details(&meta.element_id) {
-                        warn!(
-                            "Failed to heal has_details for {}: {e}",
-                            meta.element_id
-                        );
+                        warn!("Failed to heal has_details for {}: {e}", meta.element_id);
                     }
                 }
                 Some(eml)
-            },
+            }
             Ok(None) => Some(mail_to_rfc2822(&mail, None, &[])),
             Err(e) => {
                 warn!("Failed to read cached eml {}: {e}", meta.element_id);
                 Some(mail_to_rfc2822(&mail, None, &[]))
-            },
+            }
         };
 
         stored_mails.push(StoredMail {
@@ -582,7 +575,12 @@ pub(crate) async fn sync_folder(
         let elem_id = mail._id.as_ref().map(|id| id.element_id.to_string());
         let uid = elem_id
             .as_ref()
-            .and_then(|id| existing_map.get(id).map(|m| m.uid).or_else(|| new_uids.get(id).copied()))
+            .and_then(|id| {
+                existing_map
+                    .get(id)
+                    .map(|m| m.uid)
+                    .or_else(|| new_uids.get(id).copied())
+            })
             .unwrap_or(0);
 
         if let Some(existing) = elem_id.as_ref().and_then(|id| existing_map.get(id)) {
@@ -798,17 +796,13 @@ async fn prefetch_details(
 
         match backend.load_attachments(&stored.mail).await {
             Ok(attachments) => {
-                let refs: Vec<(&TutanotaFile, &[u8])> = attachments
-                    .iter()
-                    .map(|(f, d)| (f, d.as_slice()))
-                    .collect();
+                let refs: Vec<(&TutanotaFile, &[u8])> =
+                    attachments.iter().map(|(f, d)| (f, d.as_slice())).collect();
                 let rfc2822 = mail_to_rfc2822(&stored.mail, Some(details), &refs);
                 if let Err(e) = local_store.write_eml(&eid, &rfc2822) {
                     warn!("Failed to rewrite eml {}: {}", eid, e);
                 }
-                store
-                    .update_mail_rfc2822(&folder.id, &eid, rfc2822)
-                    .await;
+                store.update_mail_rfc2822(&folder.id, &eid, rfc2822).await;
                 attachment_retry_history.remove(&eid);
                 debug!("Attachment retry succeeded for {}", eid);
             }
@@ -826,7 +820,11 @@ async fn prefetch_details(
                 // Clear the pending flag so we don't keep retrying a
                 // permanent failure (e.g. server returned 404).
                 store
-                    .update_mail_rfc2822(&folder.id, &eid, stored.rfc2822.clone().unwrap_or_default())
+                    .update_mail_rfc2822(
+                        &folder.id,
+                        &eid,
+                        stored.rfc2822.clone().unwrap_or_default(),
+                    )
                     .await;
                 attachment_retry_history.remove(&eid);
             }
@@ -855,7 +853,12 @@ where
         match f().await {
             Ok(v) => return Ok(v),
             Err(e) if attempt < MAX_RETRIES => {
-                warn!("Attempt {} failed: {}, retrying in {:?}", attempt + 1, e, delay);
+                warn!(
+                    "Attempt {} failed: {}, retrying in {:?}",
+                    attempt + 1,
+                    e,
+                    delay
+                );
                 tokio::time::sleep(delay).await;
                 delay = backoff(delay);
             }
@@ -988,7 +991,10 @@ mod tests {
         let b = store.get_folder("folderB").await;
         assert_eq!(a[0].mail.subject, "Hello [updated]");
         assert!(!a[0].mail.unread);
-        assert_eq!(a[0].uid, 7, "UID is per-folder state, must survive a refresh");
+        assert_eq!(
+            a[0].uid, 7,
+            "UID is per-folder state, must survive a refresh"
+        );
         assert_eq!(b[0].mail.subject, "Hello [updated]");
         assert_eq!(b[0].uid, 12);
     }
@@ -1127,7 +1133,6 @@ mod tests {
         assert_eq!(store.get_folder("A").await.len(), 2);
     }
 
-
     #[tokio::test]
     async fn prune_unknown_folders_drops_disappeared_ones() {
         let store = MailStore::new();
@@ -1137,8 +1142,7 @@ mod tests {
         store
             .set_folder("gone", vec![stored(make_mail("L1", "M2", "g", true), 2)])
             .await;
-        let known: std::collections::HashSet<String> =
-            ["keep".to_string()].into_iter().collect();
+        let known: std::collections::HashSet<String> = ["keep".to_string()].into_iter().collect();
         let removed = store.prune_unknown_folders(&known).await;
         assert_eq!(removed, vec!["gone".to_string()]);
         assert_eq!(store.get_folder("keep").await.len(), 1);

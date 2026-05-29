@@ -1,8 +1,8 @@
 mod session;
 mod utf7;
 
+use log::{debug, error, info};
 use std::sync::Arc;
-use log::{info, error, debug};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -56,7 +56,9 @@ async fn handle_connection(
     let mut store_watch: watch::Receiver<u64> = store.subscribe();
     let mut session = ImapSession::new(store, backend, password_hash);
 
-    writer.write_all(b"* OK TutaBridge IMAP4rev1 ready\r\n").await?;
+    writer
+        .write_all(b"* OK TutaBridge IMAP4rev1 ready\r\n")
+        .await?;
     writer.flush().await?;
 
     let mut line = String::new();

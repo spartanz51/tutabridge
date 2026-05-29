@@ -320,8 +320,7 @@ impl LocalStore {
         if !deleted.is_empty() {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             {
-                let mut stmt =
-                    conn.prepare_cached("DELETE FROM mails WHERE element_id = ?1")?;
+                let mut stmt = conn.prepare_cached("DELETE FROM mails WHERE element_id = ?1")?;
                 for eid in &deleted {
                     stmt.execute([eid])?;
                 }
@@ -397,8 +396,7 @@ impl LocalStore {
 
     pub fn total_count(&self) -> Result<usize, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM mails", [], |row| row.get(0))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM mails", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
@@ -443,11 +441,7 @@ impl LocalStore {
 
     /// Persist the last processed batch id for a group (event-bus catch-up
     /// resumes from this point on the next reconnect).
-    pub fn set_event_bus_batch_id(
-        &self,
-        group_id: &str,
-        batch_id: &str,
-    ) -> Result<(), StoreError> {
+    pub fn set_event_bus_batch_id(&self, group_id: &str, batch_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -540,7 +534,8 @@ mod tests {
 
     fn open_memory_store() -> LocalStore {
         let key = test_key();
-        let tmp_dir = std::env::temp_dir().join(format!("tutabridge_test_{}", rand::random::<u64>()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("tutabridge_test_{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let db_path = tmp_dir.join("test.db");
         let mails_dir = tmp_dir.join("mails");
@@ -586,7 +581,9 @@ mod tests {
     #[test]
     fn test_upsert_and_load_metadata() {
         let store = open_memory_store();
-        store.upsert_mail_metadata(&meta("abc123", "inbox", 1700000000000)).unwrap();
+        store
+            .upsert_mail_metadata(&meta("abc123", "inbox", 1700000000000))
+            .unwrap();
 
         let loaded = store.load_folder_metadata("inbox").unwrap();
         assert_eq!(loaded.len(), 1);
@@ -600,7 +597,9 @@ mod tests {
     fn test_metadata_is_per_folder() {
         let store = open_memory_store();
         store.upsert_mail_metadata(&meta("a", "inbox", 1)).unwrap();
-        store.upsert_mail_metadata(&meta("b", "custom1", 2)).unwrap();
+        store
+            .upsert_mail_metadata(&meta("b", "custom1", 2))
+            .unwrap();
 
         assert_eq!(store.load_folder_metadata("inbox").unwrap().len(), 1);
         assert_eq!(store.load_folder_metadata("custom1").unwrap().len(), 1);
@@ -641,7 +640,10 @@ mod tests {
         let store = open_memory_store();
         let rfc2822 = "From: test@example.com\r\nSubject: Hello\r\n\r\nBody text here";
         store.write_eml("test_mail", rfc2822).unwrap();
-        assert_eq!(store.read_eml("test_mail").unwrap(), Some(rfc2822.to_string()));
+        assert_eq!(
+            store.read_eml("test_mail").unwrap(),
+            Some(rfc2822.to_string())
+        );
     }
 
     #[test]
@@ -662,7 +664,9 @@ mod tests {
     #[test]
     fn test_reset() {
         let store = open_memory_store();
-        store.upsert_mail_metadata(&meta("abc", "inbox", 0)).unwrap();
+        store
+            .upsert_mail_metadata(&meta("abc", "inbox", 0))
+            .unwrap();
         store.write_eml("abc", "content").unwrap();
 
         store.reset().unwrap();
@@ -729,7 +733,9 @@ mod tests {
     #[test]
     fn delete_mail_removes_metadata_and_eml() {
         let store = open_memory_store();
-        store.upsert_mail_metadata(&meta("del1", "inbox", 0)).unwrap();
+        store
+            .upsert_mail_metadata(&meta("del1", "inbox", 0))
+            .unwrap();
         store.write_eml("del1", "content").unwrap();
         assert_eq!(store.mail_count("inbox").unwrap(), 1);
         assert!(store.has_eml("del1"));
@@ -742,7 +748,9 @@ mod tests {
     #[test]
     fn test_mark_has_details() {
         let store = open_memory_store();
-        store.upsert_mail_metadata(&meta("det", "inbox", 0)).unwrap();
+        store
+            .upsert_mail_metadata(&meta("det", "inbox", 0))
+            .unwrap();
         assert!(!store.load_folder_metadata("inbox").unwrap()[0].has_details);
 
         store.mark_has_details("det").unwrap();

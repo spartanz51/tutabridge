@@ -50,7 +50,8 @@ pub async fn start_bridge(
         _ => return Err("No config found — save config first".into()),
     };
 
-    config::ensure_bridge_password(&mut cfg).map_err(|e| format!("Bridge password setup failed: {e}"))?;
+    config::ensure_bridge_password(&mut cfg)
+        .map_err(|e| format!("Bridge password setup failed: {e}"))?;
 
     let mut handle = state.lock().await;
     handle.start(cfg, password, None).await

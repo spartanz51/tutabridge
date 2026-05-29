@@ -1,9 +1,9 @@
+use log::{debug, info};
 use std::sync::Arc;
-use log::{info, debug};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails};
 
-use crate::mail::rfc2822::{extract_headers, format_internal_date};
 use crate::mail::mail_to_rfc2822;
+use crate::mail::rfc2822::{extract_headers, format_internal_date};
 use crate::sync::MailStore;
 use crate::tuta::{FolderInfo, MailBackend};
 
@@ -72,18 +72,16 @@ impl ImapSession {
             None => return vec![],
         };
 
-        let decoded = match base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            line.trim(),
-        ) {
-            Ok(d) => d,
-            Err(_) => {
-                return vec![format!(
-                    "{} NO [AUTHENTICATIONFAILED] Invalid base64\r\n",
-                    tag
-                )];
-            }
-        };
+        let decoded =
+            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, line.trim()) {
+                Ok(d) => d,
+                Err(_) => {
+                    return vec![format!(
+                        "{} NO [AUTHENTICATIONFAILED] Invalid base64\r\n",
+                        tag
+                    )];
+                }
+            };
 
         // PLAIN format: \0authcid\0password (authzid is empty)
         let parts: Vec<&[u8]> = decoded.splitn(3, |&b| b == 0).collect();
@@ -289,7 +287,10 @@ impl ImapSession {
         let folder = match self.store.folder_by_imap_path(&folder_name).await {
             Some(f) => f,
             None => {
-                return vec![format!("{} NO [NONEXISTENT] Mailbox does not exist\r\n", tag)];
+                return vec![format!(
+                    "{} NO [NONEXISTENT] Mailbox does not exist\r\n",
+                    tag
+                )];
             }
         };
         let folder_id = folder.id.clone();
@@ -660,9 +661,10 @@ impl ImapSession {
             }
 
             let details = sm.details.or(old_details);
-            let rfc2822 = sm.rfc2822.or(old_rfc).unwrap_or_else(|| {
-                mail_to_rfc2822(&sm.mail, details.as_ref(), &[])
-            });
+            let rfc2822 = sm
+                .rfc2822
+                .or(old_rfc)
+                .unwrap_or_else(|| mail_to_rfc2822(&sm.mail, details.as_ref(), &[]));
 
             self.mails.push(CachedMail {
                 mail: sm.mail,
@@ -673,7 +675,11 @@ impl ImapSession {
             });
         }
 
-        debug!("Refreshed {} mails for {} from store", self.mails.len(), folder_id);
+        debug!(
+            "Refreshed {} mails for {} from store",
+            self.mails.len(),
+            folder_id
+        );
         Ok(())
     }
 
@@ -717,7 +723,6 @@ impl ImapSession {
             None
         }
     }
-
 }
 
 fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: bool) -> String {
@@ -817,9 +822,7 @@ fn build_envelope(cached: &CachedMail) -> String {
         .map(|id| format!("<{}.{}@tutabridge.local>", id.list_id, id.element_id))
         .unwrap_or_default();
 
-    format!(
-        "(\"{date}\" \"{subject}\" ({from}) ({from}) ({from}) ({to}) NIL NIL NIL \"{msg_id}\")"
-    )
+    format!("(\"{date}\" \"{subject}\" ({from}) ({from}) ({from}) ({to}) NIL NIL NIL \"{msg_id}\")")
 }
 
 fn imap_quote(s: &str) -> String {
@@ -904,7 +907,10 @@ fn parse_imap_token(s: &str) -> (String, &str) {
         (result, "")
     } else {
         let end = s.find(char::is_whitespace).unwrap_or(s.len());
-        (s[..end].to_string(), if end < s.len() { &s[end..] } else { "" })
+        (
+            s[..end].to_string(),
+            if end < s.len() { &s[end..] } else { "" },
+        )
     }
 }
 
@@ -1201,10 +1207,7 @@ mod tests {
             contact: None,
             _errors: Default::default(),
         };
-        assert_eq!(
-            format_envelope_addr(&addr),
-            "(NIL NIL \"localonly\" \"\")"
-        );
+        assert_eq!(format_envelope_addr(&addr), "(NIL NIL \"localonly\" \"\")");
     }
 
     #[test]
@@ -1218,10 +1221,7 @@ mod tests {
         };
         let result = format_envelope_addr(&addr);
         // Inner quotes replaced with single quotes, wrapped in IMAP string delimiters
-        assert_eq!(
-            result,
-            "(\"John 'JD' Doe\" NIL \"john\" \"example.com\")"
-        );
+        assert_eq!(result, "(\"John 'JD' Doe\" NIL \"john\" \"example.com\")");
     }
 
     // --- extract_headers (via rfc2822 module) ---
@@ -1324,10 +1324,10 @@ mod tests {
     // Integration tests with MockBackend
     // =================================================================
 
-    use std::sync::Mutex;
+    use crate::mail::ParsedMessage;
     use crate::sync::MailStore;
     use crate::tuta::MailBackend;
-    use crate::mail::ParsedMessage;
+    use std::sync::Mutex;
     use tutasdk::entities::generated::tutanota::{Body, Recipients};
 
     struct MockBackend {
@@ -1358,7 +1358,10 @@ mod tests {
         }
 
         fn add_details(&self, element_id: &str, details: MailDetails) {
-            self.details.lock().unwrap().insert(element_id.to_string(), details);
+            self.details
+                .lock()
+                .unwrap()
+                .insert(element_id.to_string(), details);
         }
     }
 
@@ -1396,8 +1399,20 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false },
-                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2, attachments_pending: false },
+                    StoredMail {
+                        mail: m1,
+                        details: None,
+                        rfc2822: None,
+                        uid: 1,
+                        attachments_pending: false,
+                    },
+                    StoredMail {
+                        mail: m2,
+                        details: None,
+                        rfc2822: None,
+                        uid: 2,
+                        attachments_pending: false,
+                    },
                 ],
             )
             .await;
@@ -1406,7 +1421,10 @@ mod tests {
         session.handle_command("b SELECT INBOX").await;
 
         let resp = session.handle_command("c UID MOVE 1 Work").await;
-        assert!(resp.iter().any(|r| r.contains("EXPUNGE")), "expected EXPUNGE, got {resp:?}");
+        assert!(
+            resp.iter().any(|r| r.contains("EXPUNGE")),
+            "expected EXPUNGE, got {resp:?}"
+        );
         assert!(resp.last().unwrap().contains("OK UID MOVE"));
 
         let moved = backend.moved.lock().unwrap();
@@ -1422,7 +1440,10 @@ mod tests {
         session.handle_command("a LOGIN u p").await;
         session.handle_command("b SELECT INBOX").await;
         let resp = session.handle_command("c UID COPY 1 Work").await;
-        assert!(resp[0].contains("NO"), "COPY should be rejected, got {resp:?}");
+        assert!(
+            resp[0].contains("NO"),
+            "COPY should be rejected, got {resp:?}"
+        );
     }
 
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
@@ -1451,10 +1472,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MailBackend for MockBackend {
-        async fn load_mail_ids_for_folder(&self, _folder: &FolderInfo, _limit: usize) -> Result<Vec<Mail>, String> {
+        async fn load_mail_ids_for_folder(
+            &self,
+            _folder: &FolderInfo,
+            _limit: usize,
+        ) -> Result<Vec<Mail>, String> {
             Ok(self.mails.lock().unwrap().clone())
         }
-        async fn load_mail(&self, _list_id: &str, element_id: &str) -> Result<Option<Mail>, String> {
+        async fn load_mail(
+            &self,
+            _list_id: &str,
+            element_id: &str,
+        ) -> Result<Option<Mail>, String> {
             Ok(self
                 .mails
                 .lock()
@@ -1487,13 +1516,23 @@ mod tests {
             Ok(None)
         }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
-            let key = mail._id.as_ref().map(|id| id.element_id.to_string()).unwrap_or_default();
+            let key = mail
+                ._id
+                .as_ref()
+                .map(|id| id.element_id.to_string())
+                .unwrap_or_default();
             Ok(self.details.lock().unwrap().get(&key).cloned())
         }
         async fn load_attachments(
             &self,
             _mail: &Mail,
-        ) -> Result<Vec<(tutasdk::entities::generated::tutanota::TutanotaFile, Vec<u8>)>, String> {
+        ) -> Result<
+            Vec<(
+                tutasdk::entities::generated::tutanota::TutanotaFile,
+                Vec<u8>,
+            )>,
+            String,
+        > {
             // The mock has no attachment fixtures; the IMAP-session tests
             // only exercise body/header paths.
             Ok(Vec::new())
@@ -1501,7 +1540,11 @@ mod tests {
         async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
             Ok(vec![inbox_folder()])
         }
-        async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String> {
+        async fn set_unread_status(
+            &self,
+            mail_ids: Vec<IdTupleGenerated>,
+            unread: bool,
+        ) -> Result<(), String> {
             self.unread_calls.lock().unwrap().push((mail_ids, unread));
             Ok(())
         }
@@ -1509,8 +1552,15 @@ mod tests {
             self.trashed.lock().unwrap().extend(mail_ids);
             Ok(())
         }
-        async fn move_mails(&self, mail_ids: Vec<IdTupleGenerated>, target: &FolderInfo) -> Result<(), String> {
-            self.moved.lock().unwrap().push((mail_ids, target.id.clone()));
+        async fn move_mails(
+            &self,
+            mail_ids: Vec<IdTupleGenerated>,
+            target: &FolderInfo,
+        ) -> Result<(), String> {
+            self.moved
+                .lock()
+                .unwrap()
+                .push((mail_ids, target.id.clone()));
             Ok(())
         }
         async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String> {
@@ -1521,10 +1571,7 @@ mod tests {
 
     fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
         Mail {
-            _id: Some(IdTupleGenerated::new(
-                test_id("list1"),
-                test_id(element_id),
-            )),
+            _id: Some(IdTupleGenerated::new(test_id("list1"), test_id(element_id))),
             _permissions: test_id("perm1"),
             _format: 0,
             _ownerEncSessionKey: None,
@@ -1557,10 +1604,7 @@ mod tests {
                 _errors: Default::default(),
             },
             attachments: vec![],
-            conversationEntry: IdTupleGenerated::new(
-                test_id("conv_list"),
-                test_id("conv_elem"),
-            ),
+            conversationEntry: IdTupleGenerated::new(test_id("conv_list"), test_id("conv_elem")),
             firstRecipient: Some(MailAddress {
                 _id: None,
                 name: "Recip".to_string(),
@@ -1619,10 +1663,27 @@ mod tests {
         let rfc1 = crate::mail::mail_to_rfc2822(&m1, Some(&d1), &[]);
         let rfc2 = crate::mail::mail_to_rfc2822(&m2, Some(&d2), &[]);
         store.set_folder_list(vec![inbox_folder()]).await;
-        store.set_folder("inbox", vec![
-            StoredMail { mail: m1, details: Some(d1), rfc2822: Some(rfc1), uid: 1, attachments_pending: false },
-            StoredMail { mail: m2, details: Some(d2), rfc2822: Some(rfc2), uid: 2, attachments_pending: false },
-        ]).await;
+        store
+            .set_folder(
+                "inbox",
+                vec![
+                    StoredMail {
+                        mail: m1,
+                        details: Some(d1),
+                        rfc2822: Some(rfc1),
+                        uid: 1,
+                        attachments_pending: false,
+                    },
+                    StoredMail {
+                        mail: m2,
+                        details: Some(d2),
+                        rfc2822: Some(rfc2),
+                        uid: 2,
+                        attachments_pending: false,
+                    },
+                ],
+            )
+            .await;
         let mut session = ImapSession::new(store, backend, None);
 
         // LOGIN
@@ -1643,13 +1704,15 @@ mod tests {
         // FETCH FLAGS
         let resp = session.handle_command("A004 FETCH 1:* (FLAGS UID)").await;
         assert!(resp[0].contains("* 1 FETCH"));
-        assert!(resp[0].contains("FLAGS ()"));  // unread → no \Seen
+        assert!(resp[0].contains("FLAGS ()")); // unread → no \Seen
         assert!(resp[1].contains("* 2 FETCH"));
-        assert!(resp[1].contains("FLAGS (\\Seen)"));  // read → \Seen
+        assert!(resp[1].contains("FLAGS (\\Seen)")); // read → \Seen
         assert!(resp.last().unwrap().contains("OK FETCH"));
 
         // UID FETCH with BODY
-        let resp = session.handle_command("A005 UID FETCH 1 (BODY.PEEK[])").await;
+        let resp = session
+            .handle_command("A005 UID FETCH 1 (BODY.PEEK[])")
+            .await;
         assert!(resp[0].contains("BODY[]"));
         // Body is base64-encoded HTML, verify the literal is present
         let b64_body = base64::engine::general_purpose::STANDARD.encode(b"<p>Body 1</p>");
@@ -1658,9 +1721,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_seen_flag_calls_backend() {
-        let backend = Arc::new(MockBackend::with_mails(vec![
-            make_mail("m1", "Unread mail", true),
-        ]));
+        let backend = Arc::new(MockBackend::with_mails(vec![make_mail(
+            "m1",
+            "Unread mail",
+            true,
+        )]));
         let store = MailStore::new();
         populate_store(&store, &backend.mails.lock().unwrap()).await;
         let mut session = ImapSession::new(store, backend.clone(), None);
@@ -1697,7 +1762,9 @@ mod tests {
         session.handle_command("A002 SELECT INBOX").await;
 
         // Mark mail 2 as deleted
-        session.handle_command("A003 STORE 2 +FLAGS (\\Deleted)").await;
+        session
+            .handle_command("A003 STORE 2 +FLAGS (\\Deleted)")
+            .await;
 
         // Verify deleted flag in FETCH
         let resp = session.handle_command("A004 FETCH 2 (FLAGS)").await;
@@ -1714,7 +1781,10 @@ mod tests {
 
         // Verify only 2 mails remain
         let resp = session.handle_command("A006 FETCH 1:* (FLAGS UID)").await;
-        let fetch_lines: Vec<_> = resp.iter().filter(|r| r.contains("* ") && r.contains("FETCH")).collect();
+        let fetch_lines: Vec<_> = resp
+            .iter()
+            .filter(|r| r.contains("* ") && r.contains("FETCH"))
+            .collect();
         assert_eq!(fetch_lines.len(), 2);
     }
 
@@ -1760,15 +1830,17 @@ mod tests {
     fn extract_uid(line: &str) -> u32 {
         let uid_pos = line.find("UID ").unwrap();
         let rest = &line[uid_pos + 4..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         rest[..end].parse().unwrap()
     }
 
     #[tokio::test]
     async fn test_idle_end_with_done() {
-        let backend = Arc::new(MockBackend::with_mails(vec![
-            make_mail("m1", "Test", false),
-        ]));
+        let backend = Arc::new(MockBackend::with_mails(vec![make_mail(
+            "m1", "Test", false,
+        )]));
         let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
@@ -1847,9 +1919,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_resets_state() {
-        let backend = Arc::new(MockBackend::with_mails(vec![
-            make_mail("m1", "Test", false),
-        ]));
+        let backend = Arc::new(MockBackend::with_mails(vec![make_mail(
+            "m1", "Test", false,
+        )]));
         let (_store, mut session) = make_session(backend).await;
 
         session.handle_command("A001 LOGIN user pass").await;
@@ -1875,13 +1947,20 @@ mod tests {
         session.handle_command("A002 SELECT INBOX").await;
 
         // Delete mails 1 and 3
-        session.handle_command("A003 STORE 1 +FLAGS (\\Deleted)").await;
-        session.handle_command("A004 STORE 3 +FLAGS (\\Deleted)").await;
+        session
+            .handle_command("A003 STORE 1 +FLAGS (\\Deleted)")
+            .await;
+        session
+            .handle_command("A004 STORE 3 +FLAGS (\\Deleted)")
+            .await;
 
         let resp = session.handle_command("A005 EXPUNGE").await;
 
         // Mail 1 is expunged at seq 1, then mail 3 becomes seq 2
-        let expunge_lines: Vec<_> = resp.iter().filter(|r| r.starts_with("* ") && r.contains("EXPUNGE")).collect();
+        let expunge_lines: Vec<_> = resp
+            .iter()
+            .filter(|r| r.starts_with("* ") && r.contains("EXPUNGE"))
+            .collect();
         assert_eq!(expunge_lines.len(), 2);
         assert!(expunge_lines[0].contains("* 1 EXPUNGE"));
         assert!(expunge_lines[1].contains("* 2 EXPUNGE"));
@@ -1946,15 +2025,30 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false },
-                    StoredMail { mail: m2, details: None, rfc2822: None, uid: 2, attachments_pending: false },
+                    StoredMail {
+                        mail: m1,
+                        details: None,
+                        rfc2822: None,
+                        uid: 1,
+                        attachments_pending: false,
+                    },
+                    StoredMail {
+                        mail: m2,
+                        details: None,
+                        rfc2822: None,
+                        uid: 2,
+                        attachments_pending: false,
+                    },
                 ],
             )
             .await;
         let resp = session.check_new_mail().await;
         // No EXPUNGE — only an added mail. EXISTS reports the new total.
         assert!(!resp.iter().any(|r| r.contains("EXPUNGE")), "got {resp:?}");
-        assert!(resp.iter().any(|r| r.contains("* 2 EXISTS")), "got {resp:?}");
+        assert!(
+            resp.iter().any(|r| r.contains("* 2 EXISTS")),
+            "got {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -1967,13 +2061,25 @@ mod tests {
         store
             .set_folder(
                 "inbox",
-                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false }],
+                vec![StoredMail {
+                    mail: m1,
+                    details: None,
+                    rfc2822: None,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
             )
             .await;
         let resp = session.check_new_mail().await;
         // m2 was seqno 2 in the session view.
-        assert!(resp.iter().any(|r| r.contains("* 2 EXPUNGE")), "got {resp:?}");
-        assert!(resp.iter().any(|r| r.contains("* 1 EXISTS")), "got {resp:?}");
+        assert!(
+            resp.iter().any(|r| r.contains("* 2 EXPUNGE")),
+            "got {resp:?}"
+        );
+        assert!(
+            resp.iter().any(|r| r.contains("* 1 EXISTS")),
+            "got {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -1990,16 +2096,34 @@ mod tests {
             .set_folder(
                 "inbox",
                 vec![
-                    StoredMail { mail: old1, details: None, rfc2822: None, uid: 1, attachments_pending: false },
-                    StoredMail { mail: new3, details: None, rfc2822: None, uid: 3, attachments_pending: false },
+                    StoredMail {
+                        mail: old1,
+                        details: None,
+                        rfc2822: None,
+                        uid: 1,
+                        attachments_pending: false,
+                    },
+                    StoredMail {
+                        mail: new3,
+                        details: None,
+                        rfc2822: None,
+                        uid: 3,
+                        attachments_pending: false,
+                    },
                 ],
             )
             .await;
         let resp = session.check_new_mail().await;
         // e2 was at seqno 2 — must EXPUNGE it. Then EXISTS reports the
         // (unchanged) count so the client refetches and discovers e3.
-        assert!(resp.iter().any(|r| r.contains("* 2 EXPUNGE")), "got {resp:?}");
-        assert!(resp.iter().any(|r| r.contains("* 2 EXISTS")), "got {resp:?}");
+        assert!(
+            resp.iter().any(|r| r.contains("* 2 EXPUNGE")),
+            "got {resp:?}"
+        );
+        assert!(
+            resp.iter().any(|r| r.contains("* 2 EXISTS")),
+            "got {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -2014,12 +2138,24 @@ mod tests {
         store
             .set_folder(
                 "inbox",
-                vec![StoredMail { mail: m1, details: None, rfc2822: None, uid: 1, attachments_pending: false }],
+                vec![StoredMail {
+                    mail: m1,
+                    details: None,
+                    rfc2822: None,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
             )
             .await;
         let resp = session.check_new_mail().await;
-        let expunge_idx_3 = resp.iter().position(|r| r.contains("* 3 EXPUNGE")).expect("missing 3");
-        let expunge_idx_2 = resp.iter().position(|r| r.contains("* 2 EXPUNGE")).expect("missing 2");
+        let expunge_idx_3 = resp
+            .iter()
+            .position(|r| r.contains("* 3 EXPUNGE"))
+            .expect("missing 3");
+        let expunge_idx_2 = resp
+            .iter()
+            .position(|r| r.contains("* 2 EXPUNGE"))
+            .expect("missing 2");
         assert!(
             expunge_idx_3 < expunge_idx_2,
             "EXPUNGE 3 must come before EXPUNGE 2, got {resp:?}",

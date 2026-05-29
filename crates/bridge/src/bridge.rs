@@ -189,7 +189,8 @@ impl BridgeHandle {
         self.emit_log("TLS initialized");
 
         self.emit_log(&format!("Authenticating as {}...", config.email));
-        let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await {
+        let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await
+        {
             Ok(s) => s,
             Err(e) => {
                 let msg = format!("Login failed: {e}");
@@ -290,7 +291,7 @@ impl BridgeHandle {
                         "Event bus catch-up state loaded ({} group(s))",
                         m.len()
                     ));
-                },
+                }
                 Ok(_) => self.emit_log("Event bus catch-up state is empty (first launch)"),
                 Err(e) => self.emit_log(&format!("Could not load event_bus_state: {e}")),
             }
@@ -356,7 +357,7 @@ impl BridgeHandle {
                 tokio::spawn(async move {
                     if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
                         match e {
-                            tutasdk::event_bus::EventBusError::Stopped => {},
+                            tutasdk::event_bus::EventBusError::Stopped => {}
                             _ => log::warn!("Event bus exited: {e}"),
                         }
                     }
@@ -378,7 +379,8 @@ impl BridgeHandle {
                 imap_tls,
                 pw.clone(),
             ));
-            let mut smtp_handle = tokio::spawn(smtp::serve(smtp_port, backend.clone(), smtp_tls, pw));
+            let mut smtp_handle =
+                tokio::spawn(smtp::serve(smtp_port, backend.clone(), smtp_tls, pw));
 
             tokio::select! {
                 _ = rx => {

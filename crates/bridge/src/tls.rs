@@ -18,13 +18,17 @@ fn key_path() -> PathBuf {
     cert_dir().join("key.pem")
 }
 
-pub fn load_or_create_tls_acceptor() -> Result<TlsAcceptor, Box<dyn std::error::Error + Send + Sync>> {
+pub fn load_or_create_tls_acceptor() -> Result<TlsAcceptor, Box<dyn std::error::Error + Send + Sync>>
+{
     let cert_file = cert_path();
     let key_file = key_path();
 
     let (cert_pem, key_pem) = if cert_file.exists() && key_file.exists() {
         log::info!("Loading TLS certificate from {}", cert_file.display());
-        (std::fs::read_to_string(&cert_file)?, std::fs::read_to_string(&key_file)?)
+        (
+            std::fs::read_to_string(&cert_file)?,
+            std::fs::read_to_string(&key_file)?,
+        )
     } else {
         log::info!("Generating self-signed TLS certificate...");
         let (cert, key) = generate_self_signed()?;
@@ -61,20 +65,18 @@ fn load_certs(
     pem: &str,
 ) -> Result<Vec<CertificateDer<'static>>, Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
     if certs.is_empty() {
         return Err("No certificates found in PEM".into());
     }
     Ok(certs)
 }
 
-fn load_key(
-    pem: &str,
-) -> Result<PrivateKeyDer<'static>, Box<dyn std::error::Error + Send + Sync>> {
+fn load_key(pem: &str) -> Result<PrivateKeyDer<'static>, Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
-    let keys: Vec<PrivatePkcs8KeyDer<'static>> = rustls_pemfile::pkcs8_private_keys(&mut reader)
-        .collect::<Result<Vec<_>, _>>()?;
+    let keys: Vec<PrivatePkcs8KeyDer<'static>> =
+        rustls_pemfile::pkcs8_private_keys(&mut reader).collect::<Result<Vec<_>, _>>()?;
     let key = keys
         .into_iter()
         .next()

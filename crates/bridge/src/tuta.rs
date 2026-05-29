@@ -1,24 +1,24 @@
 use base64::Engine;
-use std::collections::HashMap;
-use std::sync::Arc;
 use crypto_primitives::aes::{Aes256Key, Iv, AES_256_KEY_SIZE};
 use crypto_primitives::blake3::blake3_kdf;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tutasdk::bindings::file_client::{FileClient, FileClientError};
 use tutasdk::bindings::rest_client::RestClient;
-use tutasdk::crypto_entity_client::CryptoEntityClient;
 use tutasdk::blobs::blob_facade::FileData;
+use tutasdk::crypto_entity_client::CryptoEntityClient;
 use tutasdk::entities::generated::sys::BlobReferenceTokenWrapper;
 use tutasdk::entities::generated::tutanota::{
     AttachmentKeyData, DraftAttachment, DraftCreateData, DraftData, DraftRecipient, Mail, MailBox,
     MailDetails, MailDetailsBlob, MailSetEntry, NewDraftAttachment, SendDraftData,
     SendDraftParameters, TutanotaFile,
 };
-use tutasdk::tutanota_constants::ArchiveDataType;
 use tutasdk::folder_system::{FolderSystem, MailSetKind};
 use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
 use tutasdk::services::ExtraServiceParams;
+use tutasdk::tutanota_constants::ArchiveDataType;
 use tutasdk::{ApiCallError, CustomId, IdTupleGenerated, ListLoadDirection, LoggedInSdk, Sdk};
 
 use crate::config::Config;
@@ -48,7 +48,11 @@ pub const IMAP_DELIMITER: char = '/';
 
 #[async_trait::async_trait]
 pub trait MailBackend: Send + Sync {
-    async fn load_mail_ids_for_folder(&self, folder: &FolderInfo, limit: usize) -> Result<Vec<Mail>, String>;
+    async fn load_mail_ids_for_folder(
+        &self,
+        folder: &FolderInfo,
+        limit: usize,
+    ) -> Result<Vec<Mail>, String>;
     /// Load a single mail by `(list_id, element_id)` — used by the event-bus
     /// handler to fetch a freshly-created or updated mail without re-listing
     /// its folder. `Ok(None)` means the entity is no longer on the server.
@@ -77,16 +81,21 @@ pub trait MailBackend: Send + Sync {
     /// `mail.attachments`. Empty if the mail has no attachments. Errors are
     /// per-mail (no partial returns): if any one attachment fails the whole
     /// call returns `Err` so the caller can decide to retry the prefetch.
-    async fn load_attachments(
-        &self,
-        mail: &Mail,
-    ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String>;
+    async fn load_attachments(&self, mail: &Mail) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String>;
     /// Enumerate all mail folders (system + custom, with hierarchy).
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String>;
-    async fn set_unread_status(&self, mail_ids: Vec<IdTupleGenerated>, unread: bool) -> Result<(), String>;
+    async fn set_unread_status(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        unread: bool,
+    ) -> Result<(), String>;
     async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String>;
     /// Move mails into the given target folder.
-    async fn move_mails(&self, mail_ids: Vec<IdTupleGenerated>, target: &FolderInfo) -> Result<(), String>;
+    async fn move_mails(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        target: &FolderInfo,
+    ) -> Result<(), String>;
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String>;
 }
 
@@ -221,8 +230,7 @@ impl TutaSession {
             "tutabridge local storage v1",
             AES_256_KEY_SIZE,
         );
-        GenericAesKey::from_bytes(&derived)
-            .map_err(|e| format!("Key derivation error: {e:?}"))
+        GenericAesKey::from_bytes(&derived).map_err(|e| format!("Key derivation error: {e:?}"))
     }
 
     fn crypto_client(&self) -> Arc<CryptoEntityClient> {
@@ -301,7 +309,11 @@ impl TutaSession {
                 .await
             {
                 Ok(batch) => mails.extend(batch),
-                Err(e) => log::warn!("Failed to batch load mails from list {}: {}", list_id_str, e),
+                Err(e) => log::warn!(
+                    "Failed to batch load mails from list {}: {}",
+                    list_id_str,
+                    e
+                ),
             }
         }
 
@@ -322,7 +334,7 @@ impl TutaSession {
                 Err(e) => {
                     log::error!("Failed to load mail details draft: {e}");
                     Err(e)
-                },
+                }
             }
         } else if mail.mailDetails.is_some() {
             match mail_facade.load_mail_details_blob(mail).await {
@@ -330,7 +342,7 @@ impl TutaSession {
                 Err(e) => {
                     log::error!("Failed to load mail details blob: {e}");
                     Err(e)
-                },
+                }
             }
         } else {
             // Legacy mail without either reference — body lives nowhere we
@@ -477,9 +489,7 @@ impl TutaSession {
             let enc_mime_type = file_sk
                 .encrypt_data(att.mime_type.as_bytes(), Iv::generate(randomizer))
                 .map_err(|e| {
-                    ApiCallError::internal(format!(
-                        "Failed to encrypt attachment mime type: {e}"
-                    ))
+                    ApiCallError::internal(format!("Failed to encrypt attachment mime type: {e}"))
                 })?;
             let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, Iv::generate(randomizer));
 
@@ -556,8 +566,9 @@ impl TutaSession {
             .get_current_sym_group_key(&mail_group_id)
             .await?;
 
-        let owner_enc_session_key =
-            group_key.object.encrypt_key(&session_key, Iv::generate(&randomizer));
+        let owner_enc_session_key = group_key
+            .object
+            .encrypt_key(&session_key, Iv::generate(&randomizer));
         let owner_key_version = group_key.version as i64;
 
         // Upload every attachment first — the resulting `DraftAttachment`
@@ -669,10 +680,7 @@ impl TutaSession {
     /// the File entities can't be decrypted. Returns `None` if this is not
     /// a self-send, the cache has nothing for the envelope, or the entry
     /// is older than the TTL.
-    async fn try_self_send_cache(
-        &self,
-        mail: &Mail,
-    ) -> Option<Vec<(TutanotaFile, Vec<u8>)>> {
+    async fn try_self_send_cache(&self, mail: &Mail) -> Option<Vec<(TutanotaFile, Vec<u8>)>> {
         if !mail.sender.address.eq_ignore_ascii_case(&self.email) {
             return None;
         }
@@ -760,7 +768,11 @@ fn self_send_cache_key(subject: &str, sender: &str, recipient: &str) -> String {
 
 #[async_trait::async_trait]
 impl MailBackend for TutaSession {
-    async fn load_mail_ids_for_folder(&self, folder: &FolderInfo, limit: usize) -> Result<Vec<Mail>, String> {
+    async fn load_mail_ids_for_folder(
+        &self,
+        folder: &FolderInfo,
+        limit: usize,
+    ) -> Result<Vec<Mail>, String> {
         let entries_list_id = tutasdk::GeneratedId(folder.entries_list_id.clone());
         self.load_mail_ids_for_folder_impl(&entries_list_id, limit)
             .await
@@ -810,16 +822,18 @@ impl MailBackend for TutaSession {
             .map_err(|e| format!("{e}"))
     }
 
-    async fn load_attachments(
-        &self,
-        mail: &Mail,
-    ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String> {
-        self.load_attachments_impl(mail).await.map_err(|e| format!("{e}"))
+    async fn load_attachments(&self, mail: &Mail) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String> {
+        self.load_attachments_impl(mail)
+            .await
+            .map_err(|e| format!("{e}"))
     }
 
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
         let mailbox = self.load_mailbox().await.map_err(|e| format!("{e}"))?;
-        let folder_system = self.load_folders(&mailbox).await.map_err(|e| format!("{e}"))?;
+        let folder_system = self
+            .load_folders(&mailbox)
+            .await
+            .map_err(|e| format!("{e}"))?;
 
         let mut result = Vec::new();
         for indented in folder_system.indented_list() {
@@ -888,7 +902,11 @@ impl MailBackend for TutaSession {
             .map_err(|e| format!("{e}"))
     }
 
-    async fn move_mails(&self, mail_ids: Vec<IdTupleGenerated>, target: &FolderInfo) -> Result<(), String> {
+    async fn move_mails(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        target: &FolderInfo,
+    ) -> Result<(), String> {
         let target_folder = IdTupleGenerated::new(
             tutasdk::GeneratedId(target.list_id.clone()),
             tutasdk::GeneratedId(target.id.clone()),
@@ -998,7 +1016,10 @@ pub async fn login_with_2fa(
             .any(|c| c.r#type == i64::from(tutasdk::tutanota_constants::SecondFactorType::Totp));
 
         if !has_totp {
-            return Err("Account requires U2F/WebAuthn 2FA which is not supported — only TOTP is supported".into());
+            return Err(
+                "Account requires U2F/WebAuthn 2FA which is not supported — only TOTP is supported"
+                    .into(),
+            );
         }
 
         let totp_code = match &totp_callback {
@@ -1018,7 +1039,9 @@ pub async fn login_with_2fa(
                 .is_second_factor_pending(&access_token)
                 .await
                 .map_err(|e| {
-                    Box::<dyn std::error::Error + Send + Sync>::from(format!("2FA poll failed: {e}"))
+                    Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                        "2FA poll failed: {e}"
+                    ))
                 })?;
             if !pending {
                 cleared = true;
@@ -1084,10 +1107,8 @@ fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
 fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
     let mut cache = CREDENTIALS_CACHE.lock().unwrap();
     if let Some(cached) = cache.as_ref() {
-
         return cached.clone();
     }
-
 
     let result = load_credentials_from_keyring(email);
     *cache = Some(result.clone());
@@ -1095,7 +1116,6 @@ fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
 }
 
 fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credentials> {
-
     let entry = keyring::Entry::new(KEYRING_SERVICE, email).ok()?;
 
     let json_str = entry.get_password().ok()?;
@@ -1118,13 +1138,11 @@ fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credenti
 }
 
 fn delete_credentials(email: &str) {
-
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, email) {
         let _ = entry.delete_credential();
     }
     *CREDENTIALS_CACHE.lock().unwrap() = None;
 }
-
 
 /// Map SMTP recipients to `DraftRecipient`, falling back to the address when
 /// the display name is empty (Tuta's send service rejects empty names).
@@ -1328,10 +1346,9 @@ mod transient_tests {
     #[test]
     fn missing_owner_key_is_transient() {
         let e = ApiCallError::InternalSdkError {
-            error_message:
-                "Failed to resolve session key for entity 'File' with ID: ...; \
+            error_message: "Failed to resolve session key for entity 'File' with ID: ...; \
                 Session key resolution failure: instance missing owner key/group data"
-                    .to_string(),
+                .to_string(),
         };
         assert!(is_session_key_transient(&e));
     }

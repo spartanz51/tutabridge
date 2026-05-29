@@ -82,7 +82,8 @@ pub async fn export_eml(
     output: &Path,
     mut progress: impl FnMut(&BackupProgress),
 ) -> Result<BackupStats, String> {
-    std::fs::create_dir_all(output).map_err(|e| format!("Cannot create {}: {e}", output.display()))?;
+    std::fs::create_dir_all(output)
+        .map_err(|e| format!("Cannot create {}: {e}", output.display()))?;
 
     let folders = backend.list_folders().await?;
     let mut stats = BackupStats::default();
@@ -394,7 +395,11 @@ mod tests {
             folder: &FolderInfo,
             _limit: usize,
         ) -> Result<Vec<Mail>, String> {
-            Ok(self.mails.get(&folder.entries_list_id).cloned().unwrap_or_default())
+            Ok(self
+                .mails
+                .get(&folder.entries_list_id)
+                .cloned()
+                .unwrap_or_default())
         }
         async fn load_mail_details(&self, _mail: &Mail) -> Result<Option<MailDetails>, String> {
             *self.server_loads.lock().unwrap() += 1;
@@ -449,7 +454,8 @@ mod tests {
     fn temp_store() -> (LocalStore, std::path::PathBuf) {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
         let key: GenericAesKey = GenericAesKey::Aes256(Aes256Key::generate(&randomizer));
-        let tmp = std::env::temp_dir().join(format!("tutabridge_backup_test_{}", rand::random::<u64>()));
+        let tmp =
+            std::env::temp_dir().join(format!("tutabridge_backup_test_{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).unwrap();
         let store = LocalStore::open(&tmp.join("s.db"), &tmp.join("mails"), key).unwrap();
         (store, tmp)
@@ -486,7 +492,8 @@ mod tests {
             server_loads: std::sync::Mutex::new(0),
         };
 
-        let out = std::env::temp_dir().join(format!("tutabridge_backup_out_{}", rand::random::<u64>()));
+        let out =
+            std::env::temp_dir().join(format!("tutabridge_backup_out_{}", rand::random::<u64>()));
         let mut progress_calls = 0;
         let stats = export_eml(&backend, &store, &out, |_p| progress_calls += 1)
             .await
@@ -494,7 +501,10 @@ mod tests {
 
         assert_eq!(stats.folders, 2);
         assert_eq!(stats.mails_written, 3);
-        assert_eq!(stats.from_cache, 1, "the seeded mail should come from cache");
+        assert_eq!(
+            stats.from_cache, 1,
+            "the seeded mail should come from cache"
+        );
         assert_eq!(stats.from_server, 2, "the other two should be fetched");
         assert_eq!(progress_calls, 3);
         assert!(stats.errors.is_empty());
@@ -504,7 +514,10 @@ mod tests {
         // Files landed in the right per-folder dirs with the date prefix.
         let inbox = out.join("INBOX");
         let sent = out.join("Sent");
-        let inbox_files: Vec<_> = std::fs::read_dir(&inbox).unwrap().filter_map(|e| e.ok()).collect();
+        let inbox_files: Vec<_> = std::fs::read_dir(&inbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
         assert_eq!(inbox_files.len(), 2);
         assert_eq!(std::fs::read_dir(&sent).unwrap().count(), 1);
 
@@ -512,13 +525,17 @@ mod tests {
         let cached_path = inbox.join("20241225-123725_Cached1--3-9.eml");
         let cached_eml = std::fs::read_to_string(&cached_path).unwrap();
         let from_cache_b64 = base64::engine::general_purpose::STANDARD.encode(b"<p>from cache</p>");
-        assert!(cached_eml.contains(&from_cache_b64), "cached body should be served verbatim");
+        assert!(
+            cached_eml.contains(&from_cache_b64),
+            "cached body should be served verbatim"
+        );
 
         // --- second run resumes: everything is already on disk ---
-        let stats2 = export_eml(&backend, &store, &out, |_p| {})
-            .await
-            .unwrap();
-        assert_eq!(stats2.skipped, 3, "a re-run must skip every already-exported mail");
+        let stats2 = export_eml(&backend, &store, &out, |_p| {}).await.unwrap();
+        assert_eq!(
+            stats2.skipped, 3,
+            "a re-run must skip every already-exported mail"
+        );
         assert_eq!(stats2.mails_written, 0);
         assert_eq!(stats2.from_server, 0, "no server fetch on a resume");
         assert_eq!(
@@ -538,7 +555,10 @@ mod tests {
 
         // First backup: one mail fetched.
         let mut m1 = HashMap::new();
-        m1.insert("inbox_entries".to_string(), vec![make_mail("Old1--3-9", "old")]);
+        m1.insert(
+            "inbox_entries".to_string(),
+            vec![make_mail("Old1--3-9", "old")],
+        );
         let backend1 = MockBackend {
             folders: vec![folder("inbox", "inbox_entries", "INBOX")],
             mails: m1,

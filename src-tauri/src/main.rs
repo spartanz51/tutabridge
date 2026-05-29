@@ -2,15 +2,14 @@
 
 mod commands;
 
-use std::sync::Arc;
 use commands::BridgeState;
+use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
 use tutabridge_core::bridge::BridgeHandle;
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
 
     tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default()
@@ -114,10 +113,7 @@ async fn stream_stats(
     }
 }
 
-async fn stream_logs(
-    app: tauri::AppHandle,
-    mut rx: tokio::sync::broadcast::Receiver<String>,
-) {
+async fn stream_logs(app: tauri::AppHandle, mut rx: tokio::sync::broadcast::Receiver<String>) {
     use tauri::Emitter;
     loop {
         match rx.recv().await {

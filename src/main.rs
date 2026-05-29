@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use log::{info, warn};
+use std::sync::Arc;
 use tutabridge_core::{
     backup, bridge as bridge_helpers, config, event_handler, imap, smtp, store::LocalStore, sync,
     tls, tuta,
@@ -58,8 +58,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Bridge password setup failed: {e}"))?;
     info!("TutaBridge starting...");
 
-    let tls_acceptor = tls::load_or_create_tls_acceptor()
-        .map_err(|e| anyhow::anyhow!("TLS setup failed: {e}"))?;
+    let tls_acceptor =
+        tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("TLS setup failed: {e}"))?;
     info!("TLS initialized");
 
     info!("IMAP will listen on 127.0.0.1:{}", cfg.imap_port);
@@ -68,7 +68,9 @@ async fn main() -> anyhow::Result<()> {
     let session = login_session(&cfg).await?;
     info!("Logged in as {}", cfg.email);
 
-    let storage_key = session.derive_storage_key().await
+    let storage_key = session
+        .derive_storage_key()
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     info!("Storage encryption key derived");
 
@@ -76,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
         &config::store_db_path(),
         &config::store_mails_dir(),
         storage_key,
-    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !local_store.verify_key() {
         info!("Storage key changed — resetting local cache");
         let _ = local_store.reset();
@@ -195,7 +198,11 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     ));
     let imap_handle = tokio::spawn(imap::serve(
-        cfg.imap_port, store.clone(), backend.clone(), imap_tls, pw.clone(),
+        cfg.imap_port,
+        store.clone(),
+        backend.clone(),
+        imap_tls,
+        pw.clone(),
     ));
     let smtp_handle = tokio::spawn(smtp::serve(cfg.smtp_port, backend.clone(), smtp_tls, pw));
 

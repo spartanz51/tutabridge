@@ -52,7 +52,11 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         extract_multipart_body_and_attachments(&body_section, &content_type)
     } else {
         (
-            decode_body(&body_section, &content_transfer_encoding, &content_type.to_lowercase()),
+            decode_body(
+                &body_section,
+                &content_transfer_encoding,
+                &content_type.to_lowercase(),
+            ),
             Vec::new(),
         )
     };
@@ -90,20 +94,29 @@ pub(super) fn parse_headers(header_section: &str) -> Vec<(String, String)> {
             current_value.push_str(line.trim());
         } else if let Some((name, value)) = line.split_once(':') {
             if !current_name.is_empty() {
-                headers.push((current_name.to_lowercase(), current_value.trim().to_string()));
+                headers.push((
+                    current_name.to_lowercase(),
+                    current_value.trim().to_string(),
+                ));
             }
             current_name = name.trim().to_string();
             current_value = value.to_string();
         }
     }
     if !current_name.is_empty() {
-        headers.push((current_name.to_lowercase(), current_value.trim().to_string()));
+        headers.push((
+            current_name.to_lowercase(),
+            current_value.trim().to_string(),
+        ));
     }
     headers
 }
 
 pub(super) fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
-    headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+    headers
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.clone())
 }
 
 fn parse_address_single(raw: &str) -> (String, String) {
@@ -202,10 +215,9 @@ fn decode_q_encoding(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'=' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 result.push(byte);
                 i += 3;
                 continue;
@@ -228,7 +240,9 @@ pub(super) fn extract_boundary(content_type: &str) -> Option<String> {
         let boundary = if rest.starts_with('"') {
             rest[1..].split('"').next().unwrap_or("")
         } else {
-            rest.split(|c: char| c.is_whitespace() || c == ';').next().unwrap_or("")
+            rest.split(|c: char| c.is_whitespace() || c == ';')
+                .next()
+                .unwrap_or("")
         };
         if !boundary.is_empty() {
             return Some(boundary.to_string());
@@ -267,8 +281,7 @@ fn extract_multipart_body_and_attachments(
         let part_cd_lower = part_cd.to_lowercase();
 
         let is_attachment = part_cd_lower.contains("attachment")
-            || (extract_param(&part_ct, "name").is_some()
-                && !part_ct_lower.contains("text/"));
+            || (extract_param(&part_ct, "name").is_some() && !part_ct_lower.contains("text/"));
 
         if part_ct_lower.contains("multipart/") {
             let (nested_body, nested_atts) =
@@ -284,10 +297,10 @@ fn extract_multipart_body_and_attachments(
                     base64::engine::general_purpose::STANDARD
                         .decode(&clean)
                         .unwrap_or_default()
-                },
+                }
                 cte if cte.contains("quoted-printable") => {
                     decode_quoted_printable(&part_body).into_bytes()
-                },
+                }
                 _ => part_body.as_bytes().to_vec(),
             };
             let filename = extract_param(&part_cd, "filename")
@@ -307,7 +320,8 @@ fn extract_multipart_body_and_attachments(
             });
         } else if part_ct_lower.contains("text/html") && html_part.is_none() {
             html_part = Some(decode_body(&part_body, &part_cte, &part_ct_lower));
-        } else if part_ct_lower.contains("text/plain") && html_part.is_none() && text_part.is_none() {
+        } else if part_ct_lower.contains("text/plain") && html_part.is_none() && text_part.is_none()
+        {
             text_part = Some(decode_body(&part_body, &part_cte, &part_ct_lower));
         }
     }
@@ -348,13 +362,23 @@ pub(super) fn split_mime_parts(body: &str, boundary: &str) -> Vec<String> {
     for line in body.lines() {
         if line.starts_with(&end_delimiter) {
             if in_part && !current.is_empty() {
-                parts.push(current.trim_start_matches("\r\n").trim_start_matches('\n').to_string());
+                parts.push(
+                    current
+                        .trim_start_matches("\r\n")
+                        .trim_start_matches('\n')
+                        .to_string(),
+                );
             }
             break;
         }
         if line.starts_with(&delimiter) {
             if in_part && !current.is_empty() {
-                parts.push(current.trim_start_matches("\r\n").trim_start_matches('\n').to_string());
+                parts.push(
+                    current
+                        .trim_start_matches("\r\n")
+                        .trim_start_matches('\n')
+                        .to_string(),
+                );
             }
             current = String::new();
             in_part = true;
@@ -401,10 +425,7 @@ fn decode_quoted_printable(s: &str) -> String {
                 i += 2;
             } else if i + 2 < bytes.len() {
                 let hex = [bytes[i + 1], bytes[i + 2]];
-                if let Ok(val) = u8::from_str_radix(
-                    std::str::from_utf8(&hex).unwrap_or(""),
-                    16,
-                ) {
+                if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or(""), 16) {
                     result.push(val);
                 }
                 i += 3;

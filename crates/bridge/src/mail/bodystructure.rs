@@ -22,8 +22,8 @@ pub fn compute_bodystructure(rfc2822: &str) -> String {
     let headers = parse_headers(&headers_text);
     let content_type = get_header(&headers, "content-type")
         .unwrap_or_else(|| "text/html; charset=UTF-8".to_owned());
-    let cte = get_header(&headers, "content-transfer-encoding")
-        .unwrap_or_else(|| "7bit".to_owned());
+    let cte =
+        get_header(&headers, "content-transfer-encoding").unwrap_or_else(|| "7bit".to_owned());
 
     bodystructure_for(&content_type, &cte, &body, &headers)
 }
@@ -71,8 +71,8 @@ fn part_structure(part: &str) -> String {
     let headers = parse_headers(&headers_text);
     let content_type =
         get_header(&headers, "content-type").unwrap_or_else(|| "text/plain".to_owned());
-    let cte = get_header(&headers, "content-transfer-encoding")
-        .unwrap_or_else(|| "7bit".to_owned());
+    let cte =
+        get_header(&headers, "content-transfer-encoding").unwrap_or_else(|| "7bit".to_owned());
 
     bodystructure_for(&content_type, &cte, &body, &headers)
 }

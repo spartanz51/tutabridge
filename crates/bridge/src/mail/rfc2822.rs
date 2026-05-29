@@ -86,7 +86,10 @@ pub fn mail_to_rfc2822(
 
         for (file, data) in attachments {
             msg.push_str(&format!("--{}\r\n", boundary));
-            let mime = file.mimeType.as_deref().unwrap_or("application/octet-stream");
+            let mime = file
+                .mimeType
+                .as_deref()
+                .unwrap_or("application/octet-stream");
             let name_encoded = encode_header_value(&file.name);
             msg.push_str(&format!(
                 "Content-Type: {}; name=\"{}\"\r\n",
@@ -380,10 +383,7 @@ mod tests {
         use tutasdk::IdTupleGenerated;
 
         let mail = Mail {
-            _id: Some(IdTupleGenerated::new(
-                test_id("list1"),
-                test_id("elem1"),
-            )),
+            _id: Some(IdTupleGenerated::new(test_id("list1"), test_id("elem1"))),
             _permissions: test_id("perm1"),
             _format: 0,
             _ownerEncSessionKey: None,
@@ -416,10 +416,7 @@ mod tests {
                 _errors: Default::default(),
             },
             attachments: vec![],
-            conversationEntry: IdTupleGenerated::new(
-                test_id("conv_list1"),
-                test_id("conv_elem1"),
-            ),
+            conversationEntry: IdTupleGenerated::new(test_id("conv_list1"), test_id("conv_elem1")),
             firstRecipient: Some(MailAddress {
                 _id: None,
                 name: "Bob".to_string(),
@@ -456,10 +453,7 @@ mod tests {
         use tutasdk::IdTupleGenerated;
 
         let mail = Mail {
-            _id: Some(IdTupleGenerated::new(
-                test_id("list2"),
-                test_id("elem2"),
-            )),
+            _id: Some(IdTupleGenerated::new(test_id("list2"), test_id("elem2"))),
             _permissions: test_id("perm2"),
             _format: 0,
             _ownerEncSessionKey: None,
@@ -492,10 +486,7 @@ mod tests {
                 _errors: Default::default(),
             },
             attachments: vec![],
-            conversationEntry: IdTupleGenerated::new(
-                test_id("conv_list2"),
-                test_id("conv_elem2"),
-            ),
+            conversationEntry: IdTupleGenerated::new(test_id("conv_list2"), test_id("conv_elem2")),
             firstRecipient: None,
             mailDetails: None,
             mailDetailsDraft: None,
@@ -552,8 +543,7 @@ mod tests {
         assert!(rfc.contains("To: Bob <bob@example.com>, charlie@example.com\r\n"));
         assert!(rfc.contains("Cc: Dave <dave@example.com>\r\n"));
         // Body should be base64 of "<p>Hello World</p>"
-        let body_b64 =
-            base64::engine::general_purpose::STANDARD.encode(b"<p>Hello World</p>");
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(b"<p>Hello World</p>");
         assert!(rfc.contains(&body_b64));
     }
 
@@ -600,10 +590,7 @@ mod tests {
                 _errors: Default::default(),
             },
             attachments: vec![],
-            conversationEntry: IdTupleGenerated::new(
-                test_id("conv_l"),
-                test_id("conv_e"),
-            ),
+            conversationEntry: IdTupleGenerated::new(test_id("conv_l"), test_id("conv_e")),
             firstRecipient: Some(MailAddress {
                 _id: None,
                 name: "".to_string(),
@@ -661,12 +648,13 @@ mod tests {
         let attachments: Vec<super::AttachmentPart> = vec![(&file, data)];
         let rfc = mail_to_rfc2822(&mail, Some(&details), &attachments);
 
-        assert!(rfc.contains("Content-Type: multipart/mixed; boundary=\"=_TutaBridge_list_att_elem_att\""));
+        assert!(rfc.contains(
+            "Content-Type: multipart/mixed; boundary=\"=_TutaBridge_list_att_elem_att\""
+        ));
         assert!(rfc.contains("--=_TutaBridge_list_att_elem_att\r\n"));
         // Body part: text/html base64
         assert!(rfc.contains("Content-Type: text/html; charset=UTF-8\r\n"));
-        let body_b64 =
-            base64::engine::general_purpose::STANDARD.encode(b"<p>The body</p>");
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(b"<p>The body</p>");
         assert!(rfc.contains(&body_b64));
         // Attachment part
         assert!(rfc.contains("Content-Type: application/pdf; name=\"doc.pdf\""));
