@@ -54,7 +54,7 @@ pub struct BackupProgress {
 /// Outcome of a backup run. Per-mail failures are collected in `errors`
 /// rather than aborting the whole export — a backup should salvage as much
 /// as it can.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BackupStats {
     pub folders: usize,
     pub mails_written: usize,
@@ -62,6 +62,10 @@ pub struct BackupStats {
     pub from_cache: usize,
     /// Mails fetched + decrypted from the server during the backup.
     pub from_server: usize,
+    /// Mails whose `.eml` was already on disk and so were skipped — this is
+    /// what makes a re-run resume an interrupted backup and turns a periodic
+    /// re-backup into an incremental one (only new mail is fetched).
+    pub skipped: usize,
     pub bytes: u64,
     /// Non-fatal per-mail failures (`"<element_id>: <reason>"`).
     pub errors: Vec<String>,
@@ -99,6 +103,28 @@ pub async fn export_eml(
             };
             let eid = id.element_id.to_string();
 
+            // The filename is deterministic (stable receivedDate + element
+            // id), so if it's already on disk this mail was exported by an
+            // earlier run. Skip it *before* any cache read or server fetch —
+            // that's what makes a re-run resume an interrupted backup and an
+            // incremental re-backup cheap. (Mail content is immutable, so an
+            // existing file is never stale.)
+            let fname = format!(
+                "{}_{}.eml",
+                date_stamp(mail.receivedDate.as_millis()),
+                sanitize_segment(&eid)
+            );
+            let path = folder_dir.join(&fname);
+            if path.exists() {
+                stats.skipped += 1;
+                progress(&BackupProgress {
+                    folder: folder.imap_path.clone(),
+                    done: i + 1,
+                    total,
+                });
+                continue;
+            }
+
             // Fast path: decrypt the cached `.eml.enc` if we have it.
             let (eml, from_cache) = match local_store.read_eml(&eid) {
                 Ok(Some(cached)) => (cached, true),
@@ -122,8 +148,6 @@ pub async fn export_eml(
                 }
             };
 
-            let fname = format!("{}_{}.eml", date_stamp(mail.receivedDate.as_millis()), sanitize_segment(&eid));
-            let path = folder_dir.join(fname);
             match std::fs::write(&path, eml.as_bytes()) {
                 Ok(()) => {
                     stats.mails_written += 1;
@@ -489,6 +513,60 @@ mod tests {
         let cached_eml = std::fs::read_to_string(&cached_path).unwrap();
         let from_cache_b64 = base64::engine::general_purpose::STANDARD.encode(b"<p>from cache</p>");
         assert!(cached_eml.contains(&from_cache_b64), "cached body should be served verbatim");
+
+        // --- second run resumes: everything is already on disk ---
+        let stats2 = export_eml(&backend, &store, &out, |_p| {})
+            .await
+            .unwrap();
+        assert_eq!(stats2.skipped, 3, "a re-run must skip every already-exported mail");
+        assert_eq!(stats2.mails_written, 0);
+        assert_eq!(stats2.from_server, 0, "no server fetch on a resume");
+        assert_eq!(
+            *backend.server_loads.lock().unwrap(),
+            2,
+            "server_loads unchanged: the second run hit zero mails"
+        );
+
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[tokio::test]
+    async fn resume_only_fetches_the_new_mail() {
+        let (store, _tmp) = temp_store();
+        let out =
+            std::env::temp_dir().join(format!("tutabridge_backup_inc_{}", rand::random::<u64>()));
+
+        // First backup: one mail fetched.
+        let mut m1 = HashMap::new();
+        m1.insert("inbox_entries".to_string(), vec![make_mail("Old1--3-9", "old")]);
+        let backend1 = MockBackend {
+            folders: vec![folder("inbox", "inbox_entries", "INBOX")],
+            mails: m1,
+            server_loads: std::sync::Mutex::new(0),
+        };
+        let s1 = export_eml(&backend1, &store, &out, |_p| {}).await.unwrap();
+        assert_eq!(s1.from_server, 1);
+
+        // A new mail shows up. A re-run against the same output dir must skip
+        // the old one (already on disk) and only fetch the newcomer.
+        let mut m2 = HashMap::new();
+        m2.insert(
+            "inbox_entries".to_string(),
+            vec![make_mail("Old1--3-9", "old"), make_mail("New1--3-9", "new")],
+        );
+        let backend2 = MockBackend {
+            folders: vec![folder("inbox", "inbox_entries", "INBOX")],
+            mails: m2,
+            server_loads: std::sync::Mutex::new(0),
+        };
+        let s2 = export_eml(&backend2, &store, &out, |_p| {}).await.unwrap();
+        assert_eq!(s2.skipped, 1, "the old mail is already on disk");
+        assert_eq!(s2.from_server, 1, "only the new mail is fetched");
+        assert_eq!(
+            *backend2.server_loads.lock().unwrap(),
+            1,
+            "the second backend only loaded the new mail's details"
+        );
 
         std::fs::remove_dir_all(&out).ok();
     }

@@ -302,10 +302,11 @@ async fn run_backup(output: &str) -> anyhow::Result<()> {
     }
 
     info!(
-        "Backup complete: {} mails written ({} from cache, {} fetched) across {} folder(s), {:.1} MB",
+        "Backup complete: {} mails written ({} from cache, {} fetched), {} skipped (already on disk) across {} folder(s), {:.1} MB",
         stats.mails_written,
         stats.from_cache,
         stats.from_server,
+        stats.skipped,
         stats.folders,
         stats.bytes as f64 / 1_000_000.0,
     );
