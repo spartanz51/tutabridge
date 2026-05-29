@@ -1,10 +1,15 @@
 name: Release
 
-# Push a tag like `v0.1.0` to build installers for all three desktop OSes and
-# attach them (plus the headless CLI binary) to a GitHub Release.
+# Two ways in:
+#   * push a tag `v0.1.0`  → build installers and attach them to a draft
+#     GitHub Release.
+#   * run manually (workflow_dispatch, on any branch) → build the same
+#     installers and upload them as **workflow artifacts** only, with no tag
+#     and no release. This is how you test the pipeline without burning a tag.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +17,7 @@ env:
 jobs:
   release:
     permissions:
-      contents: write # create the release + upload assets
+      contents: write # create the release + upload assets (tag runs only)
     strategy:
       fail-fast: false
       matrix:
@@ -21,14 +26,17 @@ jobs:
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             tauri_args: --target universal-apple-darwin
             cli_asset: tutabridge-macos-arm64
+            bundle_path: target/universal-apple-darwin/release/bundle
           - platform: ubuntu-latest
             rust_targets: ""
             tauri_args: ""
             cli_asset: tutabridge-linux-x86_64
+            bundle_path: target/release/bundle
           - platform: windows-latest
             rust_targets: ""
             tauri_args: ""
             cli_asset: tutabridge-windows-x86_64.exe
+            bundle_path: target/release/bundle
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout (with vendored SDK submodule)
@@ -76,33 +84,51 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      # Builds the GUI bundles (.dmg / .msi+.exe / .deb+.AppImage), creates or
-      # updates the Release for this tag, and uploads them. Draft so assets can
-      # be reviewed before publishing.
-      - name: Build & release GUI bundles
+      # Builds the GUI bundles (.dmg / .msi+.exe / .deb+.AppImage). On a tag it
+      # also creates/updates a draft Release and uploads them; on a manual run
+      # `tagName` is empty so it only builds (no release).
+      - name: Build GUI bundles
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "TutaBridge ${{ github.ref_name }}"
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('TutaBridge {0}', github.ref_name) || '' }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.tauri_args }}
 
-      # The headless CLI — the AUR/daemon target — as a standalone binary.
       - name: Build CLI
         run: cargo build --release -p tutabridge
 
-      - name: Attach CLI binary to the release
+      # --- Tag run: attach the CLI binary to the draft release ---
+      - name: Attach CLI to release
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            src="target/release/tutabridge.exe"
-          else
-            src="target/release/tutabridge"
-          fi
+          src=target/release/tutabridge
+          [ "${{ runner.os }}" = "Windows" ] && src=target/release/tutabridge.exe
           cp "$src" "${{ matrix.cli_asset }}"
           gh release upload "${{ github.ref_name }}" "${{ matrix.cli_asset }}" --clobber
+
+      # --- Manual run: publish everything as downloadable workflow artifacts ---
+      - name: Upload GUI bundles as artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-bundles-${{ matrix.platform }}
+          path: ${{ matrix.bundle_path }}/**
+          if-no-files-found: warn
+
+      - name: Upload CLI as artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.cli_asset }}
+          path: |
+            target/release/tutabridge
+            target/release/tutabridge.exe
+          if-no-files-found: warn
