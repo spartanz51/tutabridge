@@ -225,6 +225,99 @@ pub(crate) fn extract_headers(rfc: &str) -> String {
     }
 }
 
+/// Strip HTML markup down to readable text for full-text indexing. Drops tags,
+/// the contents of `<script>`/`<style>` blocks, and decodes the handful of
+/// entities that actually show up in mail bodies, then collapses whitespace.
+/// This is lossy by design — it only needs to be good enough that a body
+/// search matches the words a human would see, not the markup around them.
+pub(crate) fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut chars = html.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            // Capture the tag name to detect script/style blocks we must skip
+            // wholesale (their text content is not human-visible).
+            let mut tag = String::new();
+            for t in chars.clone().take(6) {
+                if t == '>' || t.is_whitespace() {
+                    break;
+                }
+                tag.push(t.to_ascii_lowercase());
+            }
+            let skip_block = matches!(tag.trim_start_matches('/'), "script" | "style");
+            // Consume up to and including the closing '>'.
+            for t in chars.by_ref() {
+                if t == '>' {
+                    break;
+                }
+            }
+            if skip_block && !tag.starts_with('/') {
+                // Swallow everything until the matching closing tag.
+                let close = format!("</{tag}");
+                let mut window = String::new();
+                for t in chars.by_ref() {
+                    window.push(t.to_ascii_lowercase());
+                    if window.ends_with(&close) {
+                        // Drop the rest of the closing tag.
+                        for t2 in chars.by_ref() {
+                            if t2 == '>' {
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    let decoded = decode_entities(&out);
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn decode_entities(s: &str) -> String {
+    s.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+}
+
+/// Extract the readable body text from one of our own RFC 2822 messages, for
+/// full-text indexing: locate the first `text/*` part, base64-decode it, and
+/// strip HTML. Works for both the single-part and multipart layouts produced
+/// by [`mail_to_rfc2822`]. Returns an empty string when no text part is found.
+pub(crate) fn extract_body_text(rfc: &str) -> String {
+    // Find the first textual MIME part.
+    let lower = rfc.to_lowercase();
+    let part_start = lower.find("text/html").or_else(|| lower.find("text/plain"));
+    let Some(part_start) = part_start else {
+        return String::new();
+    };
+    // Body begins after that part's header/body separator.
+    let Some(sep) = rfc[part_start..].find("\r\n\r\n") else {
+        return String::new();
+    };
+    let body_start = part_start + sep + 4;
+    // Body ends at the next MIME boundary delimiter (multipart) or end of input.
+    let body_end = rfc[body_start..]
+        .find("\r\n--")
+        .map(|i| body_start + i)
+        .unwrap_or(rfc.len());
+    let raw = &rfc[body_start..body_end];
+
+    let stripped_b64: String = raw.split_whitespace().collect();
+    match base64::engine::general_purpose::STANDARD.decode(stripped_b64) {
+        Ok(bytes) => strip_html(&String::from_utf8_lossy(&bytes)),
+        // Not base64 (shouldn't happen for our own messages) — treat as text.
+        Err(_) => strip_html(raw),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +329,40 @@ mod tests {
     #[test]
     fn test_days_to_ymd_epoch() {
         assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn strip_html_drops_tags_and_decodes_entities() {
+        let html = "<p>Hello&nbsp;<b>World</b> &amp; goodbye</p>";
+        assert_eq!(strip_html(html), "Hello World & goodbye");
+    }
+
+    #[test]
+    fn strip_html_skips_script_and_style() {
+        let html = "<style>.a{color:red}</style><div>Visible</div><script>alert(1)</script>";
+        assert_eq!(strip_html(html), "Visible");
+    }
+
+    #[test]
+    fn extract_body_text_from_single_part() {
+        let body = base64::engine::general_purpose::STANDARD.encode("<p>Quarterly invoice</p>");
+        let rfc = format!(
+            "Subject: Test\r\nContent-Type: text/html; charset=UTF-8\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{body}\r\n"
+        );
+        assert_eq!(extract_body_text(&rfc), "Quarterly invoice");
+    }
+
+    #[test]
+    fn extract_body_text_from_multipart_stops_at_boundary() {
+        let body = base64::engine::general_purpose::STANDARD.encode("<p>Body words here</p>");
+        let rfc = format!(
+            "Content-Type: multipart/mixed; boundary=\"BND\"\r\n\r\n\
+             --BND\r\nContent-Type: text/html; charset=UTF-8\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{body}\r\n\
+             --BND\r\nContent-Type: application/pdf\r\n\r\nIGNOREDATTACHMENT\r\n--BND--\r\n"
+        );
+        assert_eq!(extract_body_text(&rfc), "Body words here");
     }
 
     #[test]

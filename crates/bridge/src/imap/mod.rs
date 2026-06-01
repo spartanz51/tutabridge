@@ -9,6 +9,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
+use crate::store::LocalStore;
 use crate::sync::MailStore;
 use crate::tuta::MailBackend;
 use session::ImapSession;
@@ -17,6 +18,7 @@ pub async fn serve(
     port: u16,
     store: Arc<MailStore>,
     backend: Arc<dyn MailBackend>,
+    local_store: Arc<LocalStore>,
     tls: TlsAcceptor,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -28,13 +30,16 @@ pub async fn serve(
         debug!("IMAP connection from {}", addr);
         let store = store.clone();
         let backend = backend.clone();
+        let local_store = local_store.clone();
         let tls = tls.clone();
         let pw_hash = password_hash.clone();
 
         tokio::spawn(async move {
             match tls.accept(stream).await {
                 Ok(tls_stream) => {
-                    if let Err(e) = handle_connection(tls_stream, store, backend, pw_hash).await {
+                    if let Err(e) =
+                        handle_connection(tls_stream, store, backend, local_store, pw_hash).await
+                    {
                         error!("IMAP connection error: {}", e);
                     }
                 }
@@ -50,12 +55,13 @@ async fn handle_connection(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     store: Arc<MailStore>,
     backend: Arc<dyn MailBackend>,
+    local_store: Arc<LocalStore>,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut store_watch: watch::Receiver<u64> = store.subscribe();
-    let mut session = ImapSession::new(store, backend, password_hash);
+    let mut session = ImapSession::new(store, backend, password_hash, Some(local_store));
 
     writer
         .write_all(b"* OK TutaBridge IMAP4rev1 ready\r\n")

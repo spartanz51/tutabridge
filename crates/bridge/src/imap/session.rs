@@ -5,6 +5,7 @@ use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, Tut
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
 use crate::mail::rfc2822::{extract_headers, format_address, format_internal_date};
+use crate::store::LocalStore;
 use crate::sync::MailStore;
 use crate::tuta::{FolderInfo, MailBackend};
 
@@ -33,6 +34,9 @@ struct CachedMail {
 pub struct ImapSession {
     store: Arc<MailStore>,
     backend: Arc<dyn MailBackend>,
+    /// The on-disk store, used for full-text body search. `None` in unit tests
+    /// (body terms then simply don't match).
+    local_store: Option<Arc<LocalStore>>,
     state: State,
     selected_folder: Option<FolderInfo>,
     mails: Vec<CachedMail>,
@@ -47,10 +51,12 @@ impl ImapSession {
         store: Arc<MailStore>,
         backend: Arc<dyn MailBackend>,
         password_hash: Option<String>,
+        local_store: Option<Arc<LocalStore>>,
     ) -> Self {
         Self {
             store,
             backend,
+            local_store,
             state: State::NotAuthenticated,
             selected_folder: None,
             mails: Vec::new(),
@@ -465,6 +471,7 @@ impl ImapSession {
         }
 
         let query = search::parse(args);
+        let ctx = self.resolve_body_search(&query);
 
         let ids: Vec<u32> = self
             .mails
@@ -472,7 +479,7 @@ impl ImapSession {
             .enumerate()
             .filter(|(i, cached)| {
                 let view = Self::build_search_view(*i, cached);
-                search::matches(&query, &view)
+                search::matches(&query, &view, &ctx)
             })
             .map(|(i, cached)| if uid_mode { cached.uid } else { (i + 1) as u32 })
             .collect();
@@ -500,11 +507,6 @@ impl ImapSession {
             .map(extract_headers)
             .unwrap_or_default();
 
-        let body = cached
-            .details
-            .as_ref()
-            .and_then(|d| d.body.compressedText.as_deref().or(d.body.text.as_deref()));
-
         // To/Cc/Bcc come from details when the body is loaded; otherwise only
         // the envelope `firstRecipient` (rendered as To) is available.
         let (to, cc, bcc) = match cached.details.as_ref() {
@@ -531,9 +533,17 @@ impl ImapSession {
             .map(|d| d.sentDate.as_millis())
             .unwrap_or_else(|| cached.mail.receivedDate.as_millis());
 
+        let element_id = cached
+            .mail
+            ._id
+            .as_ref()
+            .map(|id| id.element_id.0.as_str())
+            .unwrap_or("");
+
         MsgView {
             seq: (idx + 1) as u32,
             uid: cached.uid,
+            element_id,
             subject: &cached.mail.subject,
             from: format_address(&cached.mail.sender),
             to,
@@ -545,8 +555,26 @@ impl ImapSession {
             unread: cached.mail.unread,
             deleted: cached.deleted,
             size: cached.rfc2822.as_ref().map(|r| r.len() as u64).unwrap_or(0),
-            body,
         }
+    }
+
+    /// Resolve the `BODY`/`TEXT` terms of a query against the full-text index,
+    /// once per distinct term. With no local store (unit tests) the context is
+    /// empty, so body terms match nothing.
+    fn resolve_body_search(&self, query: &search::SearchKey) -> search::SearchContext {
+        let mut ctx = search::SearchContext::empty();
+        let Some(local_store) = &self.local_store else {
+            return ctx;
+        };
+        for term in search::collect_body_terms(query) {
+            match local_store.search_body(&term) {
+                Ok(ids) => {
+                    ctx.body_hits.insert(term, ids.into_iter().collect());
+                }
+                Err(e) => log::warn!("FTS body search failed for {term:?}: {e}"),
+            }
+        }
+        ctx
     }
 
     async fn cmd_store(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
@@ -1528,7 +1556,7 @@ mod tests {
                 ],
             )
             .await;
-        let mut session = ImapSession::new(store, backend.clone(), None);
+        let mut session = ImapSession::new(store, backend.clone(), None, None);
         session.handle_command("a LOGIN u p").await;
         session.handle_command("b SELECT INBOX").await;
 
@@ -1578,7 +1606,7 @@ mod tests {
         let store = MailStore::new();
         let mails = backend.mails.lock().unwrap().clone();
         populate_store(&store, &mails).await;
-        let session = ImapSession::new(store.clone(), backend, None);
+        let session = ImapSession::new(store.clone(), backend, None, None);
         (store, session)
     }
 
@@ -1796,7 +1824,7 @@ mod tests {
                 ],
             )
             .await;
-        let mut session = ImapSession::new(store, backend, None);
+        let mut session = ImapSession::new(store, backend, None, None);
 
         // LOGIN
         let resp = session.handle_command("A001 LOGIN user pass").await;
@@ -1840,7 +1868,7 @@ mod tests {
         )]));
         let store = MailStore::new();
         populate_store(&store, &backend.mails.lock().unwrap()).await;
-        let mut session = ImapSession::new(store, backend.clone(), None);
+        let mut session = ImapSession::new(store, backend.clone(), None, None);
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1868,7 +1896,7 @@ mod tests {
         ]));
         let store = MailStore::new();
         populate_store(&store, &backend.mails.lock().unwrap()).await;
-        let mut session = ImapSession::new(store, backend.clone(), None);
+        let mut session = ImapSession::new(store, backend.clone(), None, None);
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;
@@ -1908,7 +1936,7 @@ mod tests {
         ]));
         let store = MailStore::new();
         populate_store(&store, &backend.mails.lock().unwrap()).await;
-        let mut session = ImapSession::new(store.clone(), backend.clone(), None);
+        let mut session = ImapSession::new(store.clone(), backend.clone(), None, None);
 
         session.handle_command("A001 LOGIN user pass").await;
         session.handle_command("A002 SELECT INBOX").await;

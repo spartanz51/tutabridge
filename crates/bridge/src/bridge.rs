@@ -365,7 +365,7 @@ impl BridgeHandle {
             };
             let handler_handle = tokio::spawn(event_handler::run_event_handler(
                 store.clone(),
-                local_store,
+                local_store.clone(),
                 backend.clone(),
                 bus_ids_for_handler,
                 event_rx,
@@ -375,6 +375,7 @@ impl BridgeHandle {
                 imap_port,
                 store.clone(),
                 backend.clone(),
+                local_store,
                 imap_tls,
                 pw.clone(),
             ));

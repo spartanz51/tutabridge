@@ -46,6 +46,19 @@ pub struct LocalStore {
     mails_dir: PathBuf,
 }
 
+/// Turn a free-text search term into a safe FTS5 MATCH expression. Each run of
+/// alphanumeric characters becomes a prefix token (`word*`), and tokens are
+/// ANDed together (FTS5's default). Because only alphanumerics survive, the
+/// result can never contain FTS5 syntax, so it is injection-safe to interpolate
+/// as a bound parameter. Returns an empty string when nothing is searchable.
+fn fts_match_expr(term: &str) -> String {
+    term.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("{w}*"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl LocalStore {
     pub fn open(
         db_path: &Path,
@@ -85,7 +98,8 @@ impl LocalStore {
             conn.execute_batch(
                 "DROP TABLE IF EXISTS mails;
                  DROP TABLE IF EXISTS sync_state;
-                 DROP TABLE IF EXISTS event_bus_state;",
+                 DROP TABLE IF EXISTS event_bus_state;
+                 DROP TABLE IF EXISTS mail_fts;",
             )?;
         }
 
@@ -114,6 +128,11 @@ impl LocalStore {
                 group_id       TEXT PRIMARY KEY,
                 last_batch_id  TEXT NOT NULL,
                 updated_at_ms  INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts USING fts5(
+                element_id UNINDEXED,
+                body,
+                tokenize = 'unicode61 remove_diacritics 2'
             );
             INSERT OR REPLACE INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
@@ -165,6 +184,7 @@ impl LocalStore {
             "DELETE FROM mails;
              DELETE FROM sync_state;
              DELETE FROM store_meta;
+             DELETE FROM mail_fts;
              INSERT INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
         drop(conn);
@@ -405,6 +425,54 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Index (or re-index) a message's plain-text body for full-text search.
+    /// `body_text` should already be stripped of HTML markup. Stored inside the
+    /// SQLCipher database, so it is encrypted at rest like everything else.
+    pub fn index_body(&self, element_id: &str, body_text: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        // FTS5 has no UPSERT; clear any prior row for this id first.
+        conn.execute("DELETE FROM mail_fts WHERE element_id = ?1", [element_id])?;
+        conn.execute(
+            "INSERT INTO mail_fts(element_id, body) VALUES (?1, ?2)",
+            [element_id, body_text],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a message from the full-text index (called when a mail is removed).
+    pub fn unindex_body(&self, element_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mail_fts WHERE element_id = ?1", [element_id])?;
+        Ok(())
+    }
+
+    /// Element ids whose indexed body matches a user search term. The term is a
+    /// free-text query (one IMAP `BODY`/`TEXT` argument); it is turned into a
+    /// safe FTS5 MATCH expression: each word becomes a prefix token so
+    /// `factur` finds `facture`/`factures`, and multi-word terms must all be
+    /// present. Returns an empty set when the term has no searchable tokens.
+    pub fn search_body(&self, term: &str) -> Result<Vec<String>, StoreError> {
+        let match_expr = fts_match_expr(term);
+        if match_expr.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT element_id FROM mail_fts WHERE body MATCH ?1")?;
+        let rows = stmt.query_map([&match_expr], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
+    /// Number of bodies currently in the full-text index (diagnostics / tests).
+    pub fn fts_count(&self) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM mail_fts", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
     pub fn mail_count(&self, folder_id: &str) -> Result<usize, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
@@ -539,6 +607,7 @@ impl LocalStore {
             conn.execute("DELETE FROM mails WHERE element_id = ?1", [element_id])?;
         }
         self.delete_eml(element_id)?;
+        self.unindex_body(element_id)?;
         Ok(())
     }
 }
@@ -577,6 +646,55 @@ mod tests {
             uid: 0,
             mail_json: "{}".into(),
         }
+    }
+
+    #[test]
+    fn fts_index_and_search() {
+        let store = open_memory_store();
+        store
+            .index_body("a", "the quarterly invoice is attached")
+            .unwrap();
+        store.index_body("b", "lunch plans for friday").unwrap();
+        assert_eq!(store.fts_count().unwrap(), 2);
+
+        // Prefix match: "invoic" finds "invoice".
+        assert_eq!(store.search_body("invoic").unwrap(), vec!["a".to_string()]);
+        // Multi-word ANDs the tokens.
+        assert_eq!(
+            store.search_body("lunch friday").unwrap(),
+            vec!["b".to_string()]
+        );
+        // No hit.
+        assert!(store.search_body("zebra").unwrap().is_empty());
+        // Empty / punctuation-only term yields no FTS query.
+        assert!(store.search_body("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn fts_reindex_replaces_prior_body() {
+        let store = open_memory_store();
+        store.index_body("a", "first version about cats").unwrap();
+        store.index_body("a", "second version about dogs").unwrap();
+        assert_eq!(store.fts_count().unwrap(), 1);
+        assert!(store.search_body("cats").unwrap().is_empty());
+        assert_eq!(store.search_body("dogs").unwrap(), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn fts_unindex_removes_body() {
+        let store = open_memory_store();
+        store.index_body("a", "removable content").unwrap();
+        store.unindex_body("a").unwrap();
+        assert!(store.search_body("removable").unwrap().is_empty());
+        assert_eq!(store.fts_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn fts_match_expr_is_injection_safe() {
+        // FTS syntax characters never survive into the expression.
+        assert_eq!(fts_match_expr(r#"foo" OR bar"#), "foo* OR* bar*");
+        assert_eq!(fts_match_expr("a-b.c"), "a* b* c*");
+        assert_eq!(fts_match_expr("   "), "");
     }
 
     #[test]

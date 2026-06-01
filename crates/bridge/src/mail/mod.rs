@@ -5,3 +5,4 @@ pub(crate) mod rfc2822;
 pub use bodystructure::compute_bodystructure;
 pub use parser::{Attachment, ParsedMessage};
 pub use rfc2822::mail_to_rfc2822;
+pub(crate) use rfc2822::{extract_body_text, strip_html};

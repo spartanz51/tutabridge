@@ -7,13 +7,16 @@
 //!
 //! Coverage is metadata-first: subject / from / to / cc, flags, dates, sizes,
 //! sequence + UID sets, and boolean composition (`AND` / `OR` / `NOT`). `BODY`
-//! and `TEXT` match against whatever body text the session already has decoded
-//! — full-text body search over the whole mailbox is a later increment backed
-//! by an on-disk index.
+//! and `TEXT` are resolved against the on-disk full-text index: the session
+//! queries it once per distinct term ([`collect_body_terms`]) and hands the
+//! per-term hit sets to [`matches`] via a [`SearchContext`]. A body term only
+//! matches messages whose body has actually been downloaded and indexed.
 //!
 //! Robustness rule: an unrecognised criterion degrades to a non-restrictive
 //! match (it never *hides* messages). Over-inclusion is the safe failure for
 //! search; silently dropping a matching mail is not.
+
+use std::collections::{HashMap, HashSet};
 
 /// One element of an IMAP sequence/UID set, e.g. `1`, `3:9`, or `5:*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +110,8 @@ pub enum SearchKey {
 pub struct MsgView<'a> {
     pub seq: u32,
     pub uid: u32,
+    /// Tuta element id — the key used to look up full-text body hits.
+    pub element_id: &'a str,
     pub subject: &'a str,
     /// Formatted `From` (name + address), for `FROM` substring matching.
     pub from: String,
@@ -122,9 +127,49 @@ pub struct MsgView<'a> {
     pub unread: bool,
     pub deleted: bool,
     pub size: u64,
-    /// Decoded body text, when the session already has it. `None` means the
-    /// body isn't loaded; `BODY`/`TEXT` simply won't match such a message yet.
-    pub body: Option<&'a str>,
+}
+
+/// Pre-resolved full-text results for one SEARCH: maps each `BODY`/`TEXT` term
+/// to the set of element ids whose indexed body matched it. Built by the
+/// session from the on-disk index before evaluating the query.
+#[derive(Default)]
+pub struct SearchContext {
+    pub body_hits: HashMap<String, HashSet<String>>,
+}
+
+impl SearchContext {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    fn body_matches(&self, term: &str, element_id: &str) -> bool {
+        self.body_hits
+            .get(term)
+            .is_some_and(|ids| ids.contains(element_id))
+    }
+}
+
+/// Collect the distinct `BODY`/`TEXT` term arguments in a parsed query, so the
+/// session can resolve each against the full-text index exactly once.
+pub fn collect_body_terms(key: &SearchKey) -> Vec<String> {
+    let mut terms = Vec::new();
+    collect_body_terms_into(key, &mut terms);
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn collect_body_terms_into(key: &SearchKey, out: &mut Vec<String>) {
+    match key {
+        SearchKey::And(keys) => keys.iter().for_each(|k| collect_body_terms_into(k, out)),
+        SearchKey::Or(a, b) => {
+            collect_body_terms_into(a, out);
+            collect_body_terms_into(b, out);
+        }
+        SearchKey::Not(k) => collect_body_terms_into(k, out),
+        SearchKey::Body(s) | SearchKey::Text(s) => out.push(s.clone()),
+        _ => {}
+    }
 }
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
@@ -154,13 +199,14 @@ fn day_number(ms: u64) -> i64 {
     (ms / 86_400_000) as i64
 }
 
-/// Evaluate a parsed query against one message.
-pub fn matches(key: &SearchKey, m: &MsgView) -> bool {
+/// Evaluate a parsed query against one message, consulting `ctx` for the
+/// full-text results of any `BODY`/`TEXT` terms.
+pub fn matches(key: &SearchKey, m: &MsgView, ctx: &SearchContext) -> bool {
     match key {
         SearchKey::All => true,
-        SearchKey::And(keys) => keys.iter().all(|k| matches(k, m)),
-        SearchKey::Or(a, b) => matches(a, m) || matches(b, m),
-        SearchKey::Not(k) => !matches(k, m),
+        SearchKey::And(keys) => keys.iter().all(|k| matches(k, m, ctx)),
+        SearchKey::Or(a, b) => matches(a, m, ctx) || matches(b, m, ctx),
+        SearchKey::Not(k) => !matches(k, m, ctx),
 
         SearchKey::Seen => !m.unread,
         SearchKey::Unseen => m.unread,
@@ -183,10 +229,8 @@ pub fn matches(key: &SearchKey, m: &MsgView) -> bool {
         SearchKey::To(s) => contains_ci(&m.to, s),
         SearchKey::Cc(s) => contains_ci(&m.cc, s),
         SearchKey::Bcc(s) => contains_ci(&m.bcc, s),
-        SearchKey::Body(s) => m.body.is_some_and(|b| contains_ci(b, s)),
-        SearchKey::Text(s) => {
-            contains_ci(&m.headers, s) || m.body.is_some_and(|b| contains_ci(b, s))
-        }
+        SearchKey::Body(s) => ctx.body_matches(s, m.element_id),
+        SearchKey::Text(s) => contains_ci(&m.headers, s) || ctx.body_matches(s, m.element_id),
         SearchKey::Header(name, val) => header_contains(&m.headers, name, val),
 
         SearchKey::Before(d) => day_number(m.date_ms) < *d,
@@ -511,6 +555,7 @@ mod tests {
         MsgView {
             seq: 1,
             uid: 10,
+            element_id: "mail1",
             subject: "Hello World",
             from: "Alice <alice@example.com>".into(),
             to: "Bob <bob@example.com>".into(),
@@ -524,8 +569,20 @@ mod tests {
             unread: true,
             deleted: false,
             size: 5000,
-            body: Some("the quick brown fox"),
         }
+    }
+
+    /// A context where the given terms all hit our test message ("mail1").
+    fn ctx_hitting(terms: &[&str]) -> SearchContext {
+        let mut body_hits = HashMap::new();
+        for t in terms {
+            body_hits.insert((*t).to_string(), HashSet::from(["mail1".to_string()]));
+        }
+        SearchContext { body_hits }
+    }
+
+    fn no_ctx() -> SearchContext {
+        SearchContext::empty()
     }
 
     // --- tokenizer ---
@@ -655,101 +712,141 @@ mod tests {
 
     #[test]
     fn match_subject_ci() {
-        assert!(matches(&SearchKey::Subject("hello".into()), &view()));
-        assert!(matches(&SearchKey::Subject("WORLD".into()), &view()));
-        assert!(!matches(&SearchKey::Subject("nope".into()), &view()));
+        let c = no_ctx();
+        assert!(matches(&SearchKey::Subject("hello".into()), &view(), &c));
+        assert!(matches(&SearchKey::Subject("WORLD".into()), &view(), &c));
+        assert!(!matches(&SearchKey::Subject("nope".into()), &view(), &c));
     }
 
     #[test]
     fn match_from_to() {
-        assert!(matches(&SearchKey::From("alice".into()), &view()));
-        assert!(matches(&SearchKey::To("bob@example".into()), &view()));
-        assert!(!matches(&SearchKey::Cc("anyone".into()), &view()));
+        let c = no_ctx();
+        assert!(matches(&SearchKey::From("alice".into()), &view(), &c));
+        assert!(matches(&SearchKey::To("bob@example".into()), &view(), &c));
+        assert!(!matches(&SearchKey::Cc("anyone".into()), &view(), &c));
     }
 
     #[test]
     fn match_flags_consistent_with_fetch() {
         let v = view(); // unread, not deleted
-        assert!(matches(&SearchKey::Unseen, &v));
-        assert!(!matches(&SearchKey::Seen, &v));
-        assert!(!matches(&SearchKey::Answered, &v));
-        assert!(matches(&SearchKey::Unanswered, &v));
-        assert!(!matches(&SearchKey::Flagged, &v));
-        assert!(!matches(&SearchKey::Deleted, &v));
-        assert!(matches(&SearchKey::Undeleted, &v));
+        let c = no_ctx();
+        assert!(matches(&SearchKey::Unseen, &v, &c));
+        assert!(!matches(&SearchKey::Seen, &v, &c));
+        assert!(!matches(&SearchKey::Answered, &v, &c));
+        assert!(matches(&SearchKey::Unanswered, &v, &c));
+        assert!(!matches(&SearchKey::Flagged, &v, &c));
+        assert!(!matches(&SearchKey::Deleted, &v, &c));
+        assert!(matches(&SearchKey::Undeleted, &v, &c));
     }
 
     #[test]
     fn match_dates() {
         let v = view(); // 2022-09-22
-        assert!(matches(&SearchKey::Since(day(2022, 1, 1)), &v));
-        assert!(matches(&SearchKey::Before(day(2023, 1, 1)), &v));
-        assert!(matches(&SearchKey::On(day(2022, 9, 22)), &v));
-        assert!(!matches(&SearchKey::On(day(2022, 9, 23)), &v));
-        assert!(!matches(&SearchKey::Since(day(2023, 1, 1)), &v));
+        let c = no_ctx();
+        assert!(matches(&SearchKey::Since(day(2022, 1, 1)), &v, &c));
+        assert!(matches(&SearchKey::Before(day(2023, 1, 1)), &v, &c));
+        assert!(matches(&SearchKey::On(day(2022, 9, 22)), &v, &c));
+        assert!(!matches(&SearchKey::On(day(2022, 9, 23)), &v, &c));
+        assert!(!matches(&SearchKey::Since(day(2023, 1, 1)), &v, &c));
     }
 
     #[test]
     fn match_size() {
         let v = view(); // size 5000
-        assert!(matches(&SearchKey::Larger(4000), &v));
-        assert!(!matches(&SearchKey::Larger(6000), &v));
-        assert!(matches(&SearchKey::Smaller(6000), &v));
+        let c = no_ctx();
+        assert!(matches(&SearchKey::Larger(4000), &v, &c));
+        assert!(!matches(&SearchKey::Larger(6000), &v, &c));
+        assert!(matches(&SearchKey::Smaller(6000), &v, &c));
     }
 
     #[test]
-    fn match_body_and_text() {
+    fn match_body_uses_fts_context() {
         let v = view();
-        assert!(matches(&SearchKey::Body("brown".into()), &v));
-        assert!(!matches(&SearchKey::Body("missing".into()), &v));
-        // TEXT spans headers + body.
-        assert!(matches(&SearchKey::Text("Message-ID".into()), &v));
-        assert!(matches(&SearchKey::Text("quick".into()), &v));
+        let c = ctx_hitting(&["brown"]);
+        assert!(matches(&SearchKey::Body("brown".into()), &v, &c));
+        // A term with no FTS hit doesn't match, even though it's a real word.
+        assert!(!matches(&SearchKey::Body("missing".into()), &v, &c));
     }
 
     #[test]
-    fn match_body_without_loaded_body_never_matches() {
-        let mut v = view();
-        v.body = None;
-        assert!(!matches(&SearchKey::Body("brown".into()), &v));
-        // TEXT still matches on headers.
-        assert!(matches(&SearchKey::Text("Subject".into()), &v));
+    fn match_text_spans_headers_and_body() {
+        let v = view();
+        let c = ctx_hitting(&["quick"]);
+        // Header hit, no body hit needed.
+        assert!(matches(
+            &SearchKey::Text("Message-ID".into()),
+            &v,
+            &no_ctx()
+        ));
+        // Body hit via the FTS context.
+        assert!(matches(&SearchKey::Text("quick".into()), &v, &c));
+        // Neither headers nor index: no match.
+        assert!(!matches(&SearchKey::Text("quick".into()), &v, &no_ctx()));
+    }
+
+    #[test]
+    fn match_body_without_index_never_matches() {
+        let v = view();
+        assert!(!matches(&SearchKey::Body("brown".into()), &v, &no_ctx()));
+        // TEXT still matches on headers without any index.
+        assert!(matches(&SearchKey::Text("Subject".into()), &v, &no_ctx()));
+    }
+
+    #[test]
+    fn collect_body_terms_finds_nested_terms() {
+        let k = parse(r#"OR BODY "alpha" (TEXT "beta" SUBJECT "x") NOT BODY "alpha""#);
+        // Note: top level is `OR <a> <b>` then trailing keys folded into AND.
+        let terms = collect_body_terms(&k);
+        assert_eq!(terms, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[test]
     fn match_header() {
         let v = view();
+        let c = no_ctx();
         assert!(matches(
             &SearchKey::Header("message-id".into(), "abc".into()),
-            &v
+            &v,
+            &c
         ));
         assert!(!matches(
             &SearchKey::Header("message-id".into(), "zzz".into()),
-            &v
+            &v,
+            &c
         ));
         // Presence-only (empty value).
-        assert!(matches(&SearchKey::Header("subject".into(), "".into()), &v));
-        assert!(!matches(&SearchKey::Header("x-nope".into(), "".into()), &v));
+        assert!(matches(
+            &SearchKey::Header("subject".into(), "".into()),
+            &v,
+            &c
+        ));
+        assert!(!matches(
+            &SearchKey::Header("x-nope".into(), "".into()),
+            &v,
+            &c
+        ));
     }
 
     #[test]
     fn match_uid_and_seq() {
         let v = view(); // seq 1, uid 10
-        assert!(matches(&SearchKey::Uid(parse_seqset("5:15")), &v));
-        assert!(!matches(&SearchKey::Uid(parse_seqset("1:5")), &v));
-        assert!(matches(&SearchKey::Sequence(parse_seqset("1")), &v));
+        let c = no_ctx();
+        assert!(matches(&SearchKey::Uid(parse_seqset("5:15")), &v, &c));
+        assert!(!matches(&SearchKey::Uid(parse_seqset("1:5")), &v, &c));
+        assert!(matches(&SearchKey::Sequence(parse_seqset("1")), &v, &c));
     }
 
     #[test]
     fn match_boolean_composition() {
         let v = view();
+        let c = no_ctx();
         let k = parse(r#"UNSEEN SUBJECT "hello""#);
-        assert!(matches(&k, &v));
+        assert!(matches(&k, &v, &c));
         let k = parse(r#"SEEN SUBJECT "hello""#);
-        assert!(!matches(&k, &v));
+        assert!(!matches(&k, &v, &c));
         let k = parse(r#"OR SEEN SUBJECT "hello""#);
-        assert!(matches(&k, &v));
+        assert!(matches(&k, &v, &c));
         let k = parse("NOT SEEN");
-        assert!(matches(&k, &v));
+        assert!(matches(&k, &v, &c));
     }
 }

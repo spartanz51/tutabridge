@@ -6,7 +6,7 @@ use log::{debug, info, warn};
 use tokio::sync::{watch, RwLock};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails, TutanotaFile};
 
-use crate::mail::mail_to_rfc2822;
+use crate::mail::{extract_body_text, mail_to_rfc2822, strip_html};
 use crate::store::{LocalStore, MailMetadata};
 use crate::tuta::{FolderInfo, MailBackend};
 
@@ -426,6 +426,58 @@ pub async fn run_syncer(
         debug!("Skipping full-metadata sync — already complete, event bus reconciles");
     }
 
+    // One-time backfill of the full-text body index from bodies that were
+    // already cached (downloaded before the index existed). Bodies fetched from
+    // here on are indexed inline by `prefetch_details`, so this only ever runs
+    // once per install.
+    const FTS_BACKFILL_MARKER: &str = "body_fts_indexed_v1";
+    if local_store.get_meta(FTS_BACKFILL_MARKER).is_none() && !folders.is_empty() {
+        info!("Backfilling full-text body index from cached messages…");
+        let mut indexed = 0usize;
+        let mut all_ok = true;
+        for folder in &folders {
+            if *shutdown.borrow() {
+                return;
+            }
+            match local_store.load_folder_metadata(&folder.id) {
+                Ok(metas) => {
+                    for meta in metas.iter().filter(|m| m.has_details) {
+                        if *shutdown.borrow() {
+                            return;
+                        }
+                        match local_store.read_eml(&meta.element_id) {
+                            Ok(Some(rfc)) => {
+                                let text = extract_body_text(&rfc);
+                                if let Err(e) = local_store.index_body(&meta.element_id, &text) {
+                                    warn!("FTS backfill failed for {}: {e}", meta.element_id);
+                                    all_ok = false;
+                                } else {
+                                    indexed += 1;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!("FTS backfill read failed for {}: {e}", meta.element_id);
+                                all_ok = false;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("FTS backfill: no metadata for {}: {e}", folder.imap_path);
+                    all_ok = false;
+                }
+            }
+        }
+        // Only mark done if nothing errored, so a partial run retries next boot.
+        if all_ok {
+            if let Err(e) = local_store.set_meta(FTS_BACKFILL_MARKER, "1") {
+                warn!("Could not persist FTS backfill marker: {e}");
+            }
+        }
+        info!("Full-text body index backfill complete ({indexed} messages)");
+    }
+
     // From here on the syncer only owns the slow body prefetch (capped at
     // `sync_limit` — the body-prefetch depth). Folder / new-mail refresh is
     // driven by the event bus + `event_handler`.
@@ -661,6 +713,9 @@ pub(crate) async fn sync_folder(
                 if let Err(e) = local_store.delete_eml(eid) {
                     warn!("Failed to delete cached eml {}: {}", eid, e);
                 }
+                if let Err(e) = local_store.unindex_body(eid) {
+                    warn!("Failed to unindex body {}: {}", eid, e);
+                }
             }
             if !deleted.is_empty() {
                 debug!(
@@ -800,6 +855,16 @@ async fn prefetch_details(
                     }
                     if let Err(e) = local_store.mark_has_details(&eid) {
                         warn!("Failed to mark has_details {}: {}", eid, e);
+                    }
+                    // Index the plain-text body for full-text search.
+                    let body_html = details
+                        .body
+                        .compressedText
+                        .as_deref()
+                        .or(details.body.text.as_deref())
+                        .unwrap_or("");
+                    if let Err(e) = local_store.index_body(&eid, &strip_html(body_html)) {
+                        warn!("Failed to index body {}: {}", eid, e);
                     }
                     if attachments_pending {
                         attachment_retry_history.insert(eid.clone(), now);

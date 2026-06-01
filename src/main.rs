@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.imap_port,
         store.clone(),
         backend.clone(),
+        local_store.clone(),
         imap_tls,
         pw.clone(),
     ));
