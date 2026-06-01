@@ -1,74 +1,94 @@
+<div align="center">
+
+<img src="src-tauri/icons/icon.png" alt="TutaBridge logo" width="120" height="120" />
+
 # TutaBridge
 
-A local IMAP/SMTP bridge for [Tuta](https://tuta.com) encrypted email. It runs a
-local IMAP+SMTP server that ordinary mail clients (Thunderbird, Apple Mail, mutt,
-…) connect to, while talking to Tuta's API and handling the end-to-end
-encryption transparently.
+**Use [Tuta](https://tuta.com) encrypted email in Thunderbird, Apple Mail, or any standard mail client.**
 
-Available as a **CLI** and a **desktop GUI** (Tauri).
+A local IMAP/SMTP bridge that talks to Tuta's API and handles the end-to-end
+encryption transparently — so your favourite desktop client just works.
+
+<br/>
+
+[![CI](https://github.com/spartanz51/tutabridge/actions/workflows/ci.yml/badge.svg)](https://github.com/spartanz51/tutabridge/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/spartanz51/tutabridge?include_prereleases&sort=semver)](https://github.com/spartanz51/tutabridge/releases)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#-install)
+[![Built with Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-dea584?logo=rust)](#-build-from-source)
+
+[**Install**](#-install) · [**Getting started**](#-getting-started) · [**Features**](#-features) · [**Backup**](#-backup) · [**Architecture**](#-architecture)
+
+</div>
 
 > ⚠️ **Unofficial & unsigned.** TutaBridge is an independent project — not
 > affiliated with, endorsed by, or supported by Tuta. It logs into your account
 > and decrypts your mail locally, outside Tuta's official apps; use it at your
 > own risk. The released binaries are **not code-signed**, so macOS and Windows
-> warn on first launch — see [Install](#install) for how to get past that.
+> warn on first launch — see [Install](#-install) for how to get past that.
 
-## Features
+---
 
-- **IMAP + SMTP** servers on localhost (TLS), so any standard mail client works.
-- **Realtime sync** over Tuta's WebSocket event bus — new mail, reads, moves and
-  deletes show up without polling. A heartbeat + idle-timeout detect dead
-  sockets and reconnect automatically.
-- **Attachments** both ways — incoming mail is served as `multipart/mixed`;
-  attachments composed in your client are uploaded to Tuta on send.
-- **Drafts**, **custom / nested folders**, **move**, **trash**, and read/unread
-  flags.
-- **2FA (TOTP)** login.
-- **Encrypted local cache** — metadata in SQLCipher, bodies as individually
-  encrypted `.eml.enc` files. Subsequent launches load from cache and only fetch
-  the delta, so the client is usable immediately.
-- **Complete mailbox backup** to portable `.eml` files (see below).
-- **Full mailbox + search** — the whole account is listed over IMAP and
-  searchable by subject, sender, date and (full-text) body from your mail client.
+## ✨ Features
 
-## Install
+|  |  |
+|---|---|
+| 📥 **IMAP + SMTP** | Local TLS servers on `127.0.0.1` — any standard mail client connects. |
+| ⚡ **Realtime sync** | Tuta's WebSocket event bus pushes new mail, reads, moves and deletes; a heartbeat + idle-timeout reconnect dead sockets automatically. |
+| 🗂️ **Whole mailbox** | Every folder and message is listed — not just a recent slice. |
+| 🔍 **Honest search** | Subject / sender / date search the entire mailbox; full-text **body** search via an encrypted on-disk index. |
+| 📎 **Attachments** | Both ways — incoming served as `multipart/mixed`, outgoing uploaded to Tuta on send. |
+| 📝 **Folders & flags** | Drafts, custom / nested folders, move, trash, read/unread. |
+| 🔐 **Encrypted cache** | Metadata in SQLCipher, bodies as individually-encrypted `.eml.enc` files — usable instantly on relaunch, only the delta is fetched. |
+| 💾 **Complete backup** | Export *every* message to portable `.eml` files. |
+| 🔑 **2FA (TOTP)** | Two-factor login supported. |
 
-Download the latest build from the [**Releases**](../../releases) page. Every
-platform ships two flavours:
+---
 
-- a **desktop app** — a normal double-click GUI, recommended for most people;
-- a **CLI binary** — a single executable you run from a terminal, for
-  headless / server use.
+## 📦 Install
+
+Download the latest build from the [**Releases**](https://github.com/spartanz51/tutabridge/releases)
+page. Every platform ships two flavours:
+
+- 🖥️ a **desktop app** — a normal double-click GUI, recommended for most people;
+- ⌨️ a **CLI binary** — a single executable you run from a terminal, for headless / server use.
 
 | Platform | Desktop app | CLI binary |
 |----------|-------------|------------|
 | **macOS** (Apple Silicon) | `TutaBridge_*_universal.dmg` | `tutabridge-macos-arm64` |
-| **Windows** (x64) | `TutaBridge_*_x64-setup.exe` (or `.msi`) | `tutabridge-windows-x86_64.exe` |
+| **Windows** (x64) | `TutaBridge_*_x64-setup.exe` *(or `.msi`)* | `tutabridge-windows-x86_64.exe` |
 | **Linux** (x64) | `*.AppImage` / `*.deb` / `*.rpm` | `tutabridge-linux-x86_64` |
 
-Because the binaries aren't signed, each OS needs a one-time nudge to run them:
+Because the binaries aren't signed, each OS needs a **one-time nudge** to run them:
 
-### macOS
+<details>
+<summary><b>🍎 macOS</b></summary>
 
-Open the `.dmg` and drag TutaBridge to Applications. On first launch macOS says
-the app "cannot be opened because the developer cannot be verified" — **right-click
-the app → Open → Open**, which whitelists it permanently. (Plain double-click
-won't offer the override.)
+Open the `.dmg` and drag TutaBridge to **Applications**. On first launch macOS
+says the app *"cannot be opened because the developer cannot be verified"* —
+**right-click the app → Open → Open**, which whitelists it permanently. (A plain
+double-click won't offer the override.)
+</details>
 
-### Windows
+<details>
+<summary><b>🪟 Windows</b></summary>
 
-Run the `.exe` / `.msi`. SmartScreen shows "Windows protected your PC" — click
+Run the `.exe` or `.msi`. SmartScreen shows *"Windows protected your PC"* — click
 **More info → Run anyway**.
+</details>
 
-### Linux
+<details>
+<summary><b>🐧 Linux</b></summary>
 
 ```bash
 chmod +x TutaBridge_*_amd64.AppImage && ./TutaBridge_*_amd64.AppImage
-# or:  sudo dpkg -i TutaBridge_*_amd64.deb     (Debian/Ubuntu)
-# or:  sudo rpm -i  TutaBridge-*.x86_64.rpm     (Fedora/RHEL)
+# or:  sudo dpkg -i TutaBridge_*_amd64.deb     # Debian / Ubuntu
+# or:  sudo rpm  -i TutaBridge-*.x86_64.rpm     # Fedora / RHEL
 ```
+</details>
 
-### CLI binary (any OS)
+<details>
+<summary><b>⌨️ CLI binary (any OS)</b></summary>
 
 The CLI files have **no extension**, so double-clicking does nothing useful (your
 OS may even open them in a text editor). Run them from a terminal:
@@ -78,50 +98,55 @@ chmod +x tutabridge-macos-arm64                          # make it executable
 xattr -d com.apple.quarantine tutabridge-macos-arm64     # macOS only: clear Gatekeeper
 ./tutabridge-macos-arm64                                  # run
 ```
+</details>
 
-## Getting started
+---
 
-1. **Launch** the app (or run the CLI). On first run it asks for your Tuta email,
-   then your password and TOTP code if there's no saved session. The session is
-   stored in your OS keychain, so later launches resume automatically.
-2. TutaBridge shows the **local connection details**. Note the **bridge password** —
-   this is generated by TutaBridge for local IMAP/SMTP auth and is **not** your
-   Tuta password. (CLI: it's printed in the logs; GUI: it's on the main screen.)
-3. **Add the account** in your mail client with these settings:
+## 🚀 Getting started
 
-   | | Server | Port | Security | Auth |
-   |---|---|---|---|---|
-   | **IMAP** (incoming) | `127.0.0.1` | `1143` | SSL/TLS | normal password |
-   | **SMTP** (outgoing) | `127.0.0.1` | `1025` | SSL/TLS | normal password |
+**1.** **Launch** the app (or run the CLI). On first run it asks for your Tuta
+email, then your password and TOTP code if there's no saved session. The session
+is stored in your OS keychain, so later launches resume automatically.
 
-   - **Username**: your Tuta email
-   - **Password**: the **bridge password** from step 2
-   - Accept the **self-signed certificate** when the client prompts.
+**2.** TutaBridge shows the **local connection details**. Note the **bridge
+password** — this is generated by TutaBridge for local IMAP/SMTP auth and is
+**not** your Tuta password. *(CLI: printed in the logs · GUI: shown on the main screen.)*
 
-Keep TutaBridge running while you use your mail client — it's the local server
+**3.** **Add the account** in your mail client with these settings:
+
+|  | Server | Port | Security | Auth |
+|---|--------|------|----------|------|
+| **IMAP** (incoming) | `127.0.0.1` | `1143` | SSL/TLS | Normal password |
+| **SMTP** (outgoing) | `127.0.0.1` | `1025` | SSL/TLS | Normal password |
+
+> **Username:** your Tuta email &nbsp;·&nbsp; **Password:** the bridge password from step 2
+> &nbsp;·&nbsp; accept the **self-signed certificate** when prompted.
+
+Keep TutaBridge running while you use your mail client — it *is* the local server
 the client talks to.
 
-### Client-specific notes
+<details>
+<summary><b>Client-specific notes (Thunderbird, Apple Mail)</b></summary>
 
-- **Thunderbird**: add the account manually (don't let auto-config probe public
-  servers). Set both servers to `127.0.0.1` with SSL/TLS + "Normal password",
-  and accept the certificate exception on first connect.
-- **Apple Mail**: add an "Other Mail Account", then in *Server Settings* turn
+- **Thunderbird** — add the account manually (don't let auto-config probe public
+  servers). Set both servers to `127.0.0.1` with SSL/TLS + "Normal password", and
+  accept the certificate exception on first connect.
+- **Apple Mail** — add an *"Other Mail Account"*, then in **Server Settings** turn
   **off** "Automatically manage connection settings" so you can pin host
   `127.0.0.1`, the ports above, and TLS.
+</details>
 
-### Notes & limitations
+> [!NOTE]
+> **Search** runs in your mail client. Subject / sender / date search covers the
+> whole mailbox; **body** (full-text) search covers messages whose body has been
+> **downloaded**. Enable *"keep every message body offline"* (or raise the
+> offline-bodies limit) for full-mailbox body search.
 
-- **Search** runs in your mail client and is honest: subject / sender / date
-  search covers the whole mailbox; **body** (full-text) search covers messages
-  whose body has been **downloaded**. Keep "every message body offline" enabled
-  (or raise the offline-bodies limit) for full-mailbox body search.
-- **Self-signed cert** is expected — the bridge only listens on `127.0.0.1`, so
-  traffic never leaves your machine.
+---
 
-## Architecture
+## 🧭 Architecture
 
-Syncer-driven, store-backed:
+Syncer-driven, store-backed — the IMAP server never makes a network call to *read*:
 
 ```
 Tuta API  ←──  Syncer (background)  ──→  MailStore (in-memory)  ←──  IMAP server  ──→  mail client
@@ -130,19 +155,54 @@ Tuta API  ←──  Syncer (background)  ──→  MailStore (in-memory)  ←�
 
 - The **syncer** pulls from the Tuta API and populates an in-memory `MailStore`,
   backed by the on-disk encrypted cache.
-- The **IMAP server** only ever *reads* from the store — it never makes API
-  calls for reads.
-- The only IMAP→network calls are mutations: mark read/unread (`STORE \Seen`)
-  and trash (`EXPUNGE`). Sending goes through SMTP → Tuta's `DraftService` +
-  `SendDraftService`.
+- The **IMAP server** only ever *reads* from the store — never an API call for reads.
+- The only IMAP→network calls are mutations: mark read/unread (`STORE \Seen`) and
+  trash (`EXPUNGE`). Sending goes SMTP → Tuta's `DraftService` + `SendDraftService`.
 
 The storage encryption key is derived from your Tuta session, so there's no extra
 password to manage; the cache is encrypted at rest.
 
-## Build from source
+---
+
+## 💾 Backup
+
+Export **every** email to a folder of plain `.eml` files — one per message, in a
+tree mirroring your IMAP folders. It enumerates all mail from the server (not just
+what's currently synced), so nothing is silently left out.
+
+```
+<output>/
+├── INBOX/
+│   ├── 20260528-144935_OtjDuDU--3-9.eml
+│   └── …
+├── Sent/
+├── Trash/
+└── Café/Projets/…
+```
+
+```bash
+tutabridge backup ~/TutaBackup        # CLI
+```
+
+In the **GUI**, use the **Backup** tab — pick a folder, watch per-folder progress.
+*(The bridge must be running; the backup reuses its signed-in session.)*
+
+- **Format** — `.eml` (RFC 2822). Opens natively in Thunderbird / Apple Mail /
+  Outlook, survives Windows filesystems, and one corrupt file never sinks the
+  archive. Filenames are date-prefixed so a listing sorts chronologically.
+- **Resumable / incremental** — re-running into the same folder skips messages
+  already on disk, so an interrupted backup resumes and a periodic re-backup only
+  fetches new mail.
+- **Speed** — cached messages export instantly; the rest are fetched with a small
+  politeness delay, so a first full backup of a large mailbox can take minutes.
+- **Scope** — every folder, including Trash and Spam.
+
+---
+
+## 🔨 Build from source
 
 Requires the Rust toolchain and the `tuta-repo` submodule
-(`git clone --recursive`, or `git submodule update --init --recursive`).
+(`git clone --recursive`, or `git submodule update --init --recursive`):
 
 ```bash
 cargo build                      # CLI + core
@@ -151,7 +211,9 @@ cargo run                        # run the CLI from source
 ./dev.sh                         # GUI in dev mode (cargo tauri dev)
 ```
 
-## Files & locations
+---
+
+## 📁 Files & locations
 
 Config and cache live under your platform's app-data directory — on macOS
 `~/Library/Application Support/tutabridge/`:
@@ -164,54 +226,14 @@ mails/<id>.eml.enc   per-mail encrypted bodies
 
 `sync_limit` controls how many recent message **bodies** are kept offline; the
 full mailbox is always listed and metadata-searchable regardless. Set it to `0`
-(or tick "keep every message body offline" in the GUI) to download everything.
+(or tick *"keep every message body offline"* in the GUI) to download everything.
 
-## Backup
+---
 
-Export **every** email to a folder of plain `.eml` files — one file per message,
-in a directory tree mirroring your IMAP folders. This is a *complete* backup: it
-enumerates all mail from the server, not just the messages currently synced, so
-nothing is silently left out.
-
-```
-<output>/
-├── INBOX/
-│   ├── 20260528-144935_OtjDuDU--3-9.eml
-│   └── …
-├── Sent/
-├── Trash/
-└── Café/Projets/…
-```
-
-CLI:
-
-```bash
-tutabridge backup ~/TutaBackup
-```
-
-GUI: the **Backup** tab — pick a folder, watch the per-folder progress, done.
-(The bridge must be running; the backup reuses its signed-in session.)
-
-Notes:
-
-- **Format**: `.eml` (RFC 2822). Opens natively in Thunderbird / Apple Mail /
-  Outlook, survives Windows filesystems, and one corrupt file never takes down
-  the whole archive. Filenames are date-prefixed so a listing sorts
-  chronologically.
-- **Resumable / incremental**: re-running into the same folder skips messages
-  already on disk, so an interrupted backup resumes and a periodic re-backup only
-  fetches new mail.
-- **Speed**: messages already in the local cache export instantly; the rest are
-  fetched from the server with a small politeness delay, so a first full backup of
-  a large mailbox can take several minutes. Subsequent runs are fast.
-- **Scope**: every folder, including Trash and Spam. Labels aren't separate
-  folders, so a labelled mail is backed up once, in its real folder.
-
-## Testing
+## 🧪 Testing
 
 ```bash
 cargo test --workspace        # unit + integration tests
-
 python3 scripts/test_imap.py  # integration test against a running bridge
 ```
 
@@ -219,14 +241,17 @@ The IMAP integration test connects to the local server and verifies TLS, auth,
 folder list, mail count, body fetch and search. It reads the bridge password from
 `config.toml` automatically.
 
-## SDK
+---
+
+## 🔌 SDK
 
 TutaBridge depends on a few additions to Tuta's Rust SDK, vendored as the
 `tuta-repo` submodule. Each change is kept as its own single-commit branch off
-upstream for easy review / upstreaming — see [`SDK_PRS.md`](SDK_PRS.md) for the
-status of each.
+upstream for easy review / upstreaming — see [`SDK_PRS.md`](SDK_PRS.md) for status.
 
-## License
+---
+
+## 📄 License
 
 [GPL-3.0-or-later](LICENSE). TutaBridge links Tuta's Rust SDK (part of the
 GPLv3-licensed [tutanota](https://github.com/tutao/tutanota) project), so it is
