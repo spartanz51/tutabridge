@@ -114,6 +114,40 @@ jobs:
           cp "$src" "${{ matrix.cli_asset }}"
           gh release upload "${{ github.ref_name }}" "${{ matrix.cli_asset }}" --clobber
 
+      # tauri-action names the GUI installers with the version (e.g.
+      # TutaBridge_0.1.0_universal.dmg), which would break any fixed download
+      # link on the next release. Upload version-less aliases alongside them so
+      # `releases/latest/download/TutaBridge-macOS.dmg` (and friends) always
+      # resolve to the current build. The CLI assets are already version-less.
+      - name: Attach version-less GUI installer aliases
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bp="${{ matrix.bundle_path }}"
+          tag="${{ github.ref_name }}"
+          alias() { # $1 = glob, $2 = stable name
+            f=$(ls $1 2>/dev/null | head -n1)
+            if [ -n "$f" ]; then
+              cp "$f" "$2"
+              gh release upload "$tag" "$2" --clobber
+            else
+              echo "::warning::no installer matched $1"
+            fi
+          }
+          case "${{ runner.os }}" in
+            macOS)
+              alias "$bp/dmg/*.dmg" "TutaBridge-macOS.dmg" ;;
+            Linux)
+              alias "$bp/appimage/*.AppImage" "TutaBridge-Linux.AppImage"
+              alias "$bp/deb/*.deb"           "TutaBridge-Linux.deb"
+              alias "$bp/rpm/*.rpm"           "TutaBridge-Linux.rpm" ;;
+            Windows)
+              alias "$bp/nsis/*-setup.exe" "TutaBridge-Windows-setup.exe"
+              alias "$bp/msi/*.msi"        "TutaBridge-Windows.msi" ;;
+          esac
+
       # --- Manual run: publish everything as downloadable workflow artifacts ---
       - name: Upload GUI bundles as artifacts
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

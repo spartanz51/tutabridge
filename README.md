@@ -63,9 +63,9 @@ Download the app for your OS (see [all releases](https://github.com/spartanz51/t
 
 | OS | Desktop app |
 |----|-------------|
-| 🍎 **macOS** (Apple Silicon) | [Download `.dmg`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge_0.1.0_universal.dmg) |
-| 🪟 **Windows** (x64) | [Download installer `.exe`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge_0.1.0_x64-setup.exe) |
-| 🐧 **Linux** (x64) | [`.AppImage`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge_0.1.0_amd64.AppImage) · [`.deb`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge_0.1.0_amd64.deb) · [`.rpm`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge-0.1.0-1.x86_64.rpm) |
+| 🍎 **macOS** (Apple Silicon) | [Download `.dmg`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge-macOS.dmg) |
+| 🪟 **Windows** (x64) | [Download installer `.exe`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge-Windows-setup.exe) |
+| 🐧 **Linux** (x64) | [`.AppImage`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge-Linux.AppImage) · [`.deb`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge-Linux.deb) · [`.rpm`](https://github.com/spartanz51/tutabridge/releases/latest/download/TutaBridge-Linux.rpm) |
 
 The build is not code-signed, so the first launch needs one click to allow it:
 
