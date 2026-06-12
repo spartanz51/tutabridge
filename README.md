@@ -76,6 +76,11 @@ The build is not code-signed, so the first launch needs one click to allow it:
 > Prefer the command line? Every release also ships a single **CLI binary** per
 > OS (run it from a terminal; it has no extension, so double-clicking won't work).
 
+**Arch Linux:** the headless CLI daemon is on the AUR as
+[`tutabridge-bin`](https://aur.archlinux.org/packages/tutabridge-bin) (prebuilt)
+or [`tutabridge-git`](https://aur.archlinux.org/packages/tutabridge-git) (built
+from source), e.g. `yay -S tutabridge-bin`.
+
 ---
 
 ## Getting started
