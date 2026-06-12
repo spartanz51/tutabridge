@@ -44,6 +44,7 @@ pub async fn has_saved_session() -> Result<bool, String> {
 pub async fn start_bridge(
     email: Option<String>,
     password: Option<String>,
+    totp: Option<String>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     let mut cfg = match config::load_config() {
@@ -67,8 +68,14 @@ pub async fn start_bridge(
     config::ensure_bridge_password(&mut cfg)
         .map_err(|e| format!("Bridge password setup failed: {e}"))?;
 
+    // If the user supplied a 2FA code, hand the login a callback that returns
+    // it. Without 2FA on the account this is simply never invoked.
+    let totp_cb = totp
+        .and_then(|c| c.trim().parse::<u32>().ok())
+        .map(|code| tuta::TwoFactorCallback::Totp(Box::new(move || Ok(code))));
+
     let mut handle = state.lock().await;
-    handle.start(cfg, password, None).await
+    handle.start(cfg, password, totp_cb).await
 }
 
 #[tauri::command]

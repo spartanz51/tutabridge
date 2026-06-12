@@ -34,6 +34,7 @@ export function useBridge() {
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [needsTotp, setNeedsTotp] = useState(false);
 
   // Backup state lives here (not in BackupPanel) so it survives tab
   // switches — the panel is conditionally rendered and would otherwise
@@ -104,18 +105,33 @@ export function useBridge() {
     setConfig(cfg);
   }, []);
 
-  const startBridge = useCallback(async (password?: string, email?: string) => {
-    setLoading(true);
-    try {
-      await invoke("start_bridge", { password: password || null, email: email || null });
-      refresh();
-      invoke<string | null>("get_bridge_password").then(setBridgePassword);
-    } catch (e) {
-      setStatus({ Error: String(e) });
-    } finally {
-      setLoading(false);
-    }
-  }, [refresh]);
+  const startBridge = useCallback(
+    async (password?: string, email?: string, totp?: string) => {
+      setLoading(true);
+      setNeedsTotp(false);
+      try {
+        await invoke("start_bridge", {
+          password: password || null,
+          email: email || null,
+          totp: totp || null,
+        });
+        refresh();
+        invoke<string | null>("get_bridge_password").then(setBridgePassword);
+      } catch (e) {
+        const msg = String(e);
+        // Not a real error: the account has 2FA and we need the code. Surface a
+        // TOTP prompt instead of a scary error banner.
+        if (/2fa|totp/i.test(msg)) {
+          setNeedsTotp(true);
+        } else {
+          setStatus({ Error: msg });
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [refresh],
+  );
 
   const stopBridge = useCallback(async () => {
     setLoading(true);
@@ -185,6 +201,7 @@ export function useBridge() {
     bridgePassword,
     logs,
     loading,
+    needsTotp,
     saveConfig,
     startBridge,
     stopBridge,

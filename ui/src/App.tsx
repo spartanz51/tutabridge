@@ -74,6 +74,7 @@ function App() {
             hasSavedSession={bridge.hasSavedSession}
             loading={bridge.loading}
             logs={bridge.logs}
+            needsTotp={bridge.needsTotp}
             onStart={bridge.startBridge}
             onStop={bridge.stopBridge}
             onClearLogs={bridge.clearLogs}

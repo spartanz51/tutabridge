@@ -9,7 +9,8 @@ interface Props {
   hasSavedSession: boolean;
   loading: boolean;
   logs: string[];
-  onStart: (password?: string, email?: string) => Promise<void>;
+  needsTotp: boolean;
+  onStart: (password?: string, email?: string, totp?: string) => Promise<void>;
   onStop: () => Promise<void>;
   onClearLogs: () => void;
 }
@@ -29,12 +30,14 @@ export function Dashboard({
   hasSavedSession,
   loading,
   logs,
+  needsTotp,
   onStart,
   onStop,
   onClearLogs,
 }: Props) {
   const [password, setPassword] = useState("");
   const [email, setEmail] = useState("");
+  const [totp, setTotp] = useState("");
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -81,16 +84,20 @@ export function Dashboard({
       ? "Signing in and syncing your mailbox"
       : errored
         ? "See the activity log below"
-        : needsEmail
-          ? "Sign in with your Tuta account to get started"
-          : "Start the bridge to connect your mail client";
+        : needsTotp
+          ? "Enter your two-factor code to finish signing in"
+          : needsEmail
+            ? "Sign in with your Tuta account to get started"
+            : "Start the bridge to connect your mail client";
 
   const handleStart = async () => {
     await onStart(
       needsPassword ? password : undefined,
       needsEmail ? email.trim() : undefined,
+      // Always pass the code if entered, so an account with 2FA logs in on a
+      // single attempt instead of failing first and prompting.
+      totp.trim() || undefined,
     );
-    setPassword("");
   };
 
   return (
@@ -125,29 +132,48 @@ export function Dashboard({
             </div>
           )}
           {needsPassword && (
-            <div className="form-group">
-              <label>Tuta Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your Tuta password"
-                onKeyDown={(e) =>
-                  e.key === "Enter" &&
-                  password &&
-                  (!needsEmail || email.trim()) &&
-                  handleStart()
-                }
-              />
-            </div>
+            <>
+              <div className="form-group">
+                <label>Tuta Password</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your Tuta password"
+                />
+              </div>
+              <div className="form-group">
+                <label>Two-factor code</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={totp}
+                  onChange={(e) => setTotp(e.target.value.replace(/\D/g, ""))}
+                  placeholder="6-digit code, only if 2FA is enabled"
+                  onKeyDown={(e) =>
+                    e.key === "Enter" &&
+                    password &&
+                    (!needsEmail || email.trim()) &&
+                    (!needsTotp || totp.trim().length >= 6) &&
+                    handleStart()
+                  }
+                />
+                {needsTotp && (
+                  <small className="field-hint">
+                    Your account has 2FA. Enter the current code to sign in.
+                  </small>
+                )}
+              </div>
+            </>
           )}
           <button
             className="primary start-btn"
             onClick={handleStart}
             disabled={
               loading ||
+              (needsEmail && !email.trim()) ||
               (needsPassword && !password) ||
-              (needsEmail && !email.trim())
+              (needsTotp && totp.trim().length < 6)
             }
           >
             {loading ? "Connecting…" : "Start Bridge"}
