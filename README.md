@@ -19,6 +19,11 @@ encryption transparently, so your favourite desktop client just works.
 
 [**Download**](#download) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
 
+<br/>
+
+<img src="docs/screenshots/dashboard.png" alt="TutaBridge dashboard" width="49%" />
+<img src="docs/screenshots/connection.png" alt="Mail client connection settings" width="49%" />
+
 </div>
 
 > ## ⚠️ Please read before using
