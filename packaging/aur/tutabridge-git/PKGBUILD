@@ -2,7 +2,8 @@
 #
 # VCS package — builds the headless TutaBridge CLI/daemon from the latest
 # commit. The GUI (Tauri) is intentionally not built here; this package is
-# the lean daemon for terminal / server use.
+# the lean daemon for terminal / server use. For a prebuilt binary with no
+# Rust build, see tutabridge-bin.
 
 pkgname=tutabridge-git
 pkgver=0.r0.0000000
