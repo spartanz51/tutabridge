@@ -3,13 +3,12 @@ import { useBridge } from "./hooks/useBridge";
 import { Dashboard } from "./components/Dashboard";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { ConfigPanel } from "./components/ConfigPanel";
-import { LogsPanel } from "./components/LogsPanel";
 import { BackupPanel } from "./components/BackupPanel";
 import { statusLabel, isError } from "./types";
 import logo from "./assets/tuta-logo.svg";
 import "./App.css";
 
-type Tab = "dashboard" | "connection" | "config" | "backup" | "logs";
+type Tab = "dashboard" | "connection" | "config" | "backup";
 
 function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
@@ -64,12 +63,6 @@ function App() {
           >
             Backup
           </button>
-          <button
-            className={tab === "logs" ? "active" : ""}
-            onClick={() => setTab("logs")}
-          >
-            Logs{bridge.logs.length > 0 ? ` (${bridge.logs.length})` : ""}
-          </button>
         </nav>
       </header>
       <main className="app-content">
@@ -79,8 +72,10 @@ function App() {
             stats={bridge.stats}
             hasSavedSession={bridge.hasSavedSession}
             loading={bridge.loading}
+            logs={bridge.logs}
             onStart={bridge.startBridge}
             onStop={bridge.stopBridge}
+            onClearLogs={bridge.clearLogs}
           />
         )}
         {tab === "connection" && (
@@ -109,9 +104,6 @@ function App() {
             error={bridge.backupError}
             onBackup={bridge.startBackup}
           />
-        )}
-        {tab === "logs" && (
-          <LogsPanel logs={bridge.logs} onClear={bridge.clearLogs} />
         )}
       </main>
     </div>
