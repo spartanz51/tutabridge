@@ -104,10 +104,10 @@ export function useBridge() {
     setConfig(cfg);
   }, []);
 
-  const startBridge = useCallback(async (password?: string) => {
+  const startBridge = useCallback(async (password?: string, email?: string) => {
     setLoading(true);
     try {
-      await invoke("start_bridge", { password: password || null });
+      await invoke("start_bridge", { password: password || null, email: email || null });
       refresh();
       invoke<string | null>("get_bridge_password").then(setBridgePassword);
     } catch (e) {

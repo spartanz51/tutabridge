@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef } from "react";
-import type { BridgeStatus, BridgeStats } from "../types";
+import type { Config, BridgeStatus, BridgeStats } from "../types";
 import { isError } from "../types";
 
 interface Props {
   status: BridgeStatus | null;
   stats: BridgeStats;
+  config: Config | null;
   hasSavedSession: boolean;
   loading: boolean;
   logs: string[];
-  onStart: (password?: string) => Promise<void>;
+  onStart: (password?: string, email?: string) => Promise<void>;
   onStop: () => Promise<void>;
   onClearLogs: () => void;
 }
@@ -24,6 +25,7 @@ function formatUptime(secs: number): string {
 export function Dashboard({
   status,
   stats,
+  config,
   hasSavedSession,
   loading,
   logs,
@@ -32,6 +34,7 @@ export function Dashboard({
   onClearLogs,
 }: Props) {
   const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -50,6 +53,8 @@ export function Dashboard({
   const isStarting = status === "Starting";
   const errored = isError(status);
   const isStopped = status === "Stopped" || errored;
+  const hasAccount = !!config?.email;
+  const needsEmail = isStopped && !hasAccount;
   const needsPassword = isStopped && !hasSavedSession;
   const wsConnected = stats.ws_status === "Connected";
 
@@ -76,15 +81,16 @@ export function Dashboard({
       ? "Signing in and syncing your mailbox"
       : errored
         ? "See the activity log below"
-        : "Start the bridge to connect your mail client";
+        : needsEmail
+          ? "Sign in with your Tuta account to get started"
+          : "Start the bridge to connect your mail client";
 
   const handleStart = async () => {
-    if (needsPassword) {
-      await onStart(password);
-      setPassword("");
-    } else {
-      await onStart();
-    }
+    await onStart(
+      needsPassword ? password : undefined,
+      needsEmail ? email.trim() : undefined,
+    );
+    setPassword("");
   };
 
   return (
@@ -106,6 +112,18 @@ export function Dashboard({
 
       {isStopped && (
         <div className="start-section">
+          {needsEmail && (
+            <div className="form-group">
+              <label>Tuta Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@tuta.com"
+                autoFocus
+              />
+            </div>
+          )}
           {needsPassword && (
             <div className="form-group">
               <label>Tuta Password</label>
@@ -114,14 +132,23 @@ export function Dashboard({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Enter your Tuta password"
-                onKeyDown={(e) => e.key === "Enter" && password && handleStart()}
+                onKeyDown={(e) =>
+                  e.key === "Enter" &&
+                  password &&
+                  (!needsEmail || email.trim()) &&
+                  handleStart()
+                }
               />
             </div>
           )}
           <button
             className="primary start-btn"
             onClick={handleStart}
-            disabled={loading || (needsPassword && !password)}
+            disabled={
+              loading ||
+              (needsPassword && !password) ||
+              (needsEmail && !email.trim())
+            }
           >
             {loading ? "Connecting…" : "Start Bridge"}
           </button>

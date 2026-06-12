@@ -42,12 +42,26 @@ pub async fn has_saved_session() -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn start_bridge(
+    email: Option<String>,
     password: Option<String>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     let mut cfg = match config::load_config() {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
-        _ => return Err("No config found — save config first".into()),
+        // First run: no account yet. Bootstrap a default config from the email
+        // the user just entered on the dashboard, instead of erroring out.
+        _ => {
+            let email = email.unwrap_or_default().trim().to_string();
+            if email.is_empty() {
+                return Err("Enter your Tuta email to get started".into());
+            }
+            let cfg = Config {
+                email,
+                ..Default::default()
+            };
+            config::save_config(&cfg).map_err(|e| format!("Failed to save config: {e}"))?;
+            cfg
+        }
     };
 
     config::ensure_bridge_password(&mut cfg)

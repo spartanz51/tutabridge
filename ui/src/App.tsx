@@ -70,6 +70,7 @@ function App() {
           <Dashboard
             status={bridge.status}
             stats={bridge.stats}
+            config={bridge.config}
             hasSavedSession={bridge.hasSavedSession}
             loading={bridge.loading}
             logs={bridge.logs}
