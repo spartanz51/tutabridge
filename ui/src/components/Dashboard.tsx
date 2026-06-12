@@ -1,28 +1,16 @@
-import { useState } from "react";
-import type { BridgeStatus, BridgeStats, WsStatus } from "../types";
+import { useState, useEffect, useRef } from "react";
+import type { BridgeStatus, BridgeStats } from "../types";
 import { isError } from "../types";
-
-function wsBadge(status: WsStatus): { color: string; label: string; pulsing: boolean } {
-  switch (status) {
-    case "Connected":
-      return { color: "var(--green)", label: "Connected", pulsing: false };
-    case "Connecting":
-      return { color: "var(--orange)", label: "Connecting…", pulsing: true };
-    case "Reconnecting":
-      return { color: "var(--orange)", label: "Reconnecting…", pulsing: true };
-    case "Stopped":
-    default:
-      return { color: "var(--gray)", label: "Off", pulsing: false };
-  }
-}
 
 interface Props {
   status: BridgeStatus | null;
   stats: BridgeStats;
   hasSavedSession: boolean;
   loading: boolean;
+  logs: string[];
   onStart: (password?: string) => Promise<void>;
   onStop: () => Promise<void>;
+  onClearLogs: () => void;
 }
 
 function formatUptime(secs: number): string {
@@ -33,17 +21,62 @@ function formatUptime(secs: number): string {
   return `${h}h ${m}m`;
 }
 
-export function Dashboard({ status, stats, hasSavedSession, loading, onStart, onStop }: Props) {
+export function Dashboard({
+  status,
+  stats,
+  hasSavedSession,
+  loading,
+  logs,
+  onStart,
+  onStop,
+  onClearLogs,
+}: Props) {
   const [password, setPassword] = useState("");
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
   if (!status) {
-    return <div className="dashboard"><p className="muted">Connecting...</p></div>;
+    return (
+      <div className="dashboard">
+        <p className="muted">Connecting...</p>
+      </div>
+    );
   }
 
   const isRunning = status === "Running";
   const isStarting = status === "Starting";
-  const isStopped = status === "Stopped" || isError(status);
+  const errored = isError(status);
+  const isStopped = status === "Stopped" || errored;
   const needsPassword = isStopped && !hasSavedSession;
+  const wsConnected = stats.ws_status === "Connected";
+
+  // LED colour reflects real health: green only when running and realtime is
+  // actually connected, orange while connecting or reconnecting, grey when off.
+  const led = isRunning ? (wsConnected ? "running" : "starting") : isStarting ? "starting" : "stopped";
+  const accent = isRunning ? "running" : isStarting ? "starting" : "stopped";
+
+  const title = isRunning
+    ? "Bridge running"
+    : isStarting
+      ? "Connecting…"
+      : errored
+        ? "Connection failed"
+        : "Bridge stopped";
+
+  // Subtitle only carries information the rest of the screen doesn't already
+  // show: nothing when everything is healthy.
+  const subtitle = isRunning
+    ? wsConnected
+      ? ""
+      : "Realtime reconnecting…"
+    : isStarting
+      ? "Signing in and syncing your mailbox"
+      : errored
+        ? "See the activity log below"
+        : "Start the bridge to connect your mail client";
 
   const handleStart = async () => {
     if (needsPassword) {
@@ -56,50 +89,20 @@ export function Dashboard({ status, stats, hasSavedSession, loading, onStart, on
 
   return (
     <div className="dashboard">
-      {isRunning && (
-        <div className="status-hero running">
-          <div className="hero-indicator">
-            <span className="pulse-ring" />
-            <span className="pulse-dot" />
-          </div>
-          <div className="hero-text">
-            <strong>Bridge is running</strong>
-            {stats.uptime_secs != null && (
-              <span className="hero-uptime">Up {formatUptime(stats.uptime_secs)}</span>
-            )}
-          </div>
-          <button className="hero-action" onClick={onStop} disabled={loading}>
-            {loading ? "Stopping..." : "Stop"}
+      <div className={`status-bar ${accent}`}>
+        <span className={`status-led ${led}`} />
+        <div className="status-bar-text">
+          <strong>{title}</strong>
+          {subtitle && <span className="status-bar-sub">{subtitle}</span>}
+        </div>
+        {(isRunning || isStarting) && (
+          <button className="status-action" onClick={onStop} disabled={loading}>
+            {loading ? "Stopping…" : "Stop"}
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
-      {isStarting && (
-        <div className="status-hero starting">
-          <div className="hero-indicator">
-            <span className="pulse-ring orange" />
-            <span className="pulse-dot orange" />
-          </div>
-          <div className="hero-text">
-            <strong>Connecting...</strong>
-          </div>
-        </div>
-      )}
-
-      {isStopped && (
-        <div className="status-hero stopped">
-          <div className="hero-indicator">
-            <span className="static-dot" style={{ background: isError(status) ? "var(--red)" : "var(--gray)" }} />
-          </div>
-          <div className="hero-text">
-            <strong>{isError(status) ? "Connection failed" : "Bridge is stopped"}</strong>
-          </div>
-        </div>
-      )}
-
-      {isError(status) && (
-        <p className="error-text">{status.Error}</p>
-      )}
+      {errored && <p className="error-text">{status.Error}</p>}
 
       {isStopped && (
         <div className="start-section">
@@ -120,38 +123,44 @@ export function Dashboard({ status, stats, hasSavedSession, loading, onStart, on
             onClick={handleStart}
             disabled={loading || (needsPassword && !password)}
           >
-            {loading ? "Connecting..." : "Start Bridge"}
+            {loading ? "Connecting…" : "Start Bridge"}
           </button>
         </div>
       )}
 
       <div className="stats-grid">
         <div className="stat-card">
-          <span className="stat-value">{stats.mails_synced}</span>
+          <span className="stat-value">{stats.mails_synced.toLocaleString()}</span>
           <span className="stat-label">Emails synced</span>
         </div>
         <div className="stat-card">
           <span className="stat-value">
-            {stats.uptime_secs != null ? formatUptime(stats.uptime_secs) : "--"}
+            {stats.uptime_secs != null ? formatUptime(stats.uptime_secs) : "—"}
           </span>
           <span className="stat-label">Uptime</span>
         </div>
-        <div className="stat-card">
-          <span className="ws-badge">
-            {(() => {
-              const b = wsBadge(stats.ws_status);
-              return (
-                <>
-                  <span
-                    className={"ws-dot" + (b.pulsing ? " pulsing" : "")}
-                    style={{ background: b.color }}
-                  />
-                  <span className="ws-text">{b.label}</span>
-                </>
-              );
-            })()}
-          </span>
-          <span className="stat-label">Realtime</span>
+      </div>
+
+      <div className="dash-logs">
+        <div className="dash-logs-header">
+          <span className="dash-logs-title">Activity</span>
+          {logs.length > 0 && (
+            <button className="inline-btn" onClick={onClearLogs}>
+              Clear
+            </button>
+          )}
+        </div>
+        <div className="logs-container">
+          {logs.length === 0 ? (
+            <span className="logs-empty">Waiting for activity…</span>
+          ) : (
+            logs.map((line, i) => (
+              <div key={i} className="log-line">
+                {line}
+              </div>
+            ))
+          )}
+          <div ref={logEndRef} />
         </div>
       </div>
     </div>

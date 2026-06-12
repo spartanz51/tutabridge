@@ -1,8 +1,8 @@
 use log::{info, warn};
 use std::sync::Arc;
 use tutabridge_core::{
-    backup, bridge as bridge_helpers, config, event_handler, imap, smtp, store::LocalStore, sync,
-    tls, tuta,
+    backup, bridge as bridge_helpers, config, event_handler, imap, mcp, smtp, store::LocalStore,
+    sync, tls, tuta,
 };
 
 #[tokio::main]
@@ -204,6 +204,19 @@ async fn main() -> anyhow::Result<()> {
         imap_tls,
         pw.clone(),
     ));
+    // Read-only MCP server — a no-op (returns immediately) when the permission
+    // tier is Disabled, so it's always safe to spawn. Not awaited in the
+    // select! below for exactly that reason: a disabled server returns Ok at
+    // once and must not tear the bridge down.
+    let mcp_handle = tokio::spawn(mcp::serve(
+        cfg.mcp_port,
+        store.clone(),
+        local_store.clone(),
+        backend.clone(),
+        pw.clone(),
+        cfg.mcp_permission,
+        shutdown_rx.clone(),
+    ));
     let smtp_handle = tokio::spawn(smtp::serve(cfg.smtp_port, backend.clone(), smtp_tls, pw));
 
     info!("Bridge is running. Configure Thunderbird with:");
@@ -220,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
             syncer_handle.abort();
             bus_handle.abort();
             handler_handle.abort();
+            mcp_handle.abort();
             Ok(())
         }
         r = imap_handle => r.map_err(|e| anyhow::anyhow!("{e}"))?.map_err(|e| anyhow::anyhow!("{e}")),

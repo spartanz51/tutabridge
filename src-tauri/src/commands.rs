@@ -90,6 +90,26 @@ pub async fn regenerate_bridge_password() -> Result<String, String> {
     config::regenerate_bridge_password(&mut cfg).map_err(|e| e.to_string())
 }
 
+/// Build the MCP client config snippet (URL + bearer token) to paste into
+/// Claude Desktop / Code. Read-only; reflects the saved port + bridge password.
+#[tauri::command]
+pub async fn get_mcp_client_config() -> Result<String, String> {
+    let cfg = config::load_config()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let token = cfg.bridge_password.unwrap_or_default();
+    let snippet = serde_json::json!({
+        "mcpServers": {
+            "tutabridge": {
+                "type": "http",
+                "url": format!("http://127.0.0.1:{}/mcp", cfg.mcp_port),
+                "headers": { "Authorization": format!("Bearer {token}") }
+            }
+        }
+    });
+    serde_json::to_string_pretty(&snippet).map_err(|e| e.to_string())
+}
+
 /// Export every mail to `output_dir` as a tree of `.eml` files. Requires the
 /// bridge to be running (reuses its live session + cache). Streams progress
 /// via `bridge://backup-progress` events and resolves with the final stats.

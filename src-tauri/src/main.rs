@@ -35,6 +35,7 @@ fn main() {
             commands::get_bridge_password,
             commands::regenerate_bridge_password,
             commands::export_mails,
+            commands::get_mcp_client_config,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();

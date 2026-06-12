@@ -21,6 +21,9 @@ tokio-rustls = { version = "0.26", features = ["ring"] }
 rustls-pemfile = "2"
 rcgen = "0.13"
 
+# Read-only MCP server (HTTP, localhost). Pure-Rust, builds on every target.
+axum = "0.7"
+
 crypto-primitives = { path = "../../tuta-repo/tuta-sdk/rust/crypto-primitives" }
 
 rand = "0.8"

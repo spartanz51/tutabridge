@@ -251,6 +251,8 @@ impl BridgeHandle {
         let smtp_port = config.smtp_port;
         let sync_limit = config.sync_limit;
         let pw = config.bridge_password.clone();
+        let mcp_port = config.mcp_port;
+        let mcp_permission = config.mcp_permission;
 
         // Build the realtime event bus and hydrate its catch-up state from
         // disk so the next reconnect resumes from the last processed batch.
@@ -375,9 +377,21 @@ impl BridgeHandle {
                 imap_port,
                 store.clone(),
                 backend.clone(),
-                local_store,
+                local_store.clone(),
                 imap_tls,
                 pw.clone(),
+            ));
+            // Read-only MCP server — no-op when the tier is Disabled, so always
+            // safe to spawn. Kept out of the select! (a disabled server returns
+            // immediately and must not trigger teardown).
+            let mcp_handle = tokio::spawn(crate::mcp::serve(
+                mcp_port,
+                store.clone(),
+                local_store,
+                backend.clone(),
+                pw.clone(),
+                mcp_permission,
+                shutdown_sync_rx.clone(),
             ));
             let mut smtp_handle =
                 tokio::spawn(smtp::serve(smtp_port, backend.clone(), smtp_tls, pw));
@@ -406,6 +420,7 @@ impl BridgeHandle {
             bus_handle.abort();
             handler_handle.abort();
             imap_handle.abort();
+            mcp_handle.abort();
             smtp_handle.abort();
             if !syncer_handle.is_finished() {
                 let _ = syncer_handle.await;

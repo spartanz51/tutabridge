@@ -28,41 +28,43 @@ export function ConnectionPanel({ config, status, bridgePassword, onRegeneratePa
     <div className="connection-panel">
       <p className="panel-subtitle">Configure your mail client with these settings</p>
 
+      <div className="settings-row">
+        <div className="settings-card">
+          <div className="settings-section">
+            <h3>Incoming (IMAP)</h3>
+            <div className="settings-grid">
+              <span className="setting-key">Server</span>
+              <code className="setting-val">127.0.0.1</code>
+              <span className="setting-key">Port</span>
+              <code className="setting-val">{config.imap_port}</code>
+              <span className="setting-key">Security</span>
+              <code className="setting-val">SSL/TLS</code>
+            </div>
+          </div>
+        </div>
+
+        <div className="settings-card">
+          <div className="settings-section">
+            <h3>Outgoing (SMTP)</h3>
+            <div className="settings-grid">
+              <span className="setting-key">Server</span>
+              <code className="setting-val">127.0.0.1</code>
+              <span className="setting-key">Port</span>
+              <code className="setting-val">{config.smtp_port}</code>
+              <span className="setting-key">Security</span>
+              <code className="setting-val">SSL/TLS</code>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="settings-card">
-        <div className="settings-section">
-          <h3>Incoming Mail (IMAP)</h3>
-          <div className="settings-grid">
-            <span className="setting-key">Server</span>
-            <code className="setting-val">127.0.0.1</code>
-            <span className="setting-key">Port</span>
-            <code className="setting-val">{config.imap_port}</code>
-            <span className="setting-key">Security</span>
-            <code className="setting-val">SSL/TLS</code>
-          </div>
-        </div>
-
-        <div className="settings-divider" />
-
-        <div className="settings-section">
-          <h3>Outgoing Mail (SMTP)</h3>
-          <div className="settings-grid">
-            <span className="setting-key">Server</span>
-            <code className="setting-val">127.0.0.1</code>
-            <span className="setting-key">Port</span>
-            <code className="setting-val">{config.smtp_port}</code>
-            <span className="setting-key">Security</span>
-            <code className="setting-val">SSL/TLS</code>
-          </div>
-        </div>
-
-        <div className="settings-divider" />
-
         <div className="settings-section">
           <h3>Authentication</h3>
           <div className="settings-grid">
             <span className="setting-key">Username</span>
             <code className="setting-val copyable" onClick={() => copyToClipboard(config.email)}>
-              {config.email || "—"}
+              {config.email || "(not set)"}
             </code>
             <span className="setting-key">Password</span>
             <div className="password-field-inline">

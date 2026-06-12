@@ -1,3 +1,6 @@
+/** Read-only MCP server access tier. `disabled` = server off. */
+export type McpPermission = "disabled" | "metadata" | "full";
+
 export interface Config {
   email: string;
   imap_port: number;
@@ -5,6 +8,10 @@ export interface Config {
   api_url: string;
   /** Max mails synced per folder; 0 = fetch all. */
   sync_limit: number;
+  /** Read-only MCP server permission tier. */
+  mcp_permission: McpPermission;
+  /** Port the read-only MCP HTTP server listens on (127.0.0.1). */
+  mcp_port: number;
 }
 
 export type BridgeStatus = "Stopped" | "Starting" | "Running" | { Error: string };
