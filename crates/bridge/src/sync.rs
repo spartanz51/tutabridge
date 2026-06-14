@@ -439,34 +439,54 @@ pub async fn run_syncer(
             if *shutdown.borrow() {
                 return;
             }
-            match local_store.load_folder_metadata(&folder.id) {
-                Ok(metas) => {
-                    for meta in metas.iter().filter(|m| m.has_details) {
-                        if *shutdown.borrow() {
-                            return;
-                        }
-                        match local_store.read_eml(&meta.element_id) {
-                            Ok(Some(rfc)) => {
-                                let text = extract_body_text(&rfc);
-                                if let Err(e) = local_store.index_body(&meta.element_id, &text) {
-                                    warn!("FTS backfill failed for {}: {e}", meta.element_id);
-                                    all_ok = false;
-                                } else {
-                                    indexed += 1;
+            // Same reasoning as `load_cached_folder`: reading and decrypting
+            // every cached body is CPU-bound work that must not run on an async
+            // worker, or it starves the network accept loops. Index one folder
+            // per blocking task; the shutdown check stays on the async side
+            // between folders.
+            let ls = local_store.clone();
+            let fid = folder.id.clone();
+            let fpath = folder.imap_path.clone();
+            let (folder_indexed, folder_ok) =
+                tokio::task::spawn_blocking(move || -> (usize, bool) {
+                    let mut indexed = 0usize;
+                    let mut ok = true;
+                    match ls.load_folder_metadata(&fid) {
+                        Ok(metas) => {
+                            for meta in metas.iter().filter(|m| m.has_details) {
+                                match ls.read_eml(&meta.element_id) {
+                                    Ok(Some(rfc)) => {
+                                        let text = extract_body_text(&rfc);
+                                        if let Err(e) = ls.index_body(&meta.element_id, &text) {
+                                            warn!("FTS backfill failed for {}: {e}", meta.element_id);
+                                            ok = false;
+                                        } else {
+                                            indexed += 1;
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        warn!("FTS backfill read failed for {}: {e}", meta.element_id);
+                                        ok = false;
+                                    }
                                 }
                             }
-                            Ok(None) => {}
-                            Err(e) => {
-                                warn!("FTS backfill read failed for {}: {e}", meta.element_id);
-                                all_ok = false;
-                            }
+                        }
+                        Err(e) => {
+                            warn!("FTS backfill: no metadata for {fpath}: {e}");
+                            ok = false;
                         }
                     }
-                }
-                Err(e) => {
-                    warn!("FTS backfill: no metadata for {}: {e}", folder.imap_path);
-                    all_ok = false;
-                }
+                    (indexed, ok)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    warn!("FTS backfill task failed: {e}");
+                    (0, false)
+                });
+            indexed += folder_indexed;
+            if !folder_ok {
+                all_ok = false;
             }
         }
         // Only mark done if nothing errored, so a partial run retries next boot.
@@ -561,57 +581,68 @@ const ATTACHMENT_RETRY_THROTTLE: Duration = Duration::from_secs(60);
 
 async fn load_cached_folder(
     store: &MailStore,
-    local_store: &LocalStore,
+    local_store: &Arc<LocalStore>,
     folder: &FolderInfo,
 ) -> Result<usize, String> {
-    let metas = local_store
-        .load_folder_metadata(&folder.id)
-        .map_err(|e| format!("{e}"))?;
+    // Decoding a cached folder means deserializing every metadata row and, for
+    // each mail, reading and decrypting its `.eml.enc` body (AES-CBC + an
+    // HMAC-SHA256 verification). For a large folder that is seconds of pure CPU
+    // with no `.await` in between. Run inline on a tokio worker it would keep
+    // that worker (and the IO driver it owns) busy for the whole loop, which
+    // stalls the IMAP/SMTP accept loops until the folder finishes loading. So
+    // do the decode on the blocking pool and only touch the async store once
+    // the `Vec` is built.
+    let ls = local_store.clone();
+    let folder_id = folder.id.clone();
+    let stored_mails = tokio::task::spawn_blocking(move || -> Result<Vec<StoredMail>, String> {
+        let metas = ls
+            .load_folder_metadata(&folder_id)
+            .map_err(|e| format!("{e}"))?;
 
-    if metas.is_empty() {
-        return Ok(0);
-    }
+        let mut stored_mails = Vec::with_capacity(metas.len());
+        for meta in &metas {
+            let mail: Mail = serde_json::from_str(&meta.mail_json)
+                .map_err(|e| format!("Bad cached mail {}: {e}", meta.element_id))?;
 
-    let mut stored_mails = Vec::with_capacity(metas.len());
-    for meta in &metas {
-        let mail: Mail = serde_json::from_str(&meta.mail_json)
-            .map_err(|e| format!("Bad cached mail {}: {e}", meta.element_id))?;
-
-        // Always try to recover the full body from disk first — the `.eml`
-        // file is the source of truth and may exist even when the metadata
-        // row says otherwise (a schema migration drops the `mails` table but
-        // keeps the encrypted `.eml.enc` files, so `has_details` is reset to
-        // 0 on first boot after the migration). Self-heal the row when we
-        // find an orphaned body, so the prefetch loop knows to skip it on
-        // the next sweep.
-        let rfc2822 = match local_store.read_eml(&meta.element_id) {
-            Ok(Some(eml)) => {
-                if !meta.has_details {
-                    if let Err(e) = local_store.mark_has_details(&meta.element_id) {
-                        warn!("Failed to heal has_details for {}: {e}", meta.element_id);
+            // Always try to recover the full body from disk first: the `.eml`
+            // file is the source of truth and may exist even when the metadata
+            // row says otherwise (a schema migration drops the `mails` table but
+            // keeps the encrypted `.eml.enc` files, so `has_details` is reset to
+            // 0 on first boot after the migration). Self-heal the row when we
+            // find an orphaned body, so the prefetch loop knows to skip it on
+            // the next sweep.
+            let rfc2822 = match ls.read_eml(&meta.element_id) {
+                Ok(Some(eml)) => {
+                    if !meta.has_details {
+                        if let Err(e) = ls.mark_has_details(&meta.element_id) {
+                            warn!("Failed to heal has_details for {}: {e}", meta.element_id);
+                        }
                     }
+                    Some(eml)
                 }
-                Some(eml)
-            }
-            // No cached body — leave `rfc2822` empty rather than baking in a
-            // placeholder. A placeholder would look like a real body to the
-            // IMAP layer and suppress the on-demand fetch; `None` is what tells
-            // it the body still has to be pulled the first time it's opened.
-            Ok(None) => None,
-            Err(e) => {
-                warn!("Failed to read cached eml {}: {e}", meta.element_id);
-                None
-            }
-        };
+                // No cached body: leave `rfc2822` empty rather than baking in a
+                // placeholder. A placeholder would look like a real body to the
+                // IMAP layer and suppress the on-demand fetch; `None` is what tells
+                // it the body still has to be pulled the first time it's opened.
+                Ok(None) => None,
+                Err(e) => {
+                    warn!("Failed to read cached eml {}: {e}", meta.element_id);
+                    None
+                }
+            };
 
-        stored_mails.push(StoredMail {
-            mail,
-            details: None,
-            rfc2822,
-            uid: meta.uid as u32,
-            attachments_pending: false,
-        });
-    }
+            stored_mails.push(StoredMail {
+                mail,
+                details: None,
+                rfc2822,
+                uid: meta.uid as u32,
+                attachments_pending: false,
+            });
+        }
+        Ok(stored_mails)
+    })
+    .await
+    .map_err(|e| format!("cache load task failed: {e}"))??;
 
     let count = stored_mails.len();
     store.set_folder(&folder.id, stored_mails).await;
