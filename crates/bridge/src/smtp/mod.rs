@@ -130,28 +130,33 @@ pub async fn serve(
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     info!("SMTP server listening on 127.0.0.1:{} (TLS)", port);
 
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        debug!("SMTP connection from {}", addr);
-        let tuta = tuta.clone();
-        let tls = tls.clone();
-        let pw_hash = password_hash.clone();
-
-        tokio::spawn(async move {
-            match tls.accept(stream).await {
-                Ok(tls_stream) => {
-                    if let Err(e) =
-                        handle_connection(tls_stream, tuta, pw_hash, SmtpLimits::default()).await
-                    {
-                        error!("SMTP connection error: {}", e);
+    crate::net::accept_loop(
+        listener,
+        "SMTP",
+        crate::net::MAX_CONNECTIONS,
+        move |stream, _addr| {
+            let tuta = tuta.clone();
+            let tls = tls.clone();
+            let pw_hash = password_hash.clone();
+            async move {
+                match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
+                {
+                    Ok(Ok(tls_stream)) => {
+                        if let Err(e) =
+                            handle_connection(tls_stream, tuta, pw_hash, SmtpLimits::default()).await
+                        {
+                            error!("SMTP connection error: {}", e);
+                        }
                     }
-                }
-                Err(e) => {
-                    error!("SMTP TLS handshake failed: {}", e);
+                    Ok(Err(e)) => error!("SMTP TLS handshake failed: {}", e),
+                    Err(_) => debug!("SMTP TLS handshake timed out"),
                 }
             }
-        });
-    }
+        },
+    )
+    .await;
+
+    Ok(())
 }
 
 async fn handle_connection<S>(

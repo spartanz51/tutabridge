@@ -5,6 +5,7 @@ pub mod event_handler;
 pub mod imap;
 pub mod mail;
 pub mod mcp;
+mod net;
 pub mod smtp;
 pub mod store;
 pub mod sync;

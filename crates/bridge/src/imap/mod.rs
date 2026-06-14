@@ -25,30 +25,35 @@ pub async fn serve(
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     info!("IMAP server listening on 127.0.0.1:{} (TLS)", port);
 
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        debug!("IMAP connection from {}", addr);
-        let store = store.clone();
-        let backend = backend.clone();
-        let local_store = local_store.clone();
-        let tls = tls.clone();
-        let pw_hash = password_hash.clone();
-
-        tokio::spawn(async move {
-            match tls.accept(stream).await {
-                Ok(tls_stream) => {
-                    if let Err(e) =
-                        handle_connection(tls_stream, store, backend, local_store, pw_hash).await
-                    {
-                        error!("IMAP connection error: {}", e);
+    crate::net::accept_loop(
+        listener,
+        "IMAP",
+        crate::net::MAX_CONNECTIONS,
+        move |stream, _addr| {
+            let store = store.clone();
+            let backend = backend.clone();
+            let local_store = local_store.clone();
+            let tls = tls.clone();
+            let pw_hash = password_hash.clone();
+            async move {
+                match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
+                {
+                    Ok(Ok(tls_stream)) => {
+                        if let Err(e) =
+                            handle_connection(tls_stream, store, backend, local_store, pw_hash).await
+                        {
+                            error!("IMAP connection error: {}", e);
+                        }
                     }
-                }
-                Err(e) => {
-                    error!("IMAP TLS handshake failed: {}", e);
+                    Ok(Err(e)) => error!("IMAP TLS handshake failed: {}", e),
+                    Err(_) => debug!("IMAP TLS handshake timed out"),
                 }
             }
-        });
-    }
+        },
+    )
+    .await;
+
+    Ok(())
 }
 
 async fn handle_connection(
