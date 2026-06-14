@@ -234,6 +234,19 @@ impl ImapSession {
         }
     }
 
+    /// `true` if `mailbox` resolves to the Sent folder. Tuta saves sent mail
+    /// server-side, so an `APPEND` there is a no-op (see `handle_append` in the
+    /// connection loop), which is what lets a client's "save to Sent" succeed
+    /// without creating a duplicate.
+    pub(crate) async fn append_targets_sent(&self, mailbox: &str) -> bool {
+        let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
+        self.store
+            .folder_by_imap_path(&name)
+            .await
+            .map(|f| f.special_use.as_deref() == Some("\\Sent"))
+            .unwrap_or(false)
+    }
+
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
         vec![
             "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE\r\n".to_string(),
@@ -1061,6 +1074,50 @@ fn parse_command(line: &str) -> (String, String, String) {
     (tag, cmd, args)
 }
 
+/// A parsed `APPEND` command: the tag, the target mailbox, and the size of the
+/// trailing `{N}` message literal the client is about to send.
+pub(crate) struct AppendRequest {
+    pub tag: String,
+    pub mailbox: String,
+    pub literal_size: usize,
+}
+
+/// Parse an `APPEND` command line. Returns `None` if it is not a well-formed
+/// APPEND (so the caller falls back to normal command handling). The literal
+/// reading itself happens at the socket level, since the session is line based.
+pub(crate) fn parse_append(line: &str) -> Option<AppendRequest> {
+    let (tag, cmd, args) = parse_command(line);
+    if !cmd.eq_ignore_ascii_case("APPEND") {
+        return None;
+    }
+    let mailbox = append_first_token(&args)?;
+    let literal_size = append_literal_size(&args)?;
+    Some(AppendRequest {
+        tag,
+        mailbox,
+        literal_size,
+    })
+}
+
+/// The first argument token of an APPEND (the mailbox), honoring quoting.
+fn append_first_token(args: &str) -> Option<String> {
+    let s = args.trim_start();
+    if let Some(rest) = s.strip_prefix('"') {
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    } else {
+        let end = s.find(char::is_whitespace).unwrap_or(s.len());
+        (end > 0).then(|| s[..end].to_string())
+    }
+}
+
+/// The size declared by the trailing `{N}` (or non-sync `{N+}`) literal.
+fn append_literal_size(args: &str) -> Option<usize> {
+    let open = args.rfind('{')?;
+    let close = args[open..].find('}')? + open;
+    args[open + 1..close].trim_end_matches('+').parse::<usize>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,6 +1641,47 @@ mod tests {
             resp[0].contains("NO"),
             "COPY should be rejected, got {resp:?}"
         );
+    }
+
+    #[test]
+    fn parse_append_extracts_mailbox_and_size() {
+        let r = parse_append("a1 APPEND \"Sent\" (\\Seen) {310}").unwrap();
+        assert_eq!(r.tag, "a1");
+        assert_eq!(r.mailbox, "Sent");
+        assert_eq!(r.literal_size, 310);
+
+        // Bare (unquoted) mailbox, no flags.
+        let r = parse_append("x APPEND Drafts {42}").unwrap();
+        assert_eq!(r.mailbox, "Drafts");
+        assert_eq!(r.literal_size, 42);
+
+        // Non-synchronizing literal {N+}.
+        let r = parse_append("y APPEND \"Sent\" {7+}").unwrap();
+        assert_eq!(r.literal_size, 7);
+
+        // Not an APPEND, or missing the literal.
+        assert!(parse_append("z SELECT INBOX").is_none());
+        assert!(parse_append("z APPEND Sent").is_none());
+    }
+
+    #[tokio::test]
+    async fn append_targets_sent_only_for_the_sent_folder() {
+        let backend = Arc::new(MockBackend::with_mails(vec![]));
+        let store = MailStore::new();
+        let sent = FolderInfo {
+            id: "sent".into(),
+            list_id: "folders".into(),
+            entries_list_id: "sent_entries".into(),
+            kind: MailSetKind::Sent,
+            imap_path: "Sent".into(),
+            special_use: Some("\\Sent".into()),
+        };
+        store.set_folder_list(vec![inbox_folder(), sent]).await;
+        let session = ImapSession::new(store, backend, None, None);
+
+        assert!(session.append_targets_sent("Sent").await);
+        assert!(!session.append_targets_sent("INBOX").await);
+        assert!(!session.append_targets_sent("Nonexistent").await);
     }
 
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
