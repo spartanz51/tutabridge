@@ -406,9 +406,11 @@ fn decode_body(body: &str, transfer_encoding: &str, content_type: &str) -> Strin
         let clean: String = body.chars().filter(|c| !c.is_whitespace()).collect();
         base64::engine::general_purpose::STANDARD
             .decode(&clean)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .unwrap_or_else(|| body.to_string())
+            // Decode the bytes lossily rather than echoing the raw base64 when
+            // the payload is not valid UTF-8 (e.g. a Latin-1 body). Returning
+            // the base64 blob as "the body" was the worst possible fallback.
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|_| body.to_string())
     } else if transfer_encoding.contains("quoted-printable") {
         decode_quoted_printable(body)
     } else {
@@ -447,7 +449,9 @@ fn decode_quoted_printable(s: &str) -> String {
             i += 1;
         }
     }
-    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+    // Use the decoded bytes (lossily) rather than echoing the raw `=XX`
+    // source when the result is not valid UTF-8.
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 fn html_escape(s: &str) -> String {
@@ -491,6 +495,25 @@ mod tests {
         let msg = parse_rfc2822(raw);
         let addrs: Vec<&str> = msg.to.iter().map(|(_, a)| a.as_str()).collect();
         assert_eq!(addrs, vec!["a@x.com", "b@y.com", "c@z.com"]);
+    }
+
+    #[test]
+    fn base64_body_non_utf8_is_not_echoed_as_base64() {
+        // "caf" + 0xE9 (Latin-1 'é'): valid base64, not valid UTF-8.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"caf\xe9");
+        let out = decode_body(&b64, "base64", "text/html");
+        assert!(!out.contains(&b64), "must not emit the raw base64 blob");
+        assert!(
+            out.starts_with("caf"),
+            "decoded text should be readable, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn qp_non_utf8_byte_is_decoded_not_echoed() {
+        let out = decode_quoted_printable("caf=E9");
+        assert!(!out.contains("=E9"), "QP source must be decoded, not echoed");
+        assert!(out.starts_with("caf"), "got {out:?}");
     }
 
     #[test]
