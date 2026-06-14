@@ -287,7 +287,7 @@ impl BridgeHandle {
             let ids_handle = bus_client.last_batch_ids();
             match local_store.load_event_bus_state() {
                 Ok(s) if !s.is_empty() => {
-                    let mut m = ids_handle.lock().unwrap();
+                    let mut m = crate::util::lock_recover(&ids_handle);
                     m.extend(s);
                     self.emit_log(&format!(
                         "Event bus catch-up state loaded ({} group(s))",

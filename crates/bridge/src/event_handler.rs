@@ -86,7 +86,7 @@ async fn process(
     // in sync — the in-memory map drives the next reconnect's query string,
     // the on-disk row survives bridge restarts.
     {
-        let mut ids = last_batch_ids.lock().unwrap();
+        let mut ids = crate::util::lock_recover(last_batch_ids);
         ids.insert(batch.group_id.clone(), batch.batch_id.clone());
     }
     if let Err(e) = local_store.set_event_bus_batch_id(&batch.group_id, &batch.batch_id) {

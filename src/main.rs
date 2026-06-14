@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
         match local_store.load_event_bus_state() {
             Ok(s) if !s.is_empty() => {
                 let ids_handle = bus_client.last_batch_ids();
-                let mut m = ids_handle.lock().unwrap();
+                let mut m = tutabridge_core::util::lock_recover(&ids_handle);
                 let n = s.len();
                 m.extend(s);
                 info!("Event bus catch-up state loaded ({n} group(s))");
