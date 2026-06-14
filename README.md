@@ -50,15 +50,15 @@ encryption transparently, so your favourite desktop client just works.
 
 |  |  |
 |---|---|
-| 📥 **IMAP + SMTP** | Local TLS servers on `127.0.0.1`, so any standard mail client connects. |
-| ⚡ **Realtime sync** | Tuta's WebSocket event bus pushes new mail, reads, moves and deletes; a heartbeat reconnects dead sockets automatically. |
-| 🗂️ **Whole mailbox** | Every folder and message is listed, not just a recent slice. |
-| 🔍 **Honest search** | Subject, sender and date search the entire mailbox; full-text body search via an encrypted on-disk index. |
-| 📎 **Attachments** | Both ways. Incoming served as `multipart/mixed`, outgoing uploaded to Tuta on send. |
-| 📝 **Folders & flags** | Drafts, custom and nested folders, move, trash, read/unread. |
-| 🔐 **Encrypted cache** | Metadata in SQLCipher, bodies as individually encrypted files. Usable instantly on relaunch, only the delta is fetched. |
-| 💾 **Complete backup** | Export every message to portable `.eml` files. |
-| 🔑 **2FA (TOTP)** | Two-factor login supported. |
+| **IMAP + SMTP** | Local TLS servers on `127.0.0.1`, so any standard mail client connects. |
+| **Realtime sync** | Tuta's WebSocket event bus pushes new mail, reads, moves and deletes; a heartbeat reconnects dead sockets automatically. |
+| **Whole mailbox** | Every folder and message is listed, not just a recent slice. |
+| **Honest search** | Subject, sender and date search the entire mailbox; full-text body search via an encrypted on-disk index. |
+| **Attachments** | Both ways. Incoming served as `multipart/mixed`, outgoing uploaded to Tuta on send. |
+| **Folders & flags** | Drafts, custom and nested folders, move, trash, read/unread. |
+| **Encrypted cache** | Metadata in SQLCipher, bodies as individually encrypted files. Usable instantly on relaunch, only the delta is fetched. |
+| **Complete backup** | Export every message to portable `.eml` files. |
+| **2FA (TOTP)** | Two-factor login supported. |
 
 ---
 
