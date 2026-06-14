@@ -134,19 +134,28 @@ fn parse_address_single(raw: &str) -> (String, String) {
 fn parse_address_list(raw: &str) -> Vec<(String, String)> {
     let mut result = Vec::new();
     let mut depth = 0i32;
+    let mut in_quotes = false;
     let mut current = String::new();
 
     for ch in raw.chars() {
         match ch {
-            '<' => {
+            // A quoted display name may contain commas and angle brackets that
+            // are NOT list separators, e.g. `"Doe, John" <j@x.com>`. Track the
+            // quote state so those stay part of the same entry instead of
+            // splitting it into bogus recipients.
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            '<' if !in_quotes => {
                 depth += 1;
                 current.push(ch);
             }
-            '>' => {
+            '>' if !in_quotes => {
                 depth -= 1;
                 current.push(ch);
             }
-            ',' if depth == 0 => {
+            ',' if depth == 0 && !in_quotes => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push(parse_address_single(&trimmed));
@@ -397,9 +406,11 @@ fn decode_body(body: &str, transfer_encoding: &str, content_type: &str) -> Strin
         let clean: String = body.chars().filter(|c| !c.is_whitespace()).collect();
         base64::engine::general_purpose::STANDARD
             .decode(&clean)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .unwrap_or_else(|| body.to_string())
+            // Decode the bytes lossily rather than echoing the raw base64 when
+            // the payload is not valid UTF-8 (e.g. a Latin-1 body). Returning
+            // the base64 blob as "the body" was the worst possible fallback.
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|_| body.to_string())
     } else if transfer_encoding.contains("quoted-printable") {
         decode_quoted_printable(body)
     } else {
@@ -438,7 +449,9 @@ fn decode_quoted_printable(s: &str) -> String {
             i += 1;
         }
     }
-    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+    // Use the decoded bytes (lossily) rather than echoing the raw `=XX`
+    // source when the result is not valid UTF-8.
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 fn html_escape(s: &str) -> String {
@@ -461,6 +474,46 @@ mod tests {
         assert_eq!(msg.to[0].1, "bob@example.com");
         assert_eq!(msg.subject, "Hello");
         assert_eq!(msg.body_html, "<p>Hi Bob</p>");
+    }
+
+    #[test]
+    fn quoted_comma_in_display_name_is_one_recipient() {
+        let raw = "From: me@tuta.io\r\nTo: \"Doe, John\" <john@x.com>, bob@y.com\r\nSubject: t\r\n\r\nbody\r\n";
+        let msg = parse_rfc2822(raw);
+        let addrs: Vec<&str> = msg.to.iter().map(|(_, a)| a.as_str()).collect();
+        assert_eq!(
+            addrs,
+            vec!["john@x.com", "bob@y.com"],
+            "a comma inside a quoted display name must not split the recipient"
+        );
+        assert_eq!(msg.to[0].0, "Doe, John", "display name should be preserved");
+    }
+
+    #[test]
+    fn plain_address_list_still_splits_on_commas() {
+        let raw = "From: me@tuta.io\r\nTo: a@x.com, b@y.com, c@z.com\r\nSubject: t\r\n\r\nbody\r\n";
+        let msg = parse_rfc2822(raw);
+        let addrs: Vec<&str> = msg.to.iter().map(|(_, a)| a.as_str()).collect();
+        assert_eq!(addrs, vec!["a@x.com", "b@y.com", "c@z.com"]);
+    }
+
+    #[test]
+    fn base64_body_non_utf8_is_not_echoed_as_base64() {
+        // "caf" + 0xE9 (Latin-1 'é'): valid base64, not valid UTF-8.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"caf\xe9");
+        let out = decode_body(&b64, "base64", "text/html");
+        assert!(!out.contains(&b64), "must not emit the raw base64 blob");
+        assert!(
+            out.starts_with("caf"),
+            "decoded text should be readable, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn qp_non_utf8_byte_is_decoded_not_echoed() {
+        let out = decode_quoted_printable("caf=E9");
+        assert!(!out.contains("=E9"), "QP source must be decoded, not echoed");
+        assert!(out.starts_with("caf"), "got {out:?}");
     }
 
     #[test]
