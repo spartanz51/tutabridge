@@ -11,3 +11,4 @@ pub mod store;
 pub mod sync;
 pub mod tls;
 pub mod tuta;
+pub mod util;
