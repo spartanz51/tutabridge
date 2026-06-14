@@ -134,19 +134,28 @@ fn parse_address_single(raw: &str) -> (String, String) {
 fn parse_address_list(raw: &str) -> Vec<(String, String)> {
     let mut result = Vec::new();
     let mut depth = 0i32;
+    let mut in_quotes = false;
     let mut current = String::new();
 
     for ch in raw.chars() {
         match ch {
-            '<' => {
+            // A quoted display name may contain commas and angle brackets that
+            // are NOT list separators, e.g. `"Doe, John" <j@x.com>`. Track the
+            // quote state so those stay part of the same entry instead of
+            // splitting it into bogus recipients.
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            '<' if !in_quotes => {
                 depth += 1;
                 current.push(ch);
             }
-            '>' => {
+            '>' if !in_quotes => {
                 depth -= 1;
                 current.push(ch);
             }
-            ',' if depth == 0 => {
+            ',' if depth == 0 && !in_quotes => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push(parse_address_single(&trimmed));
@@ -461,6 +470,27 @@ mod tests {
         assert_eq!(msg.to[0].1, "bob@example.com");
         assert_eq!(msg.subject, "Hello");
         assert_eq!(msg.body_html, "<p>Hi Bob</p>");
+    }
+
+    #[test]
+    fn quoted_comma_in_display_name_is_one_recipient() {
+        let raw = "From: me@tuta.io\r\nTo: \"Doe, John\" <john@x.com>, bob@y.com\r\nSubject: t\r\n\r\nbody\r\n";
+        let msg = parse_rfc2822(raw);
+        let addrs: Vec<&str> = msg.to.iter().map(|(_, a)| a.as_str()).collect();
+        assert_eq!(
+            addrs,
+            vec!["john@x.com", "bob@y.com"],
+            "a comma inside a quoted display name must not split the recipient"
+        );
+        assert_eq!(msg.to[0].0, "Doe, John", "display name should be preserved");
+    }
+
+    #[test]
+    fn plain_address_list_still_splits_on_commas() {
+        let raw = "From: me@tuta.io\r\nTo: a@x.com, b@y.com, c@z.com\r\nSubject: t\r\n\r\nbody\r\n";
+        let msg = parse_rfc2822(raw);
+        let addrs: Vec<&str> = msg.to.iter().map(|(_, a)| a.as_str()).collect();
+        assert_eq!(addrs, vec!["a@x.com", "b@y.com", "c@z.com"]);
     }
 
     #[test]
