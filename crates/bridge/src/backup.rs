@@ -126,9 +126,15 @@ pub async fn export_eml(
                 continue;
             }
 
-            // Fast path: decrypt the cached `.eml.enc` if we have it.
-            let (eml, from_cache) = match local_store.read_eml(&eid) {
-                Ok(Some(cached)) => (cached, true),
+            // Fast path: decrypt the cached `.eml.enc` if we have it. The
+            // decrypt (and the file write below) are CPU/disk bound and would
+            // pin the async worker running them. A GUI backup runs on the same
+            // runtime as the live IMAP/SMTP servers, so `block_in_place` hands
+            // the worker's other tasks off and keeps the servers responsive
+            // while a large mailbox is exported.
+            let cached = tokio::task::block_in_place(|| local_store.read_eml(&eid));
+            let (eml, from_cache) = match cached {
+                Ok(Some(c)) => (c, true),
                 _ => {
                     // Slow path: pull body + attachments from the server.
                     let details = backend.load_mail_details(mail).await.ok().flatten();
@@ -149,7 +155,7 @@ pub async fn export_eml(
                 }
             };
 
-            match std::fs::write(&path, eml.as_bytes()) {
+            match tokio::task::block_in_place(|| std::fs::write(&path, eml.as_bytes())) {
                 Ok(()) => {
                     stats.mails_written += 1;
                     stats.bytes += eml.len() as u64;
@@ -461,7 +467,7 @@ mod tests {
         (store, tmp)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn export_writes_eml_tree_with_cache_and_server_paths() {
         let (store, _tmp) = temp_store();
 
@@ -547,7 +553,7 @@ mod tests {
         std::fs::remove_dir_all(&out).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resume_only_fetches_the_new_mail() {
         let (store, _tmp) = temp_store();
         let out =
