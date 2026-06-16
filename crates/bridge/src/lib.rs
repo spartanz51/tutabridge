@@ -2,6 +2,7 @@ pub mod backup;
 pub mod bridge;
 pub mod config;
 pub mod event_handler;
+mod governed_client;
 pub mod imap;
 pub mod mail;
 pub mod mcp;

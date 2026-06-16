@@ -969,10 +969,15 @@ pub async fn login_with_2fa(
     password: Option<&str>,
     totp_callback: Option<TwoFactorCallback>,
 ) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
-    let rest_client: Arc<dyn RestClient> =
+    let raw_client: Arc<dyn RestClient> =
         Arc::new(tutasdk::net::native_rest_client::NativeRestClient::try_new()?);
+    // Route every SDK request through the rate governor (bounded concurrency +
+    // 429/503 backoff), replacing the SDK's header-only suspension layer so
+    // there is exactly one authoritative choke point for outbound API traffic.
+    let rest_client: Arc<dyn RestClient> =
+        Arc::new(crate::governed_client::GovernedRestClient::new(raw_client));
     let file_client: Arc<dyn FileClient> = Arc::new(DiskFileClient::new());
-    let sdk = Sdk::new(cfg.api_url.clone(), rest_client, file_client);
+    let sdk = Sdk::new_without_suspension(cfg.api_url.clone(), rest_client, file_client);
 
     if let Some(credentials) = load_credentials(&cfg.email) {
         log::info!("Resuming saved session...");
