@@ -9,7 +9,12 @@ use tokio::sync::Mutex;
 use tutabridge_core::bridge::BridgeHandle;
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    // Keep the bridge's own logs at debug but silence the HTTP/2 + TLS transport
+    // firehose (h2/hyper/rustls/mio), which otherwise buries every useful line.
+    // RUST_LOG still overrides this when set.
+    const LOG_FILTER: &str = "info,tutabridge_core=debug,tutabridge_gui=debug,\
+        h2=warn,hyper=warn,hyper_util=warn,rustls=warn,mio=warn,tokio_util=warn,want=warn";
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER)).init();
 
     tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default()
