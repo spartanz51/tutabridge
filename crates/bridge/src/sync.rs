@@ -74,8 +74,12 @@ impl MailStore {
     /// Arm a cooldown after a failed on-demand body fetch so the bridge does not
     /// immediately re-hit a throttled or erroring server for the same mail.
     pub(crate) fn mark_body_fetch_failed(&self, element_id: &str) {
-        crate::util::lock_recover(&self.body_fetch_cooldown)
-            .insert(element_id.to_string(), Instant::now() + BODY_FETCH_COOLDOWN);
+        let mut map = crate::util::lock_recover(&self.body_fetch_cooldown);
+        let now = Instant::now();
+        // Drop elapsed entries so the map stays bounded by the number of mails
+        // currently cooling down, not every mail that has ever failed.
+        map.retain(|_, until| *until > now);
+        map.insert(element_id.to_string(), now + BODY_FETCH_COOLDOWN);
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
