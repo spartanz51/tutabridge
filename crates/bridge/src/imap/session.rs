@@ -951,7 +951,7 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
 fn build_envelope(cached: &CachedMail) -> String {
     let mail = &cached.mail;
     let date = format_internal_date(mail.receivedDate.as_millis());
-    let subject = imap_quote(&mail.subject);
+    let subject = imap_string(&mail.subject);
 
     let from = format_envelope_addr(&mail.sender);
     let to = cached
@@ -973,12 +973,26 @@ fn build_envelope(cached: &CachedMail) -> String {
         .as_ref()
         .map(|id| format!("<{}.{}@tutabridge.local>", id.list_id, id.element_id))
         .unwrap_or_default();
+    let msg_id = imap_string(&msg_id);
 
-    format!("(\"{date}\" \"{subject}\" ({from}) ({from}) ({from}) ({to}) NIL NIL NIL \"{msg_id}\")")
+    format!("(\"{date}\" {subject} ({from}) ({from}) ({from}) ({to}) NIL NIL NIL {msg_id})")
 }
 
-fn imap_quote(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+/// Encode a string as an IMAP nstring. Safe 7-bit text becomes a quoted string;
+/// a value holding CR, LF, or 8-bit bytes becomes a server-side literal
+/// ({N}CRLF<octets>), since a quoted string may not contain any of those. An
+/// empty value becomes "". Without this, a mail subject or sender name with an
+/// embedded newline produces a malformed FETCH response and the client cannot
+/// parse the message list (an empty mailbox in Thunderbird).
+fn imap_string(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+    if s.bytes().any(|b| b == b'\r' || b == b'\n' || b >= 0x80) {
+        format!("{{{}}}\r\n{}", s.len(), s)
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 fn format_envelope_addr(addr: &tutasdk::entities::generated::tutanota::MailAddress) -> String {
@@ -986,9 +1000,14 @@ fn format_envelope_addr(addr: &tutasdk::entities::generated::tutanota::MailAddre
     let name = if addr.name.is_empty() {
         "NIL".to_string()
     } else {
-        format!("\"{}\"", addr.name.replace('"', "'"))
+        imap_string(&addr.name)
     };
-    format!("({} NIL \"{}\" \"{}\")", name, user, domain)
+    format!(
+        "({} NIL {} {})",
+        name,
+        imap_string(user),
+        imap_string(domain)
+    )
 }
 
 fn parse_seq_num(s: &str, max: u32) -> u32 {
@@ -1197,6 +1216,53 @@ mod tests {
             uid,
             deleted: false,
         }
+    }
+
+    // --- imap_string / ENVELOPE encoding ---
+
+    #[test]
+    fn imap_string_quotes_plain_ascii() {
+        assert_eq!(imap_string("Hello world"), "\"Hello world\"");
+    }
+
+    #[test]
+    fn imap_string_escapes_quote_and_backslash() {
+        assert_eq!(imap_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
+    fn imap_string_empty_is_empty_quotes() {
+        assert_eq!(imap_string(""), "\"\"");
+    }
+
+    #[test]
+    fn imap_string_uses_literal_for_newline() {
+        // A quoted string may not contain CR/LF, so it must become a literal.
+        let s = "La\nselection";
+        assert_eq!(imap_string(s), format!("{{{}}}\r\n{}", s.len(), s));
+    }
+
+    #[test]
+    fn imap_string_uses_literal_for_8bit() {
+        let s = "sélection"; // UTF-8 'é' is 8-bit
+        assert_eq!(imap_string(s), format!("{{{}}}\r\n{}", s.len(), s));
+    }
+
+    #[test]
+    fn build_envelope_newline_subject_uses_literal() {
+        // Regression: a newline in the subject used to be emitted as a quoted
+        // string, producing a malformed FETCH response that broke the client's
+        // parse of the message list (an empty mailbox in Thunderbird).
+        let subj = "La\nselection Courtois - Le bien du mois";
+        let env = build_envelope(&make_test_mail(1, subj, false));
+        assert!(
+            env.contains(&format!("{{{}}}\r\n{}", subj.len(), subj)),
+            "subject must be a literal, got: {env}"
+        );
+        assert!(
+            !env.contains("\"La"),
+            "subject must not be a quoted string holding the newline: {env}"
+        );
     }
 
     // --- parse_command ---
@@ -1420,8 +1486,11 @@ mod tests {
             _errors: Default::default(),
         };
         let result = format_envelope_addr(&addr);
-        // Inner quotes replaced with single quotes, wrapped in IMAP string delimiters
-        assert_eq!(result, "(\"John 'JD' Doe\" NIL \"john\" \"example.com\")");
+        // Inner quotes are backslash-escaped inside the IMAP quoted string.
+        assert_eq!(
+            result,
+            "(\"John \\\"JD\\\" Doe\" NIL \"john\" \"example.com\")"
+        );
     }
 
     // --- extract_headers (via rfc2822 module) ---
@@ -1486,28 +1555,6 @@ mod tests {
     #[test]
     fn test_parse_seq_num_negative() {
         assert_eq!(parse_seq_num("-1", 100), 0);
-    }
-
-    // --- imap_quote ---
-
-    #[test]
-    fn test_imap_quote_plain() {
-        assert_eq!(imap_quote("Hello World"), "Hello World");
-    }
-
-    #[test]
-    fn test_imap_quote_with_quotes() {
-        assert_eq!(imap_quote("He said \"hello\""), "He said \\\"hello\\\"");
-    }
-
-    #[test]
-    fn test_imap_quote_with_backslash() {
-        assert_eq!(imap_quote("path\\to\\file"), "path\\\\to\\\\file");
-    }
-
-    #[test]
-    fn test_imap_quote_both() {
-        assert_eq!(imap_quote("a\"b\\c"), "a\\\"b\\\\c");
     }
 
     // --- build_envelope: subject with quotes ---
