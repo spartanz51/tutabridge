@@ -1640,6 +1640,7 @@ mod tests {
         unread_calls: Mutex<Vec<(Vec<IdTupleGenerated>, bool)>>,
         sent: Mutex<Vec<ParsedMessage>>,
         moved: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
+        fail_details: Mutex<bool>,
     }
 
     impl MockBackend {
@@ -1651,7 +1652,12 @@ mod tests {
                 unread_calls: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
                 moved: Mutex::new(Vec::new()),
+                fail_details: Mutex::new(false),
             }
+        }
+
+        fn set_fail_details(&self, v: bool) {
+            *self.fail_details.lock().unwrap() = v;
         }
 
         fn with_mails(mails: Vec<Mail>) -> Self {
@@ -1734,6 +1740,48 @@ mod tests {
         assert_eq!(moved.len(), 1);
         assert_eq!(moved[0].1, "cust");
         assert_eq!(moved[0].0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn on_demand_body_fetch_failure_returns_no_and_cooldowns() {
+        let mail = make_mail("ed", "subj", false);
+        let backend = Arc::new(MockBackend::with_mails(vec![mail.clone()]));
+        backend.set_fail_details(true);
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store
+            .set_folder(
+                "inbox",
+                vec![StoredMail {
+                    mail,
+                    details: None,
+                    rfc2822: None,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
+            )
+            .await;
+        let mut session = ImapSession::new(store.clone(), backend.clone(), None, None);
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+
+        // A failed on-demand body fetch returns NO [UNAVAILABLE] (not a fake
+        // body) and arms the shared cooldown.
+        let resp = session.handle_command("c UID FETCH 1 (BODY[])").await;
+        assert!(
+            resp.last().unwrap().contains("NO [UNAVAILABLE]"),
+            "expected NO on failure, got {resp:?}"
+        );
+        assert!(store.body_fetch_on_cooldown("ed"));
+
+        // While cooling down, a repeat fetch is short-circuited to NO without
+        // touching the backend, even though it would now succeed.
+        backend.set_fail_details(false);
+        let resp2 = session.handle_command("d UID FETCH 1 (BODY[])").await;
+        assert!(
+            resp2.last().unwrap().contains("NO [UNAVAILABLE]"),
+            "cooldown should keep returning NO, got {resp2:?}"
+        );
     }
 
     #[tokio::test]
@@ -1860,6 +1908,9 @@ mod tests {
             Ok(None)
         }
         async fn load_mail_details(&self, mail: &Mail) -> Result<Option<MailDetails>, String> {
+            if *self.fail_details.lock().unwrap() {
+                return Err("simulated Too Many Requests".to_string());
+            }
             let key = mail
                 ._id
                 .as_ref()
