@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use tokio::sync::{watch, RwLock};
@@ -13,6 +13,10 @@ use crate::tuta::{FolderInfo, MailBackend};
 const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
 const INTER_FOLDER_DELAY: Duration = Duration::from_millis(300);
 const MAX_RETRIES: u32 = 3;
+/// How long a mail whose on-demand body fetch just failed is skipped before the
+/// bridge will try the API again for it. Stops a client from re-triggering a
+/// fetch for the same message on every redraw while the server is throttling.
+const BODY_FETCH_COOLDOWN: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct StoredMail {
@@ -36,6 +40,9 @@ pub struct MailStore {
     folder_list: RwLock<Vec<FolderInfo>>,
     generation: watch::Sender<u64>,
     gen_counter: std::sync::atomic::AtomicU64,
+    /// element_id -> instant until which an on-demand body fetch is skipped,
+    /// armed after a fetch failure. Shared across IMAP connections.
+    body_fetch_cooldown: Mutex<HashMap<String, Instant>>,
 }
 
 impl MailStore {
@@ -46,7 +53,29 @@ impl MailStore {
             folder_list: RwLock::new(Vec::new()),
             generation: tx,
             gen_counter: std::sync::atomic::AtomicU64::new(0),
+            body_fetch_cooldown: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// True if a recent on-demand body fetch for `element_id` failed and its
+    /// cooldown has not yet elapsed. Expired entries are dropped lazily.
+    pub(crate) fn body_fetch_on_cooldown(&self, element_id: &str) -> bool {
+        let mut map = crate::util::lock_recover(&self.body_fetch_cooldown);
+        match map.get(element_id) {
+            Some(&until) if until > Instant::now() => true,
+            Some(_) => {
+                map.remove(element_id);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Arm a cooldown after a failed on-demand body fetch so the bridge does not
+    /// immediately re-hit a throttled or erroring server for the same mail.
+    pub(crate) fn mark_body_fetch_failed(&self, element_id: &str) {
+        crate::util::lock_recover(&self.body_fetch_cooldown)
+            .insert(element_id.to_string(), Instant::now() + BODY_FETCH_COOLDOWN);
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -1125,6 +1154,22 @@ mod tests {
             uid,
             attachments_pending: false,
         }
+    }
+
+    #[test]
+    fn body_fetch_cooldown_blocks_then_expires() {
+        let store = MailStore::new();
+        assert!(!store.body_fetch_on_cooldown("mail-a"));
+        store.mark_body_fetch_failed("mail-a");
+        assert!(store.body_fetch_on_cooldown("mail-a"));
+        // A different mail is unaffected.
+        assert!(!store.body_fetch_on_cooldown("mail-b"));
+        // An elapsed entry is treated as expired and dropped lazily.
+        crate::util::lock_recover(&store.body_fetch_cooldown).insert(
+            "mail-a".to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+        assert!(!store.body_fetch_on_cooldown("mail-a"));
     }
 
     #[tokio::test]

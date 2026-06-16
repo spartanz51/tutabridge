@@ -423,7 +423,17 @@ impl ImapSession {
                     self.mails[idx].rfc2822 = Some(rfc);
                     self.mails[idx].body_loaded = true;
                 } else {
-                    // Out of the prefetch window — fetch the body on demand.
+                    // Out of the prefetch window: fetch the body on demand,
+                    // unless this mail is in a post-failure cooldown (do not
+                    // re-hit a throttled server on every client redraw).
+                    if let Some(eid) = &elem_id {
+                        if self.store.body_fetch_on_cooldown(eid) {
+                            return vec![format!(
+                                "{} NO [UNAVAILABLE] message body temporarily unavailable, try again later\r\n",
+                                tag
+                            )];
+                        }
+                    }
                     let mail = self.mails[idx].mail.clone();
                     match self.backend.load_mail_details(&mail).await {
                         Ok(Some(details)) => {
@@ -459,10 +469,19 @@ impl ImapSession {
                             self.mails[idx].body_loaded = true;
                             debug!("uid={} has no body source", self.mails[idx].uid);
                         }
-                        Err(e) => log::warn!(
-                            "On-demand body fetch failed for uid={}: {e}",
-                            self.mails[idx].uid
-                        ),
+                        Err(e) => {
+                            log::warn!(
+                                "On-demand body fetch failed for uid={}: {e}",
+                                self.mails[idx].uid
+                            );
+                            if let Some(eid) = &elem_id {
+                                self.store.mark_body_fetch_failed(eid);
+                            }
+                            return vec![format!(
+                                "{} NO [UNAVAILABLE] could not fetch message body, try again later\r\n",
+                                tag
+                            )];
+                        }
                     }
                 }
             }
@@ -1038,19 +1057,31 @@ fn parse_store_args(args: &str) -> (String, String) {
     (seq, rest)
 }
 
+/// Whether a FETCH item list requires the real message body to be loaded.
+///
+/// Only full-body content does: `BODY[]` / `BODY.PEEK[]`, a numbered MIME part
+/// (`BODY[1]`), `BODY[TEXT]`, or a standalone `RFC822` / `RFC822.TEXT`. Items the
+/// bridge answers from metadata alone must NOT trigger an on-demand fetch:
+/// `ENVELOPE`, `BODY[HEADER...]`, `BODYSTRUCTURE`, `RFC822.SIZE`, `FLAGS`, etc.
+/// Treating header/envelope requests as body requests made the client's
+/// list-building (one such fetch per message) download the entire mailbox.
+/// Whether a FETCH item list requires the real message body to be loaded.
+///
+/// The bridge serves the full message for `BODY[]` / `BODY.PEEK[]` and a
+/// standalone `RFC822`; only those need the body. Envelope, header, size and
+/// structure items (`ENVELOPE`, `BODY[HEADER...]`, `RFC822.SIZE`,
+/// `BODYSTRUCTURE`, `FLAGS`, ...) are answered from metadata and must NOT
+/// trigger an on-demand fetch. Treating header/envelope requests as body
+/// requests made the client's list-building (one such fetch per message)
+/// download the entire mailbox.
 fn needs_body(items: &str) -> bool {
     let u = items.to_uppercase();
-    if u.contains("BODY[") || u.contains("BODY.PEEK[") || u.contains("ENVELOPE") {
+    if u.contains("BODY[]") || u.contains("BODY.PEEK[]") {
         return true;
     }
-    // Match "RFC822" as a standalone fetch item but not "RFC822.SIZE" or "RFC822.HEADER"
-    for token in u.split_whitespace() {
-        let token = token.trim_matches(|c| c == '(' || c == ')');
-        if token == "RFC822" {
-            return true;
-        }
-    }
-    false
+    // Standalone RFC822 (a full message), but not RFC822.SIZE / .HEADER / .TEXT.
+    u.split(|c: char| c == '(' || c == ')' || c.is_whitespace())
+        .any(|token| token == "RFC822")
 }
 
 fn parse_login_args(args: &str) -> (String, String) {
@@ -1360,7 +1391,7 @@ mod tests {
         assert!(needs_body("(BODY[])"));
         assert!(needs_body("(BODY.PEEK[])"));
         assert!(needs_body("(RFC822)"));
-        assert!(needs_body("(ENVELOPE)"));
+        assert!(!needs_body("(ENVELOPE)"));
         assert!(needs_body("(FLAGS BODY[])"));
         assert!(!needs_body("(FLAGS)"));
         assert!(!needs_body("(FLAGS UID INTERNALDATE)"));
@@ -1565,6 +1596,31 @@ mod tests {
         let resp = build_fetch_response(1, &cached, "(ENVELOPE)", false);
         assert!(resp.contains("\\\"Important\\\""));
         assert!(!resp.contains("\"\"Important\"\""));
+    }
+
+    // --- needs_body: only real body content triggers an on-demand fetch ---
+
+    #[test]
+    fn needs_body_skips_metadata_and_header_fetches() {
+        // List-building items are answered from metadata, no fetch.
+        assert!(!needs_body("(FLAGS UID)"));
+        assert!(!needs_body("(ENVELOPE)"));
+        assert!(!needs_body("(FLAGS UID RFC822.SIZE ENVELOPE)"));
+        assert!(!needs_body(
+            "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])"
+        ));
+        assert!(!needs_body("(UID RFC822.SIZE BODYSTRUCTURE FLAGS)"));
+        assert!(!needs_body("(RFC822.HEADER)"));
+        assert!(!needs_body("(BODY.PEEK[1.MIME])"));
+    }
+
+    #[test]
+    fn needs_body_triggers_for_body_content() {
+        assert!(needs_body("(BODY[])"));
+        assert!(needs_body("(BODY.PEEK[])"));
+        assert!(needs_body("(RFC822)"));
+        assert!(needs_body("(FLAGS BODY.PEEK[])"));
+        assert!(needs_body("BODY[]"));
     }
 
     // =================================================================
