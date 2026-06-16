@@ -5,7 +5,7 @@ import { ConnectionPanel } from "./components/ConnectionPanel";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { BackupPanel } from "./components/BackupPanel";
 import { statusLabel, isError } from "./types";
-import logo from "./assets/tuta-logo.svg";
+import logo from "./assets/logo.png";
 import "./App.css";
 
 type Tab = "dashboard" | "connection" | "config" | "backup";
