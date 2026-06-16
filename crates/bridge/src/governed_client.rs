@@ -37,9 +37,11 @@ const MAX_IN_FLIGHT: usize = 4;
 /// First step of the default backoff, used when the server throttles without
 /// telling us how long to wait.
 const DEFAULT_BACKOFF_BASE: Duration = Duration::from_secs(2);
-/// Ceiling for any single backoff (server-provided or default), so one throttle
-/// can never stall the bridge for minutes.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// Ceiling for our own escalating backoff when the server gives no hint.
+const MAX_DEFAULT_BACKOFF: Duration = Duration::from_secs(60);
+/// Ceiling for a server-requested wait. We honor the server's retry-after, but
+/// cap it so a pathological header cannot stall the bridge indefinitely.
+const MAX_SERVER_BACKOFF: Duration = Duration::from_secs(300);
 
 /// Response headers Tuta uses to advertise a throttle duration, in seconds.
 /// Header names reach us lowercased (see [`RestResponse`]).
@@ -102,12 +104,17 @@ impl GovernedRestClient {
     /// escalating default (2s, 4s, 8s, ...) capped at [`MAX_BACKOFF`].
     fn backoff_for(&self, server_secs: Option<u64>) -> Duration {
         if let Some(secs) = server_secs {
+            // Trust the server's requested wait (floored, capped only to avoid a
+            // pathological stall).
             self.consecutive_throttles.store(0, Ordering::Relaxed);
-            return Duration::from_secs(secs).clamp(DEFAULT_BACKOFF_BASE, MAX_BACKOFF);
+            return Duration::from_secs(secs).clamp(DEFAULT_BACKOFF_BASE, MAX_SERVER_BACKOFF);
         }
+        // No hint from the server: escalate our own guess, capped tighter.
         let n = self.consecutive_throttles.fetch_add(1, Ordering::Relaxed);
         let factor = 1u32 << n.min(5); // 1, 2, 4, 8, 16, 32
-        DEFAULT_BACKOFF_BASE.saturating_mul(factor).min(MAX_BACKOFF)
+        DEFAULT_BACKOFF_BASE
+            .saturating_mul(factor)
+            .min(MAX_DEFAULT_BACKOFF)
     }
 
     fn note_success(&self) {
@@ -250,7 +257,7 @@ mod tests {
         }));
         // Below the floor clamps up to the base; above the ceiling clamps down.
         assert_eq!(g.backoff_for(Some(1)), DEFAULT_BACKOFF_BASE);
-        assert_eq!(g.backoff_for(Some(9999)), MAX_BACKOFF);
+        assert_eq!(g.backoff_for(Some(9999)), MAX_SERVER_BACKOFF);
         assert_eq!(g.backoff_for(Some(10)), Duration::from_secs(10));
     }
 
@@ -266,8 +273,8 @@ mod tests {
         assert_eq!(g.backoff_for(None), Duration::from_secs(8));
         assert_eq!(g.backoff_for(None), Duration::from_secs(16));
         assert_eq!(g.backoff_for(None), Duration::from_secs(32));
-        assert_eq!(g.backoff_for(None), MAX_BACKOFF); // 64 -> capped at 60
-        assert_eq!(g.backoff_for(None), MAX_BACKOFF);
+        assert_eq!(g.backoff_for(None), MAX_DEFAULT_BACKOFF); // 64 -> capped at 60
+        assert_eq!(g.backoff_for(None), MAX_DEFAULT_BACKOFF);
     }
 
     #[test]
