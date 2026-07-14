@@ -897,7 +897,7 @@ fn join_addrs(addrs: &[MailAddress]) -> String {
 }
 
 fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: bool) -> String {
-    let items_upper = items.to_uppercase();
+    let items_upper = items.to_ascii_uppercase();
     let mut parts = Vec::new();
 
     if uid_mode || items_upper.contains("UID") {
@@ -988,7 +988,11 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
 /// field list — answering with a rewritten list makes strict clients (Apple
 /// Mail) drop the data on the floor.
 fn parse_header_fields_section(items: &str) -> Option<(String, Vec<String>, bool)> {
-    let upper = items.to_uppercase();
+    // ASCII-only uppercasing: it preserves byte offsets, so indices found in
+    // `upper` stay valid for slicing `items`. `to_uppercase()` can grow the
+    // string (one char mapping to several), shifting the offsets and panicking
+    // the slice below on crafted non-ASCII input.
+    let upper = items.to_ascii_uppercase();
     let start = upper.find("HEADER.FIELDS")?;
     let negate = upper[start..].starts_with("HEADER.FIELDS.NOT");
     let open = start + upper[start..].find('(')?;
@@ -1134,7 +1138,7 @@ fn parse_store_args(args: &str) -> (String, String) {
 /// requests made the client's list-building (one such fetch per message)
 /// download the entire mailbox.
 fn needs_body(items: &str) -> bool {
-    let u = items.to_uppercase();
+    let u = items.to_ascii_uppercase();
     if u.contains("BODY[]") || u.contains("BODY.PEEK[]") {
         return true;
     }
@@ -1705,6 +1709,18 @@ mod tests {
         assert!(negate);
 
         assert!(parse_header_fields_section("(FLAGS UID)").is_none());
+    }
+
+    #[test]
+    fn parse_header_fields_section_survives_length_changing_unicode() {
+        // 'ﬀ' (3 bytes) uppercases to "FF" (2 bytes) under to_uppercase(),
+        // shrinking the string and shifting every later byte offset; the parser
+        // must not slice `items` with offsets computed on the shifted string.
+        let (section, fields, negate) =
+            parse_header_fields_section("(ﬀ BODY.PEEK[HEADER.FIELDS (From To)])").unwrap();
+        assert_eq!(section, "HEADER.FIELDS (From To)");
+        assert_eq!(fields, vec!["FROM".to_string(), "TO".to_string()]);
+        assert!(!negate);
     }
 
     #[test]
