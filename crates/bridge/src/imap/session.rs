@@ -944,14 +944,26 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
         if let Some(ref rfc) = cached.rfc2822 {
             parts.push(format!("BODY[] {{{}}}\r\n{}", rfc.len(), rfc));
         }
-    } else if items_upper.contains("HEADER.FIELDS") {
+    } else if let Some((section, fields, negate)) = parse_header_fields_section(items) {
         if let Some(ref rfc) = cached.rfc2822 {
-            let headers = extract_headers(rfc);
+            let headers = filter_header_fields(rfc, &fields, negate);
             parts.push(format!(
-                "BODY[HEADER.FIELDS (DATE FROM SUBJECT TO CC MESSAGE-ID)] {{{}}}\r\n{}",
+                "BODY[{}] {{{}}}\r\n{}",
+                section,
                 headers.len(),
                 headers
             ));
+        }
+    } else if items_upper.contains("HEADER") {
+        // Bare BODY[HEADER] / BODY.PEEK[HEADER] / RFC822.HEADER.
+        if let Some(ref rfc) = cached.rfc2822 {
+            let headers = extract_headers(rfc);
+            let item = if items_upper.contains("RFC822.HEADER") {
+                "RFC822.HEADER"
+            } else {
+                "BODY[HEADER]"
+            };
+            parts.push(format!("{} {{{}}}\r\n{}", item, headers.len(), headers));
         }
     }
 
@@ -965,6 +977,53 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
     }
 
     format!("* {} FETCH ({})\r\n", seq, parts.join(" "))
+}
+
+/// Parse `HEADER.FIELDS (...)` / `HEADER.FIELDS.NOT (...)` out of a FETCH item
+/// list. Returns the section echoed as the client sent it, the field names
+/// uppercased for matching, and whether the match is negated.
+///
+/// Clients match FETCH data items to their pending request by the literal
+/// section string (RFC 3501 §7.4.2), so the response must echo the requested
+/// field list — answering with a rewritten list makes strict clients (Apple
+/// Mail) drop the data on the floor.
+fn parse_header_fields_section(items: &str) -> Option<(String, Vec<String>, bool)> {
+    let upper = items.to_uppercase();
+    let start = upper.find("HEADER.FIELDS")?;
+    let negate = upper[start..].starts_with("HEADER.FIELDS.NOT");
+    let open = start + upper[start..].find('(')?;
+    let close = open + upper[open..].find(')')?;
+    let keyword = if negate {
+        "HEADER.FIELDS.NOT"
+    } else {
+        "HEADER.FIELDS"
+    };
+    let section = format!("{} {}", keyword, &items[open..=close]);
+    let fields = upper[open + 1..close]
+        .split_whitespace()
+        .map(|f| f.trim_matches('"').to_string())
+        .collect();
+    Some((section, fields, negate))
+}
+
+/// Header lines matching (or, when negated, not matching) `fields` — with
+/// continuation lines kept attached to their header — terminated by the blank
+/// line that delimits a HEADER.FIELDS section.
+fn filter_header_fields(rfc: &str, fields: &[String], negate: bool) -> String {
+    let header_len = rfc.find("\r\n\r\n").map(|p| p + 2).unwrap_or(rfc.len());
+    let mut out = String::new();
+    let mut keep = false;
+    for line in rfc[..header_len].split_inclusive("\r\n") {
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            let name = line.split(':').next().unwrap_or("").trim().to_uppercase();
+            keep = fields.iter().any(|f| *f == name) != negate;
+        }
+        if keep {
+            out.push_str(line);
+        }
+    }
+    out.push_str("\r\n");
+    out
 }
 
 fn build_envelope(cached: &CachedMail) -> String {
@@ -1596,6 +1655,66 @@ mod tests {
         let resp = build_fetch_response(1, &cached, "(ENVELOPE)", false);
         assert!(resp.contains("\\\"Important\\\""));
         assert!(!resp.contains("\"\"Important\"\""));
+    }
+
+    // --- HEADER.FIELDS: section echo and field filtering ---
+
+    #[test]
+    fn header_fields_response_echoes_requested_list_verbatim() {
+        let cached = make_test_mail(1, "Test", false);
+        // Apple Mail-style request: long list, lowercase, includes fields the
+        // message doesn't have. The response section must echo this list.
+        let resp = build_fetch_response(
+            1,
+            &cached,
+            "(BODY.PEEK[HEADER.FIELDS (date subject from x-priority x-universally-unique-identifier)])",
+            false,
+        );
+        assert!(
+            resp.contains(
+                "BODY[HEADER.FIELDS (date subject from x-priority x-universally-unique-identifier)]"
+            ),
+            "section must echo the client's field list: {resp}"
+        );
+        assert!(resp.contains("Subject: Test"));
+        assert!(resp.contains("From: sender@tuta.com"));
+    }
+
+    #[test]
+    fn header_fields_filters_to_requested_fields() {
+        let rfc = "Date: Wed, 25 Dec 2024 12:30:45 +0000\r\nFrom: a@b.c\r\nX-Long: first\r\n\tcontinued\r\nSubject: Hi\r\n\r\nBody\r\n";
+        let got = filter_header_fields(rfc, &["SUBJECT".into(), "X-LONG".into()], false);
+        assert_eq!(got, "X-Long: first\r\n\tcontinued\r\nSubject: Hi\r\n\r\n");
+        // Negated: everything except the listed fields.
+        let not = filter_header_fields(rfc, &["X-LONG".into(), "DATE".into()], true);
+        assert_eq!(not, "From: a@b.c\r\nSubject: Hi\r\n\r\n");
+    }
+
+    #[test]
+    fn parse_header_fields_section_variants() {
+        let (section, fields, negate) =
+            parse_header_fields_section("(BODY.PEEK[HEADER.FIELDS (From To)])").unwrap();
+        assert_eq!(section, "HEADER.FIELDS (From To)");
+        assert_eq!(fields, vec!["FROM".to_string(), "TO".to_string()]);
+        assert!(!negate);
+
+        let (section, fields, negate) =
+            parse_header_fields_section("(BODY[HEADER.FIELDS.NOT (received)])").unwrap();
+        assert_eq!(section, "HEADER.FIELDS.NOT (received)");
+        assert_eq!(fields, vec!["RECEIVED".to_string()]);
+        assert!(negate);
+
+        assert!(parse_header_fields_section("(FLAGS UID)").is_none());
+    }
+
+    #[test]
+    fn bare_header_fetch_returns_all_headers() {
+        let cached = make_test_mail(1, "Test", false);
+        let resp = build_fetch_response(1, &cached, "(BODY.PEEK[HEADER])", false);
+        assert!(resp.contains("BODY[HEADER] {"), "got: {resp}");
+        assert!(resp.contains("Subject: Test"));
+        let resp = build_fetch_response(1, &cached, "(RFC822.HEADER)", false);
+        assert!(resp.contains("RFC822.HEADER {"), "got: {resp}");
     }
 
     // --- needs_body: only real body content triggers an on-demand fetch ---
