@@ -1,4 +1,4 @@
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Lock a std `Mutex`, recovering the guard if a previous holder poisoned it by
 /// panicking. Our locked sections are short and panic-free, so this should
@@ -9,6 +9,16 @@ use std::sync::{Mutex, MutexGuard};
 /// sync for the rest of the process's life.
 pub fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// [`lock_recover`] for a std `RwLock` read guard.
+pub fn rwlock_read_recover<T>(l: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// [`lock_recover`] for a std `RwLock` write guard.
+pub fn rwlock_write_recover<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    l.write().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

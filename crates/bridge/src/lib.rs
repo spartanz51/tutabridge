@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod body_cache;
 pub mod bridge;
 pub mod config;
 pub mod event_handler;

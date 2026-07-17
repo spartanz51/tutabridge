@@ -350,19 +350,26 @@ async fn apply_mail_set_entry_create(
         });
         let mut stored = StoredMail {
             mail,
-            details: details.clone(),
-            rfc2822: rfc2822.clone(),
+            body_loaded: rfc2822.is_some(),
             uid: 0,
             attachments_pending: false,
         };
         // Persist the body straight away so the IMAP layer can serve FETCH
-        // BODY[] without a placeholder, and the prefetch loop skips it.
-        if let Some(eml) = rfc2822.as_deref() {
-            if let Err(e) = local_store.write_eml(&mail_eid, eml) {
+        // BODY[] without a placeholder, and the prefetch loop skips it. The
+        // in-memory copy goes into the bounded body cache.
+        if let Some(eml) = rfc2822 {
+            if let Err(e) = local_store.write_eml(&mail_eid, &eml) {
                 warn!("Failed to cache eml for {}: {e}", mail_eid);
             } else if let Err(e) = local_store.mark_has_details(&mail_eid) {
                 warn!("Failed to mark has_details for {}: {e}", mail_eid);
             }
+            store.bodies().insert(
+                &mail_eid,
+                crate::body_cache::BodyEntry {
+                    details,
+                    rfc2822: eml,
+                },
+            );
         }
         assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
         return;
@@ -390,8 +397,7 @@ async fn apply_mail_set_entry_create(
             );
             let mut stored = StoredMail {
                 mail,
-                details: None,
-                rfc2822: None,
+                body_loaded: false,
                 uid: 0,
                 attachments_pending: false,
             };
