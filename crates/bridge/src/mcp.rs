@@ -387,12 +387,12 @@ async fn tool_get_message(state: &McpState, args: &Value) -> Result<String, Stri
 /// demand. Returns `None` (→ JSON null) when no body source exists.
 async fn load_body_text(
     state: &McpState,
-    folder_id: &str,
+    _folder_id: &str,
     element_id: &str,
     stored: &StoredMail,
 ) -> Option<String> {
-    if let Some((_details, rfc)) = state.store.get_details(folder_id, element_id).await {
-        return Some(extract_body_text(&rfc));
+    if let Some(body) = state.store.get_body(element_id).await {
+        return Some(extract_body_text(&body.rfc2822));
     }
     match state.backend.load_mail_details(&stored.mail).await {
         Ok(Some(details)) => {

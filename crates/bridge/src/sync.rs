@@ -21,8 +21,12 @@ const BODY_FETCH_COOLDOWN: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct StoredMail {
     pub mail: Mail,
-    pub details: Option<MailDetails>,
-    pub rfc2822: Option<String>,
+    /// True when the real body is available locally (in the [`BodyCache`] or
+    /// as a persisted `.eml.enc`). The body content itself is NOT stored here:
+    /// keeping every rendered body (attachments inlined) in the metadata store
+    /// grew the process by the size of the mailbox. Bodies live in the bounded
+    /// [`crate::body_cache::BodyCache`], backed by the on-disk cache.
+    pub body_loaded: bool,
     /// Stable IMAP UID within the folder, persisted across restarts.
     pub uid: u32,
     /// True while the mail's body has been rendered without its attachment
@@ -50,6 +54,8 @@ pub struct MailStore {
     /// element_id -> instant until which an on-demand body fetch is skipped,
     /// armed after a fetch failure. Shared across IMAP connections.
     body_fetch_cooldown: Mutex<HashMap<String, Instant>>,
+    /// Bounded LRU of rendered bodies (see [`crate::body_cache`]).
+    bodies: crate::body_cache::BodyCache,
 }
 
 impl MailStore {
@@ -63,7 +69,14 @@ impl MailStore {
             details_generation: details_tx,
             gen_counter: std::sync::atomic::AtomicU64::new(0),
             body_fetch_cooldown: Mutex::new(HashMap::new()),
+            bodies: crate::body_cache::BodyCache::new(),
         })
+    }
+
+    /// The bounded body cache. Wire the disk fallback once at startup with
+    /// [`crate::body_cache::BodyCache::set_local_store`].
+    pub fn bodies(&self) -> &crate::body_cache::BodyCache {
+        &self.bodies
     }
 
     /// True if a recent on-demand body fetch for `element_id` failed and its
@@ -124,21 +137,13 @@ impl MailStore {
             .unwrap_or_default()
     }
 
-    pub async fn get_details(
+    /// A mail's rendered body (LRU hit, or re-read from the encrypted disk
+    /// cache). `None` when the body was never fetched.
+    pub async fn get_body(
         &self,
-        folder_id: &str,
         element_id: &str,
-    ) -> Option<(MailDetails, String)> {
-        let folders = self.folders.read().await;
-        let folder = folders.get(folder_id)?;
-        folder.iter().find_map(|m| {
-            let eid = m.mail._id.as_ref()?.element_id.to_string();
-            if eid == element_id {
-                Some((m.details.clone()?, m.rfc2822.clone()?))
-            } else {
-                None
-            }
-        })
+    ) -> Option<std::sync::Arc<crate::body_cache::BodyEntry>> {
+        self.bodies.get(element_id).await
     }
 
     /// The current folder list (system + custom).
@@ -348,12 +353,18 @@ impl MailStore {
                     .as_deref()
                     == Some(element_id)
             }) {
-                m.details = Some(details);
-                m.rfc2822 = Some(rfc2822);
+                m.body_loaded = true;
                 m.attachments_pending = attachments_pending;
             }
         }
         drop(folders);
+        self.bodies.insert(
+            element_id,
+            crate::body_cache::BodyEntry {
+                details: Some(details),
+                rfc2822,
+            },
+        );
         self.bump_details_generation();
     }
 
@@ -373,11 +384,11 @@ impl MailStore {
                     .as_deref()
                     == Some(element_id)
             }) {
-                m.rfc2822 = Some(rfc2822);
                 m.attachments_pending = false;
             }
         }
         drop(folders);
+        self.bodies.update_rfc2822(element_id, rfc2822);
         self.bump_details_generation();
     }
 
@@ -417,6 +428,10 @@ pub async fn run_syncer(
             sync_limit.to_string()
         }
     );
+
+    // Give the body cache its disk fallback: an evicted (or not-yet-loaded)
+    // body is re-read from the encrypted `.eml.enc` on first use.
+    store.bodies().set_local_store(local_store.clone());
 
     // Fetch the folder list first; everything is keyed off it.
     let folders = match retry(|| backend.list_folders()).await {
@@ -671,37 +686,24 @@ async fn load_cached_folder(
             let mail: Mail = serde_json::from_str(&meta.mail_json)
                 .map_err(|e| format!("Bad cached mail {}: {e}", meta.element_id))?;
 
-            // Always try to recover the full body from disk first: the `.eml`
-            // file is the source of truth and may exist even when the metadata
-            // row says otherwise (a schema migration drops the `mails` table but
-            // keeps the encrypted `.eml.enc` files, so `has_details` is reset to
-            // 0 on first boot after the migration). Self-heal the row when we
-            // find an orphaned body, so the prefetch loop knows to skip it on
-            // the next sweep.
-            let rfc2822 = match ls.read_eml(&meta.element_id) {
-                Ok(Some(eml)) => {
-                    if !meta.has_details {
-                        if let Err(e) = ls.mark_has_details(&meta.element_id) {
-                            warn!("Failed to heal has_details for {}: {e}", meta.element_id);
-                        }
-                    }
-                    Some(eml)
+            // The `.eml` file on disk is the source of truth for "body
+            // available" and may exist even when the metadata row says
+            // otherwise (a schema migration drops the `mails` table but keeps
+            // the encrypted `.eml.enc` files, so `has_details` is reset to 0 on
+            // first boot after the migration). Self-heal the row when we find
+            // an orphaned body. The body content itself is NOT loaded here:
+            // decrypting every cached body at boot pinned the whole mailbox in
+            // memory; bodies are pulled into the bounded cache on first use.
+            let body_loaded = ls.has_eml(&meta.element_id);
+            if body_loaded && !meta.has_details {
+                if let Err(e) = ls.mark_has_details(&meta.element_id) {
+                    warn!("Failed to heal has_details for {}: {e}", meta.element_id);
                 }
-                // No cached body: leave `rfc2822` empty rather than baking in a
-                // placeholder. A placeholder would look like a real body to the
-                // IMAP layer and suppress the on-demand fetch; `None` is what tells
-                // it the body still has to be pulled the first time it's opened.
-                Ok(None) => None,
-                Err(e) => {
-                    warn!("Failed to read cached eml {}: {e}", meta.element_id);
-                    None
-                }
-            };
+            }
 
             stored_mails.push(StoredMail {
                 mail,
-                details: None,
-                rfc2822,
+                body_loaded,
                 uid: meta.uid as u32,
                 attachments_pending: false,
             });
@@ -777,18 +779,16 @@ pub(crate) async fn sync_folder(
         if let Some(existing) = elem_id.as_ref().and_then(|id| existing_map.get(id)) {
             updated.push(StoredMail {
                 mail: mail.clone(),
-                details: existing.details.clone(),
-                rfc2822: existing.rfc2822.clone(),
+                body_loaded: existing.body_loaded,
                 uid,
                 attachments_pending: existing.attachments_pending,
             });
         } else {
-            // New mail, body not fetched yet — leave `rfc2822` empty so the
-            // IMAP layer fetches it on demand (a placeholder would mask that).
+            // New mail, body not fetched yet — the IMAP layer fetches it on
+            // demand the first time a client opens it.
             updated.push(StoredMail {
                 mail: mail.clone(),
-                details: None,
-                rfc2822: None,
+                body_loaded: false,
                 uid,
                 attachments_pending: false,
             });
@@ -858,7 +858,7 @@ async fn prefetch_details(
     // First pass — messages in the prefetch window still missing their `.eml`.
     let api_needed: Vec<Mail> = prefetch_window
         .iter()
-        .filter(|m| m.details.is_none())
+        .filter(|m| !m.body_loaded)
         .filter_map(|m| {
             let eid = m.mail._id.as_ref()?.element_id.to_string();
             if local_store.has_eml(&eid) {
@@ -880,8 +880,11 @@ async fn prefetch_details(
             if !m.attachments_pending {
                 return None;
             }
-            let details = m.details.clone()?;
             let eid = m.mail._id.as_ref()?.element_id.to_string();
+            // A pending mail is fresh (the race resolves within minutes), so
+            // its details are still hot in the body cache. If they were
+            // evicted, skip this sweep; the pending flag keeps it eligible.
+            let details = store.bodies().cached(&eid)?.details.clone()?;
             if let Some(last) = attachment_retry_history.get(&eid) {
                 if now.duration_since(*last) < ATTACHMENT_RETRY_THROTTLE {
                     return None;
@@ -1035,14 +1038,14 @@ async fn prefetch_details(
                     eid
                 );
                 // Clear the pending flag so we don't keep retrying a
-                // permanent failure (e.g. server returned 404).
-                store
-                    .update_mail_rfc2822(
-                        &folder.id,
-                        &eid,
-                        stored.rfc2822.clone().unwrap_or_default(),
-                    )
-                    .await;
+                // permanent failure (e.g. server returned 404). The body-only
+                // rendering already in the cache stays as-is.
+                let body_only = store
+                    .bodies()
+                    .cached(&eid)
+                    .map(|e| e.rfc2822.clone())
+                    .unwrap_or_default();
+                store.update_mail_rfc2822(&folder.id, &eid, body_only).await;
                 attachment_retry_history.remove(&eid);
             }
         }
@@ -1181,8 +1184,7 @@ mod tests {
     fn stored(mail: Mail, uid: u32) -> StoredMail {
         StoredMail {
             mail,
-            details: None,
-            rfc2822: None,
+            body_loaded: false,
             uid,
             attachments_pending: false,
         }

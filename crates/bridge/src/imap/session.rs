@@ -19,13 +19,11 @@ enum State {
 
 struct CachedMail {
     mail: Mail,
-    details: Option<MailDetails>,
-    rfc2822: Option<String>,
-    /// `rfc2822` always carries the real headers, but for messages outside the
-    /// body-prefetch window it holds a placeholder body. `body_loaded` tracks
-    /// whether the *body* is final: `true` once we have real details (or have
-    /// confirmed the message has no body source), `false` while a body FETCH
-    /// still needs to pull it on demand.
+    /// True once the real body is available locally (bounded body cache or
+    /// encrypted disk cache); `false` while a body FETCH still needs to pull
+    /// it on demand. The body content itself is never held in the session:
+    /// snapshots used to clone every loaded body per connection, multiplying
+    /// the mailbox in memory by the number of clients.
     body_loaded: bool,
     uid: u32,
     deleted: bool,
@@ -394,38 +392,29 @@ impl ImapSession {
                 continue;
             }
 
+            let elem_id = self.mails[idx]
+                .mail
+                ._id
+                .as_ref()
+                .map(|id| id.element_id.to_string());
+
             // Make sure we have a renderable body before answering a body
             // FETCH. The mailbox lists every message, but only the newest
             // `sync_limit` bodies are pre-warmed — older ones are fetched
             // here, on demand, the first time a client opens them.
             if needs_body(&items) && !self.mails[idx].body_loaded {
-                let elem_id = self.mails[idx]
-                    .mail
-                    ._id
-                    .as_ref()
-                    .map(|id| id.element_id.to_string());
-
-                if self.mails[idx].details.is_some() {
-                    // Have details already, just render the envelope.
-                    let rfc = mail_to_rfc2822(
-                        &self.mails[idx].mail,
-                        self.mails[idx].details.as_ref(),
-                        &[],
-                    );
-                    self.mails[idx].rfc2822 = Some(rfc);
-                    self.mails[idx].body_loaded = true;
-                } else if let Some((details, rfc)) = match (&elem_id, &self.selected_folder) {
-                    // The syncer may have filled it in since our snapshot.
-                    (Some(eid), Some(folder)) => self.store.get_details(&folder.id, eid).await,
-                    _ => None,
-                } {
-                    self.mails[idx].details = Some(details);
-                    self.mails[idx].rfc2822 = Some(rfc);
+                // The syncer (or another connection) may have fetched it
+                // since our snapshot; the disk cache also counts.
+                let available = match &elem_id {
+                    Some(eid) => self.store.get_body(eid).await.is_some(),
+                    None => false,
+                };
+                if available {
                     self.mails[idx].body_loaded = true;
                 } else {
-                    // Out of the prefetch window: fetch the body on demand,
-                    // unless this mail is in a post-failure cooldown (do not
-                    // re-hit a throttled server on every client redraw).
+                    // Fetch the body on demand, unless this mail is in a
+                    // post-failure cooldown (do not re-hit a throttled server
+                    // on every client redraw).
                     if let Some(eid) = &elem_id {
                         if self.store.body_fetch_on_cooldown(eid) {
                             return vec![format!(
@@ -445,27 +434,36 @@ impl ImapSession {
                             let refs: Vec<(&TutanotaFile, &[u8])> =
                                 atts.iter().map(|(f, d)| (f, d.as_slice())).collect();
                             let rfc = mail_to_rfc2822(&mail, Some(&details), &refs);
-                            // Share into the in-memory store so other
-                            // connections (and stats) see it too.
                             if let (Some(eid), Some(folder)) = (&elem_id, &self.selected_folder) {
+                                // Persist first: the in-memory cache is
+                                // bounded, so the encrypted `.eml.enc` is what
+                                // makes this fetch survive eviction/restart.
+                                self.persist_body(eid, &rfc);
+                                // Share into the store cache so other
+                                // connections (and stats) see it too.
                                 self.store
-                                    .update_mail_details(
-                                        &folder.id,
-                                        eid,
-                                        details.clone(),
-                                        rfc.clone(),
-                                        false,
-                                    )
+                                    .update_mail_details(&folder.id, eid, details, rfc, false)
                                     .await;
                             }
-                            self.mails[idx].details = Some(details);
-                            self.mails[idx].rfc2822 = Some(rfc);
                             self.mails[idx].body_loaded = true;
                         }
                         Ok(None) => {
-                            // Legacy mail with no body reference — headers only.
-                            // Mark loaded so we don't re-hit the network on
-                            // every body FETCH of a message that has no body.
+                            // Legacy mail with no body reference — headers
+                            // only. Persist a headers-only `.eml` (as the
+                            // prefetch path does) so we don't re-hit the
+                            // network on every body FETCH of a message that
+                            // has no body.
+                            if let Some(eid) = &elem_id {
+                                let rfc = mail_to_rfc2822(&mail, None, &[]);
+                                self.persist_body(eid, &rfc);
+                                self.store.bodies().insert(
+                                    eid,
+                                    crate::body_cache::BodyEntry {
+                                        details: None,
+                                        rfc2822: rfc,
+                                    },
+                                );
+                            }
                             self.mails[idx].body_loaded = true;
                             debug!("uid={} has no body source", self.mails[idx].uid);
                         }
@@ -486,9 +484,22 @@ impl ImapSession {
                 }
             }
 
+            // One body lookup per message, shared by every FETCH item that
+            // needs content. Real body requests may fall back to the disk
+            // cache; decoration items (sizes, envelopes, structures) use the
+            // warm cache only, so building a message list never storms the
+            // disk with per-mail decrypts.
+            let body = match &elem_id {
+                Some(eid) if needs_body(&items) && self.mails[idx].body_loaded => {
+                    self.store.get_body(eid).await
+                }
+                Some(eid) if fetch_items_use_content(&items) => self.store.bodies().cached(eid),
+                _ => None,
+            };
+
             let cached = &self.mails[idx];
             let seq = idx + 1;
-            let resp = build_fetch_response(seq, cached, &items, uid_mode);
+            let resp = build_fetch_response(seq, cached, &items, uid_mode, body.as_deref());
             responses.push(resp);
         }
 
@@ -510,7 +521,15 @@ impl ImapSession {
             .iter()
             .enumerate()
             .filter(|(i, cached)| {
-                let view = Self::build_search_view(*i, cached);
+                // Warm-cache lookup only: search must not pull thousands of
+                // bodies off the disk. A cold body falls back to the
+                // metadata-rendered placeholder (real headers, stub body).
+                let body = cached
+                    .mail
+                    ._id
+                    .as_ref()
+                    .and_then(|id| self.store.bodies().cached(&id.element_id.to_string()));
+                let view = Self::build_search_view(*i, cached, body.as_deref());
                 search::matches(&query, &view, &ctx)
             })
             .map(|(i, cached)| if uid_mode { cached.uid } else { (i + 1) as u32 })
@@ -532,16 +551,29 @@ impl ImapSession {
     /// Project a cached message onto the fields IMAP SEARCH compares. Derived
     /// strings (From / To / Cc / Bcc / headers) are owned by the [`MsgView`];
     /// the cheap ones (subject, body) borrow straight from `cached`.
-    fn build_search_view(idx: usize, cached: &CachedMail) -> MsgView<'_> {
-        let headers = cached
-            .rfc2822
-            .as_deref()
-            .map(extract_headers)
-            .unwrap_or_default();
+    fn build_search_view<'a>(
+        idx: usize,
+        cached: &'a CachedMail,
+        body: Option<&crate::body_cache::BodyEntry>,
+    ) -> MsgView<'a> {
+        // A cold body means headers/size come from the placeholder rendering
+        // (real headers from metadata, stub body), same as unloaded messages.
+        let placeholder: Option<String> = if body.is_none() {
+            Some(mail_to_rfc2822(&cached.mail, None, &[]))
+        } else {
+            None
+        };
+        let rfc: &str = body
+            .map(|b| b.rfc2822.as_str())
+            .or(placeholder.as_deref())
+            .unwrap_or("");
+        let headers = extract_headers(rfc);
+        let size = rfc.len() as u64;
 
-        // To/Cc/Bcc come from details when the body is loaded; otherwise only
-        // the envelope `firstRecipient` (rendered as To) is available.
-        let (to, cc, bcc) = match cached.details.as_ref() {
+        // To/Cc/Bcc come from details when the body entry is warm; otherwise
+        // only the envelope `firstRecipient` (rendered as To) is available.
+        let details = body.and_then(|b| b.details.as_ref());
+        let (to, cc, bcc) = match details {
             Some(d) => (
                 join_addrs(&d.recipients.toRecipients),
                 join_addrs(&d.recipients.ccRecipients),
@@ -559,9 +591,7 @@ impl ImapSession {
             ),
         };
 
-        let sent_ms = cached
-            .details
-            .as_ref()
+        let sent_ms = details
             .map(|d| d.sentDate.as_millis())
             .unwrap_or_else(|| cached.mail.receivedDate.as_millis());
 
@@ -586,7 +616,7 @@ impl ImapSession {
             sent_ms,
             unread: cached.mail.unread,
             deleted: cached.deleted,
-            size: cached.rfc2822.as_ref().map(|r| r.len() as u64).unwrap_or(0),
+            size,
         }
     }
 
@@ -783,55 +813,38 @@ impl ImapSession {
         )]
     }
 
-    async fn refresh_mails(&mut self, folder_id: &str) -> Result<(), String> {
-        let stored = self.store.get_folder(folder_id).await;
+    /// Persist an on-demand-fetched body to the encrypted disk cache. The
+    /// in-memory body cache is bounded, so this is what makes the fetch
+    /// survive eviction and restarts (and lets the prefetch loop skip it).
+    fn persist_body(&self, element_id: &str, rfc2822: &str) {
+        let Some(ls) = &self.local_store else {
+            return;
+        };
+        if let Err(e) = ls.write_eml(element_id, rfc2822) {
+            log::warn!("Failed to cache eml {}: {}", element_id, e);
+            return;
+        }
+        if let Err(e) = ls.mark_has_details(element_id) {
+            log::warn!("Failed to mark has_details {}: {}", element_id, e);
+        }
+    }
 
-        // Carry over already-loaded details/rfc for this session.
-        let old_cache: std::collections::HashMap<String, (Option<MailDetails>, Option<String>)> =
-            self.mails
-                .iter()
-                .filter_map(|m| {
-                    let eid = m.mail._id.as_ref()?.element_id.to_string();
-                    Some((eid, (m.details.clone(), m.rfc2822.clone())))
-                })
-                .collect();
+    async fn refresh_mails(&mut self, folder_id: &str) -> Result<(), String> {
+        let mut stored = self.store.get_folder(folder_id).await;
 
         self.mails.clear();
         // UIDs are stable and assigned by the store; sort ascending so message
         // sequence order matches UID order, as IMAP clients expect.
-        let mut stored = stored;
         stored.sort_by_key(|m| m.uid);
 
         for sm in stored {
-            let elem_id = sm.mail._id.as_ref().map(|id| id.element_id.to_string());
-            let (old_details, old_rfc) = elem_id
-                .as_ref()
-                .and_then(|eid| old_cache.get(eid))
-                .cloned()
-                .unwrap_or((None, None));
-
             let uid = sm.uid;
             if uid >= self.uid_next {
                 self.uid_next = uid + 1;
             }
-
-            let details = sm.details.or(old_details);
-            // The body is final if we have real details, or a previously
-            // rendered rfc2822 (from the store or this session) — those always
-            // carry a real body. With none of those, the rfc2822 we render
-            // below has a placeholder body, so the body still needs an
-            // on-demand fetch the first time a client opens the message.
-            let body_loaded = details.is_some() || sm.rfc2822.is_some() || old_rfc.is_some();
-            let rfc2822 = sm
-                .rfc2822
-                .or(old_rfc)
-                .unwrap_or_else(|| mail_to_rfc2822(&sm.mail, details.as_ref(), &[]));
-
             self.mails.push(CachedMail {
                 mail: sm.mail,
-                details,
-                rfc2822: Some(rfc2822),
-                body_loaded,
+                body_loaded: sm.body_loaded,
                 uid,
                 deleted: false,
             });
@@ -896,9 +909,37 @@ fn join_addrs(addrs: &[MailAddress]) -> String {
         .join(", ")
 }
 
-fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: bool) -> String {
+/// True when any FETCH item needs message content (body, headers, size,
+/// structure, envelope) rather than pure metadata flags. Gates the per-message
+/// body-cache lookup in `cmd_fetch`.
+fn fetch_items_use_content(items: &str) -> bool {
+    let u = items.to_ascii_uppercase();
+    u.contains("BODY") || u.contains("RFC822") || u.contains("ENVELOPE")
+}
+
+/// `body` is the message's cached body when available. Items answered from the
+/// rendered message fall back to a placeholder rendering (real headers from
+/// metadata, stub body) when it is not, which is what unloaded messages have
+/// always returned.
+fn build_fetch_response(
+    seq: usize,
+    cached: &CachedMail,
+    items: &str,
+    uid_mode: bool,
+    body: Option<&crate::body_cache::BodyEntry>,
+) -> String {
     let items_upper = items.to_ascii_uppercase();
     let mut parts = Vec::new();
+
+    // Render the placeholder lazily: pure-metadata fetches (FLAGS, UID,
+    // INTERNALDATE) never pay for it.
+    let placeholder: Option<String> = if body.is_none() && fetch_items_use_content(items) {
+        Some(mail_to_rfc2822(&cached.mail, None, &[]))
+    } else {
+        None
+    };
+    let rfc: Option<&str> = body.map(|b| b.rfc2822.as_str()).or(placeholder.as_deref());
+    let details: Option<&MailDetails> = body.and_then(|b| b.details.as_ref());
 
     if uid_mode || items_upper.contains("UID") {
         parts.push(format!("UID {}", cached.uid));
@@ -921,19 +962,17 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
     }
 
     if items_upper.contains("RFC822.SIZE") {
-        let size = cached.rfc2822.as_ref().map(|r| r.len()).unwrap_or(0);
+        let size = rfc.map(|r| r.len()).unwrap_or(0);
         parts.push(format!("RFC822.SIZE {}", size));
     }
 
     if items_upper.contains("ENVELOPE") {
-        parts.push(format!("ENVELOPE {}", build_envelope(cached)));
+        parts.push(format!("ENVELOPE {}", build_envelope(cached, details)));
     }
 
     if items_upper.contains("BODYSTRUCTURE") {
-        let bs = cached
-            .rfc2822
-            .as_ref()
-            .map(|r| crate::mail::compute_bodystructure(r))
+        let bs = rfc
+            .map(crate::mail::compute_bodystructure)
             .unwrap_or_else(|| {
                 "(\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"BASE64\" 0 0)".to_owned()
             });
@@ -941,11 +980,11 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
     }
 
     if items_upper.contains("BODY[]") || items_upper.contains("BODY.PEEK[]") {
-        if let Some(ref rfc) = cached.rfc2822 {
+        if let Some(rfc) = rfc {
             parts.push(format!("BODY[] {{{}}}\r\n{}", rfc.len(), rfc));
         }
     } else if let Some((section, fields, negate)) = parse_header_fields_section(items) {
-        if let Some(ref rfc) = cached.rfc2822 {
+        if let Some(rfc) = rfc {
             let headers = filter_header_fields(rfc, &fields, negate);
             parts.push(format!(
                 "BODY[{}] {{{}}}\r\n{}",
@@ -956,7 +995,7 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
         }
     } else if items_upper.contains("HEADER") {
         // Bare BODY[HEADER] / BODY.PEEK[HEADER] / RFC822.HEADER.
-        if let Some(ref rfc) = cached.rfc2822 {
+        if let Some(rfc) = rfc {
             let headers = extract_headers(rfc);
             let item = if items_upper.contains("RFC822.HEADER") {
                 "RFC822.HEADER"
@@ -971,7 +1010,7 @@ fn build_fetch_response(seq: usize, cached: &CachedMail, items: &str, uid_mode: 
         .split_whitespace()
         .any(|t| t.trim_matches(|c| c == '(' || c == ')') == "RFC822");
     if has_rfc822_full {
-        if let Some(ref rfc) = cached.rfc2822 {
+        if let Some(rfc) = rfc {
             parts.push(format!("RFC822 {{{}}}\r\n{}", rfc.len(), rfc));
         }
     }
@@ -1030,15 +1069,16 @@ fn filter_header_fields(rfc: &str, fields: &[String], negate: bool) -> String {
     out
 }
 
-fn build_envelope(cached: &CachedMail) -> String {
+/// `details` (when the body entry is warm in cache) provides the full To list;
+/// otherwise the envelope falls back to the metadata `firstRecipient`, as
+/// unloaded messages always have.
+fn build_envelope(cached: &CachedMail, details: Option<&MailDetails>) -> String {
     let mail = &cached.mail;
     let date = format_internal_date(mail.receivedDate.as_millis());
     let subject = imap_string(&mail.subject);
 
     let from = format_envelope_addr(&mail.sender);
-    let to = cached
-        .details
-        .as_ref()
+    let to = details
         .map(|d| {
             d.recipients
                 .toRecipients
@@ -1304,11 +1344,18 @@ mod tests {
                 clientSpamClassifierResult: None,
                 _errors: Default::default(),
             },
-            details: None,
-            rfc2822: Some("Date: Wed, 25 Dec 2024 12:30:45 +0000\r\nFrom: sender@tuta.com\r\nSubject: Test\r\n\r\nBody\r\n".to_string()),
             body_loaded: true,
             uid,
             deleted: false,
+        }
+    }
+
+    /// The body entry `make_test_mail` used to carry inline; tests pass it to
+    /// `build_fetch_response` explicitly now that bodies live in the cache.
+    fn make_test_body() -> crate::body_cache::BodyEntry {
+        crate::body_cache::BodyEntry {
+            details: None,
+            rfc2822: "Date: Wed, 25 Dec 2024 12:30:45 +0000\r\nFrom: sender@tuta.com\r\nSubject: Test\r\n\r\nBody\r\n".to_string(),
         }
     }
 
@@ -1348,7 +1395,7 @@ mod tests {
         // string, producing a malformed FETCH response that broke the client's
         // parse of the message list (an empty mailbox in Thunderbird).
         let subj = "La\nselection Courtois - Le bien du mois";
-        let env = build_envelope(&make_test_mail(1, subj, false));
+        let env = build_envelope(&make_test_mail(1, subj, false), None);
         assert!(
             env.contains(&format!("{{{}}}\r\n{}", subj.len(), subj)),
             "subject must be a literal, got: {env}"
@@ -1467,21 +1514,21 @@ mod tests {
     #[test]
     fn test_build_fetch_response_flags_only() {
         let cached = make_test_mail(1, "Test", false);
-        let resp = build_fetch_response(1, &cached, "(FLAGS)", false);
+        let resp = build_fetch_response(1, &cached, "(FLAGS)", false, None);
         assert_eq!(resp, "* 1 FETCH (FLAGS (\\Seen))\r\n");
     }
 
     #[test]
     fn test_build_fetch_response_flags_unread() {
         let cached = make_test_mail(1, "Test", true);
-        let resp = build_fetch_response(1, &cached, "(FLAGS)", false);
+        let resp = build_fetch_response(1, &cached, "(FLAGS)", false, None);
         assert_eq!(resp, "* 1 FETCH (FLAGS ())\r\n");
     }
 
     #[test]
     fn test_build_fetch_response_uid_mode() {
         let cached = make_test_mail(42, "Test", false);
-        let resp = build_fetch_response(3, &cached, "(FLAGS)", true);
+        let resp = build_fetch_response(3, &cached, "(FLAGS)", true, None);
         assert!(resp.contains("UID 42"));
         assert!(resp.contains("FLAGS (\\Seen)"));
     }
@@ -1489,22 +1536,32 @@ mod tests {
     #[test]
     fn test_build_fetch_response_internaldate() {
         let cached = make_test_mail(1, "Test", false);
-        let resp = build_fetch_response(1, &cached, "(INTERNALDATE)", false);
+        let resp = build_fetch_response(1, &cached, "(INTERNALDATE)", false, None);
         assert!(resp.contains("INTERNALDATE \"25-Dec-2024 12:37:25 +0000\""));
     }
 
     #[test]
     fn test_build_fetch_response_rfc822_size() {
         let cached = make_test_mail(1, "Test", false);
-        let resp = build_fetch_response(1, &cached, "(RFC822.SIZE)", false);
-        let rfc_len = cached.rfc2822.as_ref().unwrap().len();
-        assert!(resp.contains(&format!("RFC822.SIZE {}", rfc_len)));
+        let body = make_test_body();
+        let resp = build_fetch_response(1, &cached, "(RFC822.SIZE)", false, Some(&body));
+        assert!(resp.contains(&format!("RFC822.SIZE {}", body.rfc2822.len())));
+    }
+
+    #[test]
+    fn test_build_fetch_response_rfc822_size_placeholder_when_cold() {
+        // Without a cached body the size comes from the metadata-rendered
+        // placeholder, never 0.
+        let cached = make_test_mail(1, "Test", false);
+        let resp = build_fetch_response(1, &cached, "(RFC822.SIZE)", false, None);
+        assert!(!resp.contains("RFC822.SIZE 0"), "got: {resp}");
+        assert!(resp.contains("RFC822.SIZE "));
     }
 
     #[test]
     fn test_build_fetch_response_envelope() {
         let cached = make_test_mail(1, "Hello World", false);
-        let resp = build_fetch_response(1, &cached, "(ENVELOPE)", false);
+        let resp = build_fetch_response(1, &cached, "(ENVELOPE)", false, None);
         assert!(resp.contains("ENVELOPE"));
         assert!(resp.contains("Hello World"));
         assert!(resp.contains("\"sender\" \"tuta.com\""));
@@ -1513,7 +1570,8 @@ mod tests {
     #[test]
     fn test_build_fetch_response_body_peek() {
         let cached = make_test_mail(1, "Test", false);
-        let resp = build_fetch_response(1, &cached, "(BODY.PEEK[])", false);
+        let body = make_test_body();
+        let resp = build_fetch_response(1, &cached, "(BODY.PEEK[])", false, Some(&body));
         assert!(resp.contains("BODY[] {"));
         assert!(resp.contains("From: sender@tuta.com"));
     }
@@ -1521,7 +1579,8 @@ mod tests {
     #[test]
     fn test_build_fetch_response_rfc822_full() {
         let cached = make_test_mail(1, "Test", false);
-        let resp = build_fetch_response(1, &cached, "(RFC822)", false);
+        let body = make_test_body();
+        let resp = build_fetch_response(1, &cached, "(RFC822)", false, Some(&body));
         assert!(resp.contains("RFC822 {"));
         assert!(resp.contains("From: sender@tuta.com"));
     }
@@ -1611,7 +1670,7 @@ mod tests {
     #[test]
     fn test_build_fetch_response_multiple_items() {
         let cached = make_test_mail(5, "Multi", true);
-        let resp = build_fetch_response(3, &cached, "(FLAGS UID INTERNALDATE)", false);
+        let resp = build_fetch_response(3, &cached, "(FLAGS UID INTERNALDATE)", false, None);
         assert!(resp.starts_with("* 3 FETCH ("));
         assert!(resp.contains("FLAGS ()"));
         assert!(resp.contains("UID 5"));
@@ -1656,7 +1715,7 @@ mod tests {
     #[test]
     fn test_build_envelope_subject_with_quotes() {
         let cached = make_test_mail(1, "Re: \"Important\" stuff", false);
-        let resp = build_fetch_response(1, &cached, "(ENVELOPE)", false);
+        let resp = build_fetch_response(1, &cached, "(ENVELOPE)", false, None);
         assert!(resp.contains("\\\"Important\\\""));
         assert!(!resp.contains("\"\"Important\"\""));
     }
@@ -1668,11 +1727,13 @@ mod tests {
         let cached = make_test_mail(1, "Test", false);
         // Apple Mail-style request: long list, lowercase, includes fields the
         // message doesn't have. The response section must echo this list.
+        let body = make_test_body();
         let resp = build_fetch_response(
             1,
             &cached,
             "(BODY.PEEK[HEADER.FIELDS (date subject from x-priority x-universally-unique-identifier)])",
             false,
+            Some(&body),
         );
         assert!(
             resp.contains(
@@ -1726,10 +1787,11 @@ mod tests {
     #[test]
     fn bare_header_fetch_returns_all_headers() {
         let cached = make_test_mail(1, "Test", false);
-        let resp = build_fetch_response(1, &cached, "(BODY.PEEK[HEADER])", false);
+        let body = make_test_body();
+        let resp = build_fetch_response(1, &cached, "(BODY.PEEK[HEADER])", false, Some(&body));
         assert!(resp.contains("BODY[HEADER] {"), "got: {resp}");
         assert!(resp.contains("Subject: Test"));
-        let resp = build_fetch_response(1, &cached, "(RFC822.HEADER)", false);
+        let resp = build_fetch_response(1, &cached, "(RFC822.HEADER)", false, Some(&body));
         assert!(resp.contains("RFC822.HEADER {"), "got: {resp}");
     }
 
@@ -1845,15 +1907,13 @@ mod tests {
                 vec![
                     StoredMail {
                         mail: m1,
-                        details: None,
-                        rfc2822: None,
+                        body_loaded: false,
                         uid: 1,
                         attachments_pending: false,
                     },
                     StoredMail {
                         mail: m2,
-                        details: None,
-                        rfc2822: None,
+                        body_loaded: false,
                         uid: 2,
                         attachments_pending: false,
                     },
@@ -1889,8 +1949,7 @@ mod tests {
                 "inbox",
                 vec![StoredMail {
                     mail,
-                    details: None,
-                    rfc2822: None,
+                    body_loaded: false,
                     uid: 1,
                     attachments_pending: false,
                 }],
@@ -1980,8 +2039,7 @@ mod tests {
             .enumerate()
             .map(|(i, m)| StoredMail {
                 mail: m.clone(),
-                details: None,
-                rfc2822: None,
+                body_loaded: false,
                 uid: (i + 1) as u32,
                 attachments_pending: false,
             })
@@ -2199,21 +2257,33 @@ mod tests {
                 vec![
                     StoredMail {
                         mail: m1,
-                        details: Some(d1),
-                        rfc2822: Some(rfc1),
+                        body_loaded: true,
                         uid: 1,
                         attachments_pending: false,
                     },
                     StoredMail {
                         mail: m2,
-                        details: Some(d2),
-                        rfc2822: Some(rfc2),
+                        body_loaded: true,
                         uid: 2,
                         attachments_pending: false,
                     },
                 ],
             )
             .await;
+        store.bodies().insert(
+            "m1",
+            crate::body_cache::BodyEntry {
+                details: Some(d1),
+                rfc2822: rfc1,
+            },
+        );
+        store.bodies().insert(
+            "m2",
+            crate::body_cache::BodyEntry {
+                details: Some(d2),
+                rfc2822: rfc2,
+            },
+        );
         let mut session = ImapSession::new(store, backend, None, None);
 
         // LOGIN
@@ -2594,15 +2664,13 @@ mod tests {
                 vec![
                     StoredMail {
                         mail: m1,
-                        details: None,
-                        rfc2822: None,
+                        body_loaded: false,
                         uid: 1,
                         attachments_pending: false,
                     },
                     StoredMail {
                         mail: m2,
-                        details: None,
-                        rfc2822: None,
+                        body_loaded: false,
                         uid: 2,
                         attachments_pending: false,
                     },
@@ -2630,8 +2698,7 @@ mod tests {
                 "inbox",
                 vec![StoredMail {
                     mail: m1,
-                    details: None,
-                    rfc2822: None,
+                    body_loaded: false,
                     uid: 1,
                     attachments_pending: false,
                 }],
@@ -2665,15 +2732,13 @@ mod tests {
                 vec![
                     StoredMail {
                         mail: old1,
-                        details: None,
-                        rfc2822: None,
+                        body_loaded: false,
                         uid: 1,
                         attachments_pending: false,
                     },
                     StoredMail {
                         mail: new3,
-                        details: None,
-                        rfc2822: None,
+                        body_loaded: false,
                         uid: 3,
                         attachments_pending: false,
                     },
@@ -2707,8 +2772,7 @@ mod tests {
                 "inbox",
                 vec![StoredMail {
                     mail: m1,
-                    details: None,
-                    rfc2822: None,
+                    body_loaded: false,
                     uid: 1,
                     attachments_pending: false,
                 }],
