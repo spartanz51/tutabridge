@@ -38,7 +38,14 @@ pub struct MailStore {
     folders: RwLock<HashMap<String, Vec<StoredMail>>>,
     /// The folder list (system + custom), for IMAP enumeration.
     folder_list: RwLock<Vec<FolderInfo>>,
+    /// Bumped on list-membership changes (mail added/removed, folder list).
+    /// IMAP sessions and the prefetch loop wake on this one.
     generation: watch::Sender<u64>,
+    /// Bumped on body-only updates (details/rfc2822 stored). Only the GUI
+    /// stats watcher subscribes: waking every idle IMAP session for each of
+    /// thousands of arriving bodies made each one deep-clone the folder per
+    /// body (the CPU/memory storm).
+    details_generation: watch::Sender<u64>,
     gen_counter: std::sync::atomic::AtomicU64,
     /// element_id -> instant until which an on-demand body fetch is skipped,
     /// armed after a fetch failure. Shared across IMAP connections.
@@ -48,10 +55,12 @@ pub struct MailStore {
 impl MailStore {
     pub fn new() -> Arc<Self> {
         let (tx, _) = watch::channel(0u64);
+        let (details_tx, _) = watch::channel(0u64);
         Arc::new(Self {
             folders: RwLock::new(HashMap::new()),
             folder_list: RwLock::new(Vec::new()),
             generation: tx,
+            details_generation: details_tx,
             gen_counter: std::sync::atomic::AtomicU64::new(0),
             body_fetch_cooldown: Mutex::new(HashMap::new()),
         })
@@ -84,6 +93,13 @@ impl MailStore {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.generation.subscribe()
+    }
+
+    /// Watch body-only updates (a mail's details/rfc2822 landed). Cheap,
+    /// high-frequency during prefetch; meant for stats display, not for
+    /// anything that re-reads folder contents.
+    pub fn subscribe_details(&self) -> watch::Receiver<u64> {
+        self.details_generation.subscribe()
     }
 
     pub async fn total_mail_count(&self) -> usize {
@@ -338,7 +354,7 @@ impl MailStore {
             }
         }
         drop(folders);
-        self.bump_generation();
+        self.bump_details_generation();
     }
 
     /// Rewrite just the cached RFC 2822 for a mail (and clear its pending
@@ -362,7 +378,7 @@ impl MailStore {
             }
         }
         drop(folders);
-        self.bump_generation();
+        self.bump_details_generation();
     }
 
     fn bump_generation(&self) {
@@ -371,6 +387,18 @@ impl MailStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         self.generation.send_replace(gen);
+    }
+
+    /// Signal a body-only update. Deliberately NOT the list generation: a body
+    /// landing changes no EXISTS/EXPUNGE, so waking every idle IMAP session
+    /// (which each deep-clone the folder to diff it) per arriving body is pure
+    /// waste, at thousands of bodies per sync.
+    fn bump_details_generation(&self) {
+        let gen = self
+            .gen_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.details_generation.send_replace(gen);
     }
 }
 
@@ -1158,6 +1186,59 @@ mod tests {
             uid,
             attachments_pending: false,
         }
+    }
+
+    #[tokio::test]
+    async fn body_updates_wake_details_watchers_not_list_watchers() {
+        use tutasdk::entities::generated::tutanota::{Body, Recipients};
+        let details = MailDetails {
+            _id: None,
+            sentDate: DateTime::from_millis(0),
+            authStatus: 0,
+            replyTos: vec![],
+            recipients: Recipients {
+                _id: None,
+                toRecipients: vec![],
+                ccRecipients: vec![],
+                bccRecipients: vec![],
+            },
+            headers: None,
+            body: Body {
+                _id: None,
+                text: Some("hi".into()),
+                compressedText: None,
+                _errors: Default::default(),
+            },
+        };
+
+        let store = MailStore::new();
+        store
+            .set_folder("f", vec![stored(make_mail("l", "e1", "s", false), 1)])
+            .await;
+        let mut list_watch = store.subscribe();
+        let mut details_watch = store.subscribe_details();
+        list_watch.borrow_and_update();
+        details_watch.borrow_and_update();
+
+        // A body landing must signal stats watchers without waking the list
+        // watchers every idle IMAP session sleeps on (the clone storm).
+        store
+            .update_mail_details("f", "e1", details, "body".into(), false)
+            .await;
+        assert!(
+            !list_watch.has_changed().unwrap(),
+            "body-only update must not wake list watchers"
+        );
+        assert!(
+            details_watch.has_changed().unwrap(),
+            "body-only update must wake details watchers"
+        );
+
+        // A membership change still wakes the list watchers.
+        store
+            .set_folder("f", vec![stored(make_mail("l", "e2", "s2", true), 2)])
+            .await;
+        assert!(list_watch.has_changed().unwrap());
     }
 
     #[test]

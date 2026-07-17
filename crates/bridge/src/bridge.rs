@@ -308,6 +308,9 @@ impl BridgeHandle {
         {
             let stats_dirty = self.stats_dirty_tx.clone();
             let mut store_watch = store.subscribe();
+            // Body-only updates ride a separate channel so they don't wake
+            // idle IMAP sessions; the stats display still wants them.
+            let mut details_watch = store.subscribe_details();
             let mut ws_watch = bus_client.state();
             let mut shutdown_watch = shutdown_sync_rx.clone();
             // Track the previous WS state so we only log on transitions,
@@ -320,6 +323,7 @@ impl BridgeHandle {
                 loop {
                     tokio::select! {
                         _ = store_watch.changed() => { let _ = stats_dirty.send(()); }
+                        _ = details_watch.changed() => { let _ = stats_dirty.send(()); }
                         _ = ws_watch.changed() => {
                             let now = *ws_watch.borrow();
                             if now != last_ws_state {
