@@ -180,6 +180,7 @@ where
     let mut in_data = false;
     let mut data_too_large = false;
     let mut auth_step = AuthStep::None;
+    let mut authenticated = password_hash.is_none();
 
     loop {
         match read_line_capped(&mut reader, limits.max_line_bytes, &mut line).await? {
@@ -215,6 +216,9 @@ where
                 }
                 AuthStep::None => unreachable!(),
             };
+            if response.starts_with("235") {
+                authenticated = true;
+            }
             debug!("SMTP S: {}", response.trim_end());
             writer.write_all(response.as_bytes()).await?;
             continue;
@@ -286,6 +290,14 @@ where
             .next()
             .unwrap_or("")
             .to_uppercase();
+
+        if !authenticated && matches!(cmd.as_str(), "MAIL" | "RCPT" | "DATA") {
+            writer
+                .write_all(b"530 5.7.0 Authentication required\r\n")
+                .await?;
+            continue;
+        }
+
         let response = match cmd.as_str() {
             "EHLO" | "HELO" => {
                 state = SmtpState::Greeted;
@@ -295,7 +307,7 @@ where
             "AUTH" => {
                 let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
                 let auth_type = parts.get(1).unwrap_or(&"").to_uppercase();
-                match auth_type.as_str() {
+                let response = match auth_type.as_str() {
                     "PLAIN" => {
                         if let Some(data) = parts.get(2) {
                             verify_smtp_plain_data(data, &password_hash)
@@ -309,7 +321,11 @@ where
                         "334 VXNlcm5hbWU6\r\n".to_string()
                     }
                     _ => "504 Unrecognized auth type\r\n".to_string(),
+                };
+                if response.starts_with("235") {
+                    authenticated = true;
                 }
+                response
             }
             "MAIL" => {
                 if size_param_exceeds(trimmed, limits.max_message_bytes) {
