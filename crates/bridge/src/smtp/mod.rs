@@ -740,7 +740,11 @@ mod tests {
 
         client.write_all(b"QUIT\r\n").await.unwrap();
         let _ = h.await;
-        assert_eq!(backend.sent(), 0, "unauthenticated client must not send mail");
+        assert_eq!(
+            backend.sent(),
+            0,
+            "unauthenticated client must not send mail"
+        );
     }
 
     #[tokio::test]
