@@ -717,6 +717,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_mail_without_auth_when_password_configured() {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let backend = Arc::new(CountingBackend::default());
+        let b = backend.clone();
+        let h = tokio::spawn(async move {
+            let _ = handle_connection(
+                server,
+                b as Arc<dyn MailBackend>,
+                Some("secret".to_string()),
+                SmtpLimits::default(),
+            )
+            .await;
+        });
+
+        assert!(drain(&mut client).await.starts_with("220"));
+        client.write_all(b"EHLO test\r\n").await.unwrap();
+        assert!(drain(&mut client).await.starts_with("250"));
+        client.write_all(b"MAIL FROM:<a@b.com>\r\n").await.unwrap();
+        let resp = drain(&mut client).await;
+        assert!(resp.starts_with("530"), "expected 530, got {resp:?}");
+
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = h.await;
+        assert_eq!(backend.sent(), 0, "unauthenticated client must not send mail");
+    }
+
+    #[tokio::test]
+    async fn accepts_mail_after_successful_auth() {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let backend = Arc::new(CountingBackend::default());
+        let b = backend.clone();
+        let h = tokio::spawn(async move {
+            let _ = handle_connection(
+                server,
+                b as Arc<dyn MailBackend>,
+                Some("secret".to_string()),
+                SmtpLimits::default(),
+            )
+            .await;
+        });
+
+        assert!(drain(&mut client).await.starts_with("220"));
+        client.write_all(b"EHLO test\r\n").await.unwrap();
+        assert!(drain(&mut client).await.starts_with("250"));
+
+        let creds = base64::engine::general_purpose::STANDARD.encode(b"\0user\0secret");
+        client
+            .write_all(format!("AUTH PLAIN {creds}\r\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(drain(&mut client).await.starts_with("235"));
+
+        client.write_all(b"MAIL FROM:<a@b.com>\r\n").await.unwrap();
+        assert!(drain(&mut client).await.starts_with("250"));
+        client.write_all(b"RCPT TO:<c@d.com>\r\n").await.unwrap();
+        assert!(drain(&mut client).await.starts_with("250"));
+        client.write_all(b"DATA\r\n").await.unwrap();
+        assert!(drain(&mut client).await.starts_with("354"));
+        client
+            .write_all(b"Subject: hi\r\n\r\nshort body\r\n")
+            .await
+            .unwrap();
+        client.write_all(b".\r\n").await.unwrap();
+
+        let resp = drain(&mut client).await;
+        assert!(resp.starts_with("250"), "expected 250, got {resp:?}");
+        assert_eq!(backend.sent(), 1, "authenticated client should send mail");
+
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = h.await;
+    }
+
+    #[tokio::test]
     async fn rejects_oversize_via_mail_size_param() {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let backend = Arc::new(CountingBackend::default());
