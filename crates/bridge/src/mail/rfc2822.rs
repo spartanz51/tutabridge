@@ -43,6 +43,21 @@ pub fn mail_to_rfc2822(
         if !cc_addrs.is_empty() {
             msg.push_str(&format!("Cc: {}\r\n", cc_addrs.join(", ")));
         }
+
+        // Mail that arrives with a `Reply-To:` keeps it in Tuta's
+        // `MailDetails.replyTos` (transactional senders use it constantly:
+        // they send from a no-reply address and want answers elsewhere).
+        // Without this header the client replies to `From:`, i.e. to the
+        // wrong place, while the official Tuta client gets it right.
+        let reply_tos: Vec<String> = details
+            .replyTos
+            .iter()
+            .filter(|a| !a.address.trim().is_empty())
+            .map(|a| format_name_and_address(&a.name, &a.address))
+            .collect();
+        if !reply_tos.is_empty() {
+            msg.push_str(&format!("Reply-To: {}\r\n", reply_tos.join(", ")));
+        }
     } else if let Some(ref first) = mail.firstRecipient {
         msg.push_str(&format!("To: {}\r\n", format_address(first)));
     }
@@ -85,7 +100,7 @@ pub fn mail_to_rfc2822(
                 .mimeType
                 .as_deref()
                 .unwrap_or("application/octet-stream");
-            let name_encoded = encode_header_value(&file.name);
+            let name_encoded = escape_param_value(&encode_header_value(&file.name));
             msg.push_str(&format!(
                 "Content-Type: {}; name=\"{}\"\r\n",
                 mime, name_encoded
@@ -242,22 +257,90 @@ pub(crate) fn html_to_text(html: &str) -> String {
 }
 
 pub(crate) fn format_address(addr: &MailAddress) -> String {
-    if addr.name.is_empty() {
-        addr.address.clone()
-    } else {
-        format!("{} <{}>", encode_header_value(&addr.name), addr.address)
+    format_name_and_address(&addr.name, &addr.address)
+}
+
+/// Render one address for a header: the bare address when there is no display
+/// name, `Name <addr>` otherwise, with the name RFC 2047 encoded.
+///
+/// Shared by `To`/`Cc`/`Reply-To` so they cannot drift apart. Tuta's
+/// `Reply-To` addresses are an `EncryptedMailAddress`, a different type from
+/// `MailAddress` with the same two fields, hence the plain `&str` arguments.
+///
+/// CR and LF are stripped from the address: it comes from mail we did not
+/// write, and a newline there would let it inject arbitrary headers into the
+/// message we serve over IMAP.
+pub(crate) fn format_name_and_address(name: &str, address: &str) -> String {
+    let address = address.replace(['\r', '\n'], "");
+    if name.is_empty() {
+        return address;
     }
+    format!("{} <{}>", format_display_name(name), address)
+}
+
+/// A display name safe to drop in an address header.
+///
+/// Non-ASCII (or CR/LF) becomes an RFC 2047 encoded-word, which must not be
+/// quoted or the receiver shows the raw `=?UTF-8?B?...?=`. Otherwise a name
+/// holding RFC 5322 specials is quoted, with `\` and `"` escaped: an
+/// unquoted comma is the dangerous one, since `Doe, John <a@b.c>` parses as
+/// two addresses rather than one.
+fn format_display_name(name: &str) -> String {
+    if !name.is_ascii() || name.contains('\r') || name.contains('\n') {
+        return encode_header_value(name);
+    }
+    const SPECIALS: [char; 12] = ['(', ')', '<', '>', '[', ']', ':', ';', '@', '\\', ',', '"'];
+    if name.contains(SPECIALS) {
+        format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        name.to_string()
+    }
+}
+
+/// Escape a value going inside a quoted MIME parameter (`name="..."`).
+///
+/// A filename comes from mail we did not write. An unescaped `"` in it would
+/// close the parameter early and let the rest be read as further parameters,
+/// e.g. `name="evil".pdf"; x="y"`. RFC 2045 quoted-string rules: backslash
+/// and double quote are backslash escaped. An RFC 2047 encoded-word contains
+/// neither, so this is a no-op for encoded names.
+fn escape_param_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 pub(crate) fn encode_header_value(s: &str) -> String {
     if s.is_ascii() && !s.contains('\r') && !s.contains('\n') {
-        s.to_string()
-    } else {
-        format!(
-            "=?UTF-8?B?{}?=",
-            base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
-        )
+        return s.to_string();
     }
+    // RFC 2047: an encoded-word must be at most 75 chars. `=?UTF-8?B?` + `?=`
+    // is 12, so cap each word's base64 payload at 63 chars, i.e. 45 input
+    // bytes (base64 of 45 bytes is 60 chars, total 72). A multibyte UTF-8
+    // char is never split across words. Several words fold onto continuation
+    // lines (RFC 5322 header folding), which a decoder rejoins.
+    const MAX_BYTES: usize = 45;
+    let mut words: Vec<String> = Vec::new();
+    let mut chunk: Vec<u8> = Vec::new();
+    for ch in s.chars() {
+        let mut buf = [0u8; 4];
+        let bytes = ch.encode_utf8(&mut buf).as_bytes();
+        if !chunk.is_empty() && chunk.len() + bytes.len() > MAX_BYTES {
+            words.push(encode_word(&chunk));
+            chunk.clear();
+        }
+        chunk.extend_from_slice(bytes);
+    }
+    if !chunk.is_empty() {
+        words.push(encode_word(&chunk));
+    }
+    // Empty input stays empty, matching the pre-fold behaviour.
+    words.join("\r\n ")
+}
+
+fn encode_word(bytes: &[u8]) -> String {
+    format!(
+        "=?UTF-8?B?{}?=",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 pub(crate) fn format_rfc2822_date(millis: u64) -> String {
@@ -441,6 +524,544 @@ mod tests {
 
     fn test_id(s: &str) -> tutasdk::GeneratedId {
         tutasdk::GeneratedId(s.to_string())
+    }
+
+    // --- RFC 2047 encoded-word length / folding ---
+
+    #[test]
+    fn short_non_ascii_is_a_single_encoded_word() {
+        let out = encode_header_value("Héllo");
+        assert!(out.starts_with("=?UTF-8?B?") && out.ends_with("?="));
+        assert!(!out.contains("\r\n"), "should not fold: {out}");
+        assert!(out.len() <= 75, "single word must be <= 75: {out}");
+    }
+
+    #[test]
+    fn long_non_ascii_folds_into_words_each_within_75() {
+        let long = "Rénée ".repeat(30); // ~ 210 bytes UTF-8
+        let out = encode_header_value(&long);
+        assert!(out.contains("\r\n "), "must fold: {out}");
+        for word in out.split("\r\n ") {
+            assert!(
+                word.len() <= 75,
+                "encoded-word exceeds 75 chars ({}): {word}",
+                word.len()
+            );
+            assert!(word.starts_with("=?UTF-8?B?") && word.ends_with("?="));
+        }
+    }
+
+    #[test]
+    fn every_rendered_header_line_is_within_998_octets() {
+        // The hard SMTP line limit. A long non-ASCII subject used to blow
+        // past it as one giant encoded-word.
+        let (mut mail, details) = mail_with_reply_tos(&[]);
+        mail.subject = "Δοκιμή πολύ μακροσκελούς θέματος ".repeat(20);
+        mail.sender.name = "Пётр Великий ".repeat(10);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        for line in rfc.split("\r\n") {
+            assert!(
+                line.len() <= 998,
+                "header/body line too long: {}",
+                line.len()
+            );
+        }
+    }
+
+    #[test]
+    fn folded_long_name_round_trips_back_to_the_text() {
+        // A folded display name must survive re-parsing (our parser unfolds
+        // continuation lines, like any mail client's).
+        let name = "Χρήστος Παπαδόπουλος ".repeat(6);
+        let (to, _) = render_then_parse(&[(name.trim(), "c@x.com")], &[]);
+        assert_eq!(to.len(), 1, "folding split the recipient: {to:?}");
+        assert_eq!(to[0].1, "c@x.com");
+        // The decoded name is the original with any inter-word space folded
+        // out; compare with whitespace collapsed so a cosmetic space between
+        // words does not fail the check.
+        let got: String = to[0].0.split_whitespace().collect();
+        let want: String = name.split_whitespace().collect();
+        assert_eq!(got, want, "name did not decode back: {:?}", to[0].0);
+    }
+
+    // --- round-trip: our rendered headers must survive a re-parse ---
+
+    /// A parsed `(name, address)` address list.
+    type AddrList = Vec<(String, String)>;
+
+    /// Render a received mail, then parse it back with the real submission
+    /// parser (what a mail client's parser must also accept). Returns the
+    /// reparsed lists for To and Reply-To.
+    fn render_then_parse(to: &[(&str, &str)], reply_tos: &[(&str, &str)]) -> (AddrList, AddrList) {
+        let (mail, mut details) = mail_with_reply_tos(reply_tos);
+        details.recipients.toRecipients = to
+            .iter()
+            .map(|(name, addr)| MailAddress {
+                _id: None,
+                name: (*name).to_string(),
+                address: (*addr).to_string(),
+                contact: None,
+                _errors: Default::default(),
+            })
+            .collect();
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        let parsed = crate::mail::parser::parse_rfc2822(&rfc);
+        (parsed.to, parsed.reply_to)
+    }
+
+    #[test]
+    fn roundtrip_comma_name_stays_one_recipient() {
+        let (to, _) = render_then_parse(&[("Doe, John", "j@x.com")], &[]);
+        assert_eq!(to.len(), 1, "comma split the recipient: {to:?}");
+        assert_eq!(to[0].1, "j@x.com");
+    }
+
+    #[test]
+    fn roundtrip_parens_and_at_in_name() {
+        let (to, _) = render_then_parse(&[("Sales (EU) @HQ", "s@x.com")], &[]);
+        assert_eq!(to.len(), 1, "{to:?}");
+        assert_eq!(to[0].1, "s@x.com");
+    }
+
+    #[test]
+    fn roundtrip_two_recipients_one_with_comma() {
+        let (to, _) = render_then_parse(&[("Doe, John", "j@x.com"), ("Ann", "a@x.com")], &[]);
+        assert_eq!(to.len(), 2, "{to:?}");
+        assert_eq!(to[0].1, "j@x.com");
+        assert_eq!(to[1].1, "a@x.com");
+    }
+
+    #[test]
+    fn roundtrip_reply_to_addresses_survive() {
+        let (_, rt) = render_then_parse(
+            &[("", "me@tuta.io")],
+            &[("Support, Ltd", "help@x.com"), ("", "second@x.com")],
+        );
+        assert_eq!(rt.len(), 2, "reply-to list mangled: {rt:?}");
+        assert_eq!(rt[0].1, "help@x.com");
+        assert_eq!(rt[1].1, "second@x.com");
+    }
+
+    #[test]
+    fn roundtrip_non_ascii_name() {
+        let (to, _) = render_then_parse(&[("Café Réçu", "c@x.com")], &[]);
+        assert_eq!(to.len(), 1, "{to:?}");
+        assert_eq!(to[0].1, "c@x.com");
+        assert_eq!(to[0].0, "Café Réçu", "name did not decode back: {to:?}");
+    }
+
+    // --- more Reply-To edge cases ---
+
+    #[test]
+    fn reply_to_mixes_blank_and_real_keeping_order() {
+        let (mail, details) =
+            mail_with_reply_tos(&[("", "  "), ("A", "a@x.com"), ("", ""), ("B", "b@x.com")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_eq!(
+            reply_to_header(&rfc).as_deref(),
+            Some("Reply-To: A <a@x.com>, B <b@x.com>")
+        );
+    }
+
+    #[test]
+    fn reply_to_whitespace_only_address_is_skipped() {
+        let (mail, details) = mail_with_reply_tos(&[("Ghost", "\t \t")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert!(reply_to_header(&rfc).is_none(), "{rfc:?}");
+    }
+
+    // --- header-rendering hardening: adversarial inputs ---
+
+    /// Every header line of a rendered message, up to the blank line.
+    fn header_lines(rfc: &str) -> Vec<String> {
+        rfc.split("\r\n\r\n")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    /// Header names a rendered message is allowed to contain. Anything else
+    /// appearing at the start of a line means a value injected one.
+    fn assert_no_injected_header(rfc: &str) {
+        const ALLOWED: [&str; 8] = [
+            "Date:",
+            "From:",
+            "Subject:",
+            "To:",
+            "Cc:",
+            "Reply-To:",
+            "Message-ID:",
+            "MIME-Version:",
+        ];
+        for line in header_lines(rfc) {
+            if line.is_empty() || line.starts_with("Content-") || line.starts_with(' ') {
+                continue;
+            }
+            assert!(
+                ALLOWED.iter().any(|h| line.starts_with(h)),
+                "unexpected header line, value injected one: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crlf_in_subject_cannot_inject_a_header() {
+        let (mut mail, details) = mail_with_reply_tos(&[]);
+        mail.subject = "hi\r\nBcc: victim@x.com".to_string();
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_no_injected_header(&rfc);
+    }
+
+    #[test]
+    fn crlf_in_display_name_cannot_inject_a_header() {
+        let (mut mail, details) = mail_with_reply_tos(&[]);
+        mail.sender.name = "evil\r\nBcc: victim@x.com".to_string();
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_no_injected_header(&rfc);
+    }
+
+    #[test]
+    fn crlf_in_reply_to_name_cannot_inject_a_header() {
+        let (mail, details) = mail_with_reply_tos(&[("bad\r\nBcc: victim@x.com", "a@b.c")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_no_injected_header(&rfc);
+    }
+
+    #[test]
+    fn crlf_in_recipient_address_cannot_inject_a_header() {
+        let (mail, mut details) = mail_with_reply_tos(&[]);
+        details.recipients.toRecipients[0].address = "a@b.c\r\nBcc: victim@x.com".to_string();
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_no_injected_header(&rfc);
+    }
+
+    #[test]
+    fn recipient_with_a_comma_in_the_name_stays_one_address() {
+        let (mail, mut details) = mail_with_reply_tos(&[]);
+        details.recipients.toRecipients[0].name = "Doe, John".to_string();
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        let to = header_lines(&rfc)
+            .into_iter()
+            .find(|l| l.starts_with("To:"))
+            .expect("To header");
+        assert_eq!(to, "To: \"Doe, John\" <me@tuta.io>", "got {to}");
+    }
+
+    #[test]
+    fn attachment_filename_with_a_quote_cannot_break_the_parameter() {
+        use tutasdk::entities::generated::tutanota::TutanotaFile;
+        let (mail, details) = mail_with_reply_tos(&[]);
+        let file = TutanotaFile {
+            _id: None,
+            _permissions: test_id("p"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            _ownerGroup: None,
+            _ownerKeyVersion: None,
+            name: "evil\".pdf\"; x=\"y".to_string(),
+            mimeType: Some("application/pdf".to_string()),
+            size: 3,
+            cid: None,
+            blobs: vec![],
+            parent: None,
+            subFiles: None,
+            _kdfNonce: None,
+            _errors: Default::default(),
+        };
+        let data: Vec<u8> = vec![1, 2, 3];
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[(&file, &data)]);
+        // The filename must not be able to close its own quoted parameter and
+        // start another one. Escaped quotes stay inside the value, so only
+        // UNESCAPED ones delimit parameters and they must come in pairs.
+        for line in rfc.lines().filter(|l| l.starts_with("Content-")) {
+            let delimiters = line
+                .replace("\\\\", "")
+                .replace("\\\"", "")
+                .matches('"')
+                .count();
+            assert!(delimiters % 2 == 0, "unbalanced parameter quotes: {line:?}");
+            // and the injected parameter must not have become a real one
+            assert!(
+                !line.contains("; x=\"y\""),
+                "filename smuggled a parameter: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_filename_with_crlf_cannot_inject_a_header() {
+        use tutasdk::entities::generated::tutanota::TutanotaFile;
+        let (mail, details) = mail_with_reply_tos(&[]);
+        let file = TutanotaFile {
+            _id: None,
+            _permissions: test_id("p"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            _ownerGroup: None,
+            _ownerKeyVersion: None,
+            name: "ok.pdf\r\nBcc: victim@x.com".to_string(),
+            mimeType: Some("application/pdf".to_string()),
+            size: 3,
+            cid: None,
+            blobs: vec![],
+            parent: None,
+            subFiles: None,
+            _kdfNonce: None,
+            _errors: Default::default(),
+        };
+        let data: Vec<u8> = vec![1, 2, 3];
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[(&file, &data)]);
+        assert!(
+            !rfc.lines().any(|l| l.starts_with("Bcc:")),
+            "header injected: {rfc:?}"
+        );
+    }
+
+    #[test]
+    fn body_cannot_collide_with_the_mime_boundary() {
+        // The body is base64 encoded, so a body quoting the boundary cannot
+        // terminate the part early.
+        let (mail, mut details) = mail_with_reply_tos(&[]);
+        details.body.text = Some("--=_TutaBridgeAlt_rl_re--\r\nsmuggled: yes".to_string());
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_eq!(
+            rfc.matches("--=_TutaBridgeAlt_rl_re--").count(),
+            1,
+            "the closing boundary must appear exactly once: {rfc:?}"
+        );
+    }
+
+    // --- Reply-To on received mail ---
+
+    /// Minimal `Mail` + `MailDetails` pair for header-rendering tests, with
+    /// `replyTos` built from `(name, address)` pairs.
+    fn mail_with_reply_tos(pairs: &[(&str, &str)]) -> (Mail, MailDetails) {
+        use tutasdk::date::DateTime;
+        use tutasdk::entities::generated::tutanota::{Body, EncryptedMailAddress, Recipients};
+        use tutasdk::IdTupleGenerated;
+
+        let mail = Mail {
+            _id: Some(IdTupleGenerated::new(test_id("rl"), test_id("re"))),
+            _permissions: test_id("perm"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            subject: "Receipt".to_string(),
+            receivedDate: DateTime::from_millis(0),
+            state: 2,
+            unread: false,
+            confidential: false,
+            replyType: 0,
+            _ownerGroup: None,
+            differentEnvelopeSender: None,
+            listUnsubscribe: false,
+            movedTime: None,
+            phishingStatus: 0,
+            authStatus: None,
+            method: 0,
+            recipientCount: 1,
+            encryptionAuthStatus: None,
+            _ownerKeyVersion: None,
+            processingState: 0,
+            processNeeded: false,
+            sendAt: None,
+            serverClassificationData: None,
+            _kdfNonce: None,
+            sender: MailAddress {
+                _id: None,
+                name: String::new(),
+                address: "noreply@uber.com".to_string(),
+                contact: None,
+                _errors: Default::default(),
+            },
+            attachments: vec![],
+            conversationEntry: IdTupleGenerated::new(test_id("cl"), test_id("ce")),
+            firstRecipient: None,
+            mailDetails: None,
+            mailDetailsDraft: None,
+            bucketKey: None,
+            sets: vec![],
+            clientSpamClassifierResult: None,
+            _errors: Default::default(),
+        };
+
+        let details = MailDetails {
+            _id: None,
+            sentDate: DateTime::from_millis(0),
+            authStatus: 0,
+            replyTos: pairs
+                .iter()
+                .map(|(name, addr)| EncryptedMailAddress {
+                    _id: None,
+                    name: (*name).to_string(),
+                    address: (*addr).to_string(),
+                    _errors: Default::default(),
+                })
+                .collect(),
+            recipients: Recipients {
+                _id: None,
+                toRecipients: vec![MailAddress {
+                    _id: None,
+                    name: String::new(),
+                    address: "me@tuta.io".to_string(),
+                    contact: None,
+                    _errors: Default::default(),
+                }],
+                ccRecipients: vec![],
+                bccRecipients: vec![],
+            },
+            headers: None,
+            body: Body {
+                _id: None,
+                text: Some("<p>body</p>".to_string()),
+                compressedText: None,
+                _errors: Default::default(),
+            },
+        };
+        (mail, details)
+    }
+
+    fn reply_to_header(rfc: &str) -> Option<String> {
+        rfc.lines()
+            .find(|l| l.starts_with("Reply-To:"))
+            .map(|l| l.trim_end().to_string())
+    }
+
+    #[test]
+    fn reply_to_is_emitted_with_empty_display_name() {
+        // The real-world shape: transactional senders (Uber, Kraken) send from
+        // a no-reply address and set a bare Reply-To with no display name.
+        let (mail, details) = mail_with_reply_tos(&[("", "no-reply@replies.uber.com")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_eq!(
+            reply_to_header(&rfc).as_deref(),
+            Some("Reply-To: no-reply@replies.uber.com")
+        );
+    }
+
+    #[test]
+    fn reply_to_keeps_the_display_name() {
+        let (mail, details) = mail_with_reply_tos(&[("Support", "help@example.com")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_eq!(
+            reply_to_header(&rfc).as_deref(),
+            Some("Reply-To: Support <help@example.com>")
+        );
+    }
+
+    #[test]
+    fn reply_to_joins_several_addresses() {
+        let (mail, details) = mail_with_reply_tos(&[("One", "one@x.com"), ("", "two@x.com")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert_eq!(
+            reply_to_header(&rfc).as_deref(),
+            Some("Reply-To: One <one@x.com>, two@x.com")
+        );
+    }
+
+    #[test]
+    fn no_reply_tos_emits_no_header() {
+        // An absent Reply-To must stay absent, not become an empty header or
+        // silently echo the sender.
+        let (mail, details) = mail_with_reply_tos(&[]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert!(reply_to_header(&rfc).is_none(), "got: {rfc:?}");
+        assert!(!rfc.contains("Reply-To"));
+    }
+
+    #[test]
+    fn blank_reply_to_address_is_skipped() {
+        let (mail, details) = mail_with_reply_tos(&[("Ghost", "   ")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        assert!(reply_to_header(&rfc).is_none(), "got: {rfc:?}");
+    }
+
+    #[test]
+    fn reply_to_encodes_a_non_ascii_display_name() {
+        let (mail, details) = mail_with_reply_tos(&[("Café Support", "cafe@example.com")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        let hdr = reply_to_header(&rfc).unwrap();
+        assert!(hdr.contains("=?UTF-8?B?"), "name must be encoded: {hdr}");
+        assert!(hdr.contains("<cafe@example.com>"));
+    }
+
+    #[test]
+    fn reply_to_cannot_inject_headers() {
+        // The address comes from mail we did not write; a newline in it must
+        // not be able to append headers to the message we serve.
+        let (mail, details) = mail_with_reply_tos(&[("", "evil@x.com\r\nBcc: victim@x.com")]);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        // Injection means a new header LINE, so check line starts: the
+        // address text itself may legitimately contain those characters.
+        assert!(
+            !rfc.lines().any(|l| l.starts_with("Bcc:")),
+            "header injected: {rfc:?}"
+        );
+        assert_eq!(
+            reply_to_header(&rfc).as_deref(),
+            Some("Reply-To: evil@x.comBcc: victim@x.com")
+        );
+    }
+
+    // --- format_name_and_address ---
+
+    #[test]
+    fn display_name_with_a_comma_is_quoted() {
+        // Unquoted, `Doe, John <a@b.c>` parses as TWO addresses. This also
+        // affected To and Cc before the formatter was shared.
+        assert_eq!(
+            format_name_and_address("Doe, John", "a@b.c"),
+            "\"Doe, John\" <a@b.c>"
+        );
+    }
+
+    #[test]
+    fn display_name_specials_are_quoted_and_escaped() {
+        assert_eq!(
+            format_name_and_address("Support (EU)", "a@b.c"),
+            "\"Support (EU)\" <a@b.c>"
+        );
+        assert_eq!(format_name_and_address("a@b", "a@b.c"), "\"a@b\" <a@b.c>");
+        // Inner quote and backslash are escaped, not dropped.
+        assert_eq!(
+            format_name_and_address("He said \"hi\"", "a@b.c"),
+            "\"He said \\\"hi\\\"\" <a@b.c>"
+        );
+        assert_eq!(
+            format_name_and_address("back\\slash", "a@b.c"),
+            "\"back\\\\slash\" <a@b.c>"
+        );
+    }
+
+    #[test]
+    fn plain_display_name_is_left_alone() {
+        // No specials means no quotes, so existing renderings do not churn.
+        assert_eq!(
+            format_name_and_address("John Doe", "a@b.c"),
+            "John Doe <a@b.c>"
+        );
+        assert_eq!(
+            format_name_and_address("Mr Smith", "a@b.c"),
+            "Mr Smith <a@b.c>"
+        );
+    }
+
+    #[test]
+    fn non_ascii_display_name_is_encoded_not_quoted() {
+        // An RFC 2047 encoded-word inside quotes is not decoded by receivers,
+        // so encoding must win over quoting.
+        let out = format_name_and_address("Café, Support", "a@b.c");
+        assert!(out.starts_with("=?UTF-8?B?"), "got {out}");
+        assert!(!out.contains('"'), "encoded-word must not be quoted: {out}");
+    }
+
+    #[test]
+    fn format_name_and_address_shapes() {
+        assert_eq!(format_name_and_address("", "a@b.c"), "a@b.c");
+        assert_eq!(format_name_and_address("Bob", "a@b.c"), "Bob <a@b.c>");
+        // CR/LF in the address is stripped, never passed through.
+        assert_eq!(format_name_and_address("", "a@b.c\r\nX: y"), "a@b.cX: y");
     }
 
     #[test]
