@@ -12,8 +12,8 @@ use tutasdk::crypto_entity_client::CryptoEntityClient;
 use tutasdk::entities::generated::sys::BlobReferenceTokenWrapper;
 use tutasdk::entities::generated::tutanota::{
     AttachmentKeyData, ConversationEntry, DraftAttachment, DraftCreateData, DraftData,
-    DraftRecipient, EncryptedMailAddress, Mail, MailBox, MailDetails, MailDetailsBlob,
-    MailSetEntry, NewDraftAttachment, SendDraftData, SendDraftParameters, TutanotaFile,
+    DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob, MailSetEntry, NewDraftAttachment,
+    SendDraftData, SendDraftParameters, TutanotaFile,
 };
 use tutasdk::folder_system::{FolderSystem, MailSetKind};
 use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
@@ -666,6 +666,25 @@ impl TutaSession {
                 &randomizer,
             )
             .await?;
+
+        // Tuta cannot carry a Reply-To on an outgoing mail (see
+        // `build_draft_data`), so say so rather than dropping it silently: the
+        // submitter asked for replies to go somewhere and they will not.
+        // Skip blank addresses so a malformed header (`Reply-To: <>`) does not
+        // produce a warning about nothing.
+        let asked: Vec<&str> = msg
+            .reply_to
+            .iter()
+            .map(|(_, addr)| addr.trim())
+            .filter(|addr| !addr.is_empty())
+            .collect();
+        if !asked.is_empty() {
+            log::warn!(
+                "dropping Reply-To [{}]: Tuta does not support it on outgoing mail, replies will go to {}",
+                asked.join(", "),
+                sender_email
+            );
+        }
 
         let draft_data = build_draft_data(msg, &sender_email, added_attachments);
 
@@ -1348,25 +1367,6 @@ fn delete_credentials(email: &str) {
 
 /// Map SMTP recipients to `DraftRecipient`, falling back to the address when
 /// the display name is empty (Tuta's send service rejects empty names).
-/// `Reply-To` addresses for the draft. Same empty-name rule as
-/// [`build_draft_recipients`] -- `SendDraftService` rejects an empty name
-/// on an address, so the address stands in for it.
-fn build_reply_tos(reply_to: &[(String, String)]) -> Vec<EncryptedMailAddress> {
-    reply_to
-        .iter()
-        .map(|(name, addr)| EncryptedMailAddress {
-            _id: None,
-            name: if name.is_empty() {
-                addr.clone()
-            } else {
-                name.clone()
-            },
-            address: addr.clone(),
-            _errors: Default::default(),
-        })
-        .collect()
-}
-
 fn build_draft_recipients(recipients: &[(String, String)]) -> Vec<DraftRecipient> {
     recipients
         .iter()
@@ -1418,7 +1418,12 @@ fn build_draft_data(
         bccRecipients: build_draft_recipients(&msg.bcc),
         addedAttachments: added_attachments,
         removedAttachments: vec![],
-        replyTos: build_reply_tos(&msg.reply_to),
+        // Always empty: the server drops this field. Probing a live account
+        // showed a submitted `replyTos` comes back empty on the stored mail,
+        // no `Reply-To:` header reaches an external recipient, and the
+        // official client's Reply button falls through to the sender. See
+        // `send_mail_impl`, which warns instead of pretending it worked.
+        replyTos: vec![],
         _errors: Default::default(),
     }
 }
@@ -1707,29 +1712,23 @@ mod send_tests {
     }
 
     #[test]
-    fn draft_data_carries_reply_to() {
+    fn draft_data_never_sends_reply_tos() {
+        // Deliberate: the server drops `DraftData.replyTos` (a submitted value
+        // comes back empty on the stored mail, no `Reply-To:` header reaches an
+        // external recipient, and the official client's Reply button falls
+        // through to the sender). Filling it in only creates the illusion of a
+        // working feature, so the parsed Reply-To is warned about instead. This
+        // guards against re-adding the plumbing.
         let mut msg = sample_msg();
-        msg.reply_to = vec![("Paul".to_string(), "paul@scarrone.co".to_string())];
+        msg.reply_to = vec![
+            ("Paul".to_string(), "paul@scarrone.co".to_string()),
+            (String::new(), "other@example.com".to_string()),
+        ];
         let d = build_draft_data(&msg, "me@tuta.io", vec![]);
-        assert_eq!(d.replyTos.len(), 1);
-        assert_eq!(d.replyTos[0].address, "paul@scarrone.co");
-        assert_eq!(d.replyTos[0].name, "Paul");
-    }
-
-    #[test]
-    fn draft_data_reply_to_empty_name_falls_back_to_address() {
-        // `SendDraftService` rejects an empty name on an address, the same
-        // rule `build_draft_recipients` already follows.
-        let mut msg = sample_msg();
-        msg.reply_to = vec![("".to_string(), "paul@scarrone.co".to_string())];
-        let d = build_draft_data(&msg, "me@tuta.io", vec![]);
-        assert_eq!(d.replyTos[0].name, "paul@scarrone.co");
-    }
-
-    #[test]
-    fn draft_data_without_reply_to_sends_none() {
-        let d = build_draft_data(&sample_msg(), "me@tuta.io", vec![]);
-        assert!(d.replyTos.is_empty());
+        assert!(
+            d.replyTos.is_empty(),
+            "replyTos must stay empty; the server ignores it"
+        );
     }
 
     #[test]

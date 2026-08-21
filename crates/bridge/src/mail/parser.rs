@@ -17,10 +17,11 @@ pub struct ParsedMessage {
     pub to: Vec<(String, String)>,
     pub cc: Vec<(String, String)>,
     pub bcc: Vec<(String, String)>,
-    /// `Reply-To`, when the submission set one. Carried through to
-    /// `DraftData.replyTos` so a reply goes where the sender asked rather
-    /// than to the bridge account -- which is the only route back to a
-    /// non-bridge address when the account cannot send as one.
+    /// `Reply-To`, when the submission set one. Parsed but NOT sent: Tuta
+    /// drops `DraftData.replyTos` (see `tuta::build_draft_data`), so the send
+    /// path logs a warning instead, rather than losing the submitter's intent
+    /// in silence. Kept so that warning can name the addresses, and so the
+    /// field is ready if Tuta ever carries it.
     pub reply_to: Vec<(String, String)>,
     pub subject: String,
     pub body_html: String,
@@ -64,8 +65,7 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         .map(|v| parse_address_list(&v))
         .unwrap_or_default();
     // A list, not a single address: RFC 5322 §3.6.2 makes Reply-To an
-    // address-list, and `DraftData.replyTos` is a `Vec` for the same
-    // reason.
+    // address-list.
     let reply_to = get_header(&headers, "reply-to")
         .map(|v| parse_address_list(&v))
         .unwrap_or_default();
@@ -687,8 +687,8 @@ mod tests {
 
     #[test]
     fn reply_to_is_an_address_list() {
-        // RFC 5322 §3.6.2 makes this a list, and `DraftData.replyTos` is a
-        // Vec for the same reason -- so a second address must not be lost.
+        // RFC 5322 §3.6.2 makes this a list, so a second address must not
+        // be lost from the warning the send path logs.
         let raw = "From: a@b.com\r\nReply-To: one@x.com, Two <two@x.com>\r\n\r\nbody";
         let msg = parse_rfc2822(raw);
         assert_eq!(msg.reply_to.len(), 2);
