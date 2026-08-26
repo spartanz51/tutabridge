@@ -575,7 +575,7 @@ impl ImapSession {
         let size = rfc.len() as u64;
 
         let details = body.and_then(|b| b.details.as_ref());
-        let addresses = address_headers(details, rfc);
+        let addresses = address_headers(&cached.mail, body);
 
         let sent_ms = details
             .map(|d| d.sentDate.as_millis())
@@ -886,29 +886,35 @@ impl ImapSession {
     }
 }
 
-/// Join a recipient list into a single comparable string for SEARCH.
 /// To / Cc / Bcc / Reply-To of a message as the client should see them.
-/// Exact from `details` while they are in memory; otherwise parsed back from
-/// the rendered message, which is all the disk cache holds after a restart
-/// (the placeholder of an unloaded message included). Bcc is never rendered,
-/// so it is only known while `details` are warm.
-fn address_headers(details: Option<&MailDetails>, rfc: &str) -> AddressHeaders {
+/// Exact from the details while they are in memory; parsed back from the
+/// rendered message for a body reloaded from disk, which is all the disk
+/// keeps after a restart; the envelope `firstRecipient` for a body never
+/// loaded, as its placeholder renders. Bcc is never rendered, so it is only
+/// known while the details are warm.
+fn address_headers(mail: &Mail, body: Option<&crate::body_cache::BodyEntry>) -> AddressHeaders {
     let pairs = |addrs: &[MailAddress]| {
         addrs
             .iter()
             .map(|a| (a.name.clone(), a.address.clone()))
             .collect()
     };
-    match details {
-        Some(d) => AddressHeaders {
-            to: pairs(&d.recipients.toRecipients),
-            cc: pairs(&d.recipients.ccRecipients),
-            bcc: pairs(&d.recipients.bccRecipients),
-            reply_to: reply_to_addresses(d)
-                .map(|(name, address)| (name.to_string(), address.to_string()))
-                .collect(),
+    match body {
+        Some(entry) => match &entry.details {
+            Some(d) => AddressHeaders {
+                to: pairs(&d.recipients.toRecipients),
+                cc: pairs(&d.recipients.ccRecipients),
+                bcc: pairs(&d.recipients.bccRecipients),
+                reply_to: reply_to_addresses(d)
+                    .map(|(name, address)| (name.to_string(), address.to_string()))
+                    .collect(),
+            },
+            None => parse_address_headers(&entry.rfc2822),
         },
-        None => parse_address_headers(rfc),
+        None => AddressHeaders {
+            to: pairs(mail.firstRecipient.as_slice()),
+            ..AddressHeaders::default()
+        },
     }
 }
 
@@ -978,11 +984,8 @@ fn build_fetch_response(
     }
 
     if items_upper.contains("ENVELOPE") {
-        if let Some(rfc) = rfc {
-            let details = body.and_then(|b| b.details.as_ref());
-            let addresses = address_headers(details, rfc);
-            parts.push(format!("ENVELOPE {}", build_envelope(cached, &addresses)));
-        }
+        let addresses = address_headers(&cached.mail, body);
+        parts.push(format!("ENVELOPE {}", build_envelope(cached, &addresses)));
     }
 
     if items_upper.contains("BODYSTRUCTURE") {
@@ -1084,22 +1087,23 @@ fn filter_header_fields(rfc: &str, fields: &[String], negate: bool) -> String {
     out
 }
 
-/// RFC 3501 §7.4.2 envelope. From and sender are the mail's sender; the
-/// address lists come from [`address_headers`]. Bcc, in-reply-to stay NIL.
+/// RFC 3501 §7.4.2 envelope. From and sender are the mail's sender, the
+/// reply-to slot falls back to it when the header is absent; the other
+/// address lists come from [`address_headers`]. Bcc and in-reply-to stay NIL.
 fn build_envelope(cached: &CachedMail, addresses: &AddressHeaders) -> String {
     let mail = &cached.mail;
     let date = format_internal_date(mail.receivedDate.as_millis());
     let subject = imap_string(&mail.subject);
 
-    let from = format!("({})", format_envelope_addr(&mail.sender));
-    let to = envelope_address_list(&addresses.to);
-    let cc = envelope_address_list(&addresses.cc);
-    // The reply-to slot falls back to From only when the header is absent.
+    let sender = [(mail.sender.name.clone(), mail.sender.address.clone())];
+    let from = envelope_address_list(&sender);
     let reply_to = if addresses.reply_to.is_empty() {
         from.clone()
     } else {
         envelope_address_list(&addresses.reply_to)
     };
+    let to = envelope_address_list(&addresses.to);
+    let cc = envelope_address_list(&addresses.cc);
 
     let msg_id = mail
         ._id
@@ -1139,10 +1143,6 @@ fn imap_string(s: &str) -> String {
     } else {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
-}
-
-fn format_envelope_addr(addr: &tutasdk::entities::generated::tutanota::MailAddress) -> String {
-    format_envelope_mailbox(&addr.name, &addr.address)
 }
 
 /// One ENVELOPE address structure: `(name NIL mailbox host)`.
@@ -1470,45 +1470,54 @@ mod tests {
         details
     }
 
+    /// A body fetched during this run: rendered message plus its details.
+    fn warm(mail: &Mail, details: MailDetails) -> crate::body_cache::BodyEntry {
+        crate::body_cache::BodyEntry {
+            rfc2822: crate::mail::mail_to_rfc2822(mail, Some(&details), &[]),
+            details: Some(details),
+        }
+    }
+
+    /// A body reloaded from disk: the rendered message without its details.
+    fn disk_reloaded(mail: &Mail, details: &MailDetails) -> crate::body_cache::BodyEntry {
+        crate::body_cache::BodyEntry {
+            details: None,
+            rfc2822: crate::mail::mail_to_rfc2822(mail, Some(details), &[]),
+        }
+    }
+
+    fn expected_full() -> AddressHeaders {
+        AddressHeaders {
+            to: vec![mailbox("Recip", "recip@test.com")],
+            cc: vec![mailbox("Zoë", "zoe@test.com")],
+            bcc: vec![],
+            reply_to: vec![mailbox("Support", "help@replies.example.com")],
+        }
+    }
+
     #[test]
     fn address_headers_come_from_details_while_they_are_warm() {
-        let details = full_details();
+        let mail = make_mail("m1", "Receipt", false);
+        let mut entry = warm(&mail, full_details());
         // A rendered message that disagrees must lose to the details.
-        let rfc = "To: other@x.com\r\nReply-To: other@x.com\r\n\r\nbody";
-        assert_eq!(
-            address_headers(Some(&details), rfc),
-            AddressHeaders {
-                to: vec![mailbox("Recip", "recip@test.com")],
-                cc: vec![mailbox("Zoë", "zoe@test.com")],
-                bcc: vec![],
-                reply_to: vec![mailbox("Support", "help@replies.example.com")],
-            }
-        );
+        entry.rfc2822 = "To: other@x.com\r\nReply-To: other@x.com\r\n\r\nbody".to_string();
+        assert_eq!(address_headers(&mail, Some(&entry)), expected_full());
     }
 
     #[test]
-    fn address_headers_are_parsed_back_from_the_rendered_message() {
-        // After a restart the disk cache only holds the rendered message: the
+    fn address_headers_are_parsed_back_from_a_body_reloaded_from_disk() {
+        // After a restart the disk only holds the rendered message: the
         // addresses must round-trip through it, display names decoded.
-        let details = full_details();
-        let rfc =
-            crate::mail::mail_to_rfc2822(&make_mail("m1", "Receipt", false), Some(&details), &[]);
-        assert_eq!(
-            address_headers(None, &rfc),
-            AddressHeaders {
-                to: vec![mailbox("Recip", "recip@test.com")],
-                cc: vec![mailbox("Zoë", "zoe@test.com")],
-                bcc: vec![],
-                reply_to: vec![mailbox("Support", "help@replies.example.com")],
-            }
-        );
+        let mail = make_mail("m1", "Receipt", false);
+        let entry = disk_reloaded(&mail, &full_details());
+        assert_eq!(address_headers(&mail, Some(&entry)), expected_full());
     }
 
     #[test]
-    fn address_headers_of_an_unloaded_message_are_its_placeholder_to() {
-        let rfc = crate::mail::mail_to_rfc2822(&make_mail("m1", "Receipt", false), None, &[]);
+    fn address_headers_of_an_unloaded_body_are_the_first_recipient() {
+        let mail = make_mail("m1", "Receipt", false);
         assert_eq!(
-            address_headers(None, &rfc),
+            address_headers(&mail, None),
             AddressHeaders {
                 to: vec![mailbox("Recip", "recip@test.com")],
                 ..AddressHeaders::default()
@@ -1518,8 +1527,7 @@ mod tests {
 
     #[test]
     fn build_envelope_lists_reply_to_and_cc() {
-        let addresses = address_headers(Some(&full_details()), "");
-        let env = build_envelope(&make_test_mail(1, "Receipt", false), &addresses);
+        let env = build_envelope(&make_test_mail(1, "Receipt", false), &expected_full());
         let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
         let reply_to = "((\"Support\" NIL \"help\" \"replies.example.com\"))";
         let to = "((\"Recip\" NIL \"recip\" \"test.com\"))";
@@ -1536,7 +1544,10 @@ mod tests {
     fn build_envelope_without_reply_to_or_cc_falls_back_to_from_and_nil() {
         // RFC 3501 §7.4.2: the reply-to slot repeats From when the header is
         // absent; an empty list is a bare NIL, not an empty parenthesised list.
-        let addresses = address_headers(Some(&make_details("<p>b</p>")), "");
+        let addresses = AddressHeaders {
+            to: vec![mailbox("Recip", "recip@test.com")],
+            ..AddressHeaders::default()
+        };
         let env = build_envelope(&make_test_mail(1, "Receipt", false), &addresses);
         let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
         let to = "((\"Recip\" NIL \"recip\" \"test.com\"))";
@@ -1728,60 +1739,34 @@ mod tests {
     // --- format_envelope_addr ---
 
     #[test]
-    fn test_format_envelope_addr_with_name() {
-        let addr = MailAddress {
-            _id: None,
-            name: "John Doe".to_string(),
-            address: "john@example.com".to_string(),
-            contact: None,
-            _errors: Default::default(),
-        };
+    fn envelope_mailbox_with_name() {
         assert_eq!(
-            format_envelope_addr(&addr),
+            format_envelope_mailbox("John Doe", "john@example.com"),
             "(\"John Doe\" NIL \"john\" \"example.com\")"
         );
     }
 
     #[test]
-    fn test_format_envelope_addr_no_name() {
-        let addr = MailAddress {
-            _id: None,
-            name: "".to_string(),
-            address: "john@example.com".to_string(),
-            contact: None,
-            _errors: Default::default(),
-        };
+    fn envelope_mailbox_without_name() {
         assert_eq!(
-            format_envelope_addr(&addr),
+            format_envelope_mailbox("", "john@example.com"),
             "(NIL NIL \"john\" \"example.com\")"
         );
     }
 
     #[test]
-    fn test_format_envelope_addr_no_domain() {
-        let addr = MailAddress {
-            _id: None,
-            name: "".to_string(),
-            address: "localonly".to_string(),
-            contact: None,
-            _errors: Default::default(),
-        };
-        assert_eq!(format_envelope_addr(&addr), "(NIL NIL \"localonly\" \"\")");
+    fn envelope_mailbox_without_domain() {
+        assert_eq!(
+            format_envelope_mailbox("", "localonly"),
+            "(NIL NIL \"localonly\" \"\")"
+        );
     }
 
     #[test]
-    fn test_format_envelope_addr_quotes_in_name() {
-        let addr = MailAddress {
-            _id: None,
-            name: "John \"JD\" Doe".to_string(),
-            address: "john@example.com".to_string(),
-            contact: None,
-            _errors: Default::default(),
-        };
-        let result = format_envelope_addr(&addr);
+    fn envelope_mailbox_escapes_quotes_in_name() {
         // Inner quotes are backslash-escaped inside the IMAP quoted string.
         assert_eq!(
-            result,
+            format_envelope_mailbox("John \"JD\" Doe", "john@example.com"),
             "(\"John \\\"JD\\\" Doe\" NIL \"john\" \"example.com\")"
         );
     }
@@ -2972,14 +2957,6 @@ mod tests {
             expunge_idx_3 < expunge_idx_2,
             "EXPUNGE 3 must come before EXPUNGE 2, got {resp:?}",
         );
-    }
-
-    /// A body reloaded from disk: the rendered message without its details.
-    fn disk_reloaded(mail: &Mail, details: &MailDetails) -> crate::body_cache::BodyEntry {
-        crate::body_cache::BodyEntry {
-            details: None,
-            rfc2822: crate::mail::mail_to_rfc2822(mail, Some(details), &[]),
-        }
     }
 
     #[tokio::test]

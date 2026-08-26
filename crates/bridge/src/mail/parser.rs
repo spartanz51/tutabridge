@@ -125,8 +125,7 @@ pub(crate) struct AddressHeaders {
 /// The address-list headers of a rendered message. Reads the header section
 /// only, so it is cheap on a message with a large body.
 pub(crate) fn parse_address_headers(raw: &str) -> AddressHeaders {
-    let header_section = raw.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(raw);
-    address_headers_of(&parse_headers(header_section))
+    address_headers_of(&parse_headers(header_section(raw)))
 }
 
 fn address_headers_of(headers: &[(String, String)]) -> AddressHeaders {
@@ -178,13 +177,20 @@ fn last_msg_id(raw: &str) -> Option<String> {
 }
 
 pub(super) fn split_headers_body(raw: &str) -> (String, String) {
-    if let Some(pos) = raw.find("\r\n\r\n") {
-        (raw[..pos].to_string(), raw[pos + 4..].to_string())
-    } else if let Some(pos) = raw.find("\n\n") {
-        (raw[..pos].to_string(), raw[pos + 2..].to_string())
-    } else {
-        (raw.to_string(), String::new())
-    }
+    let headers = header_section(raw);
+    let body = raw[headers.len()..]
+        .strip_prefix("\r\n\r\n")
+        .or_else(|| raw[headers.len()..].strip_prefix("\n\n"))
+        .unwrap_or("");
+    (headers.to_string(), body.to_string())
+}
+
+/// The header section of a message: everything before the first blank line,
+/// CRLF or bare LF. The whole message when there is none.
+fn header_section(raw: &str) -> &str {
+    raw.find("\r\n\r\n")
+        .or_else(|| raw.find("\n\n"))
+        .map_or(raw, |pos| &raw[..pos])
 }
 
 pub(super) fn parse_headers(header_section: &str) -> Vec<(String, String)> {
@@ -238,11 +244,12 @@ fn parse_address_single(raw: &str) -> (String, String) {
     (String::new(), raw.to_string())
 }
 
-/// Strip the quotes of an RFC 5322 quoted-string and undo its `\` escapes;
-/// anything else is returned as is.
+/// Strip the quotes of an RFC 5322 quoted-string and undo its `\\` escapes.
+/// A phrase that is not one whole quoted-string only loses stray quotes at
+/// its ends, as sloppy senders write `"John <j@x>` and mean `John`.
 fn unquote(phrase: &str) -> String {
     let Some(inner) = phrase.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
-        return phrase.to_string();
+        return phrase.trim_matches('"').to_string();
     };
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
@@ -261,7 +268,8 @@ fn parse_address_list(raw: &str) -> Vec<(String, String)> {
     let mut in_quotes = false;
     let mut current = String::new();
 
-    for ch in raw.chars() {
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
         match ch {
             // A quoted display name may contain commas and angle brackets that
             // are NOT list separators, e.g. `"Doe, John" <j@x.com>`. Track the
@@ -270,6 +278,12 @@ fn parse_address_list(raw: &str) -> Vec<(String, String)> {
             '"' => {
                 in_quotes = !in_quotes;
                 current.push(ch);
+            }
+            // An escaped character inside the quoted-string (`\\"`, `\\\\`) is
+            // not a delimiter: keep the pair and leave the quote state alone.
+            '\\' if in_quotes => {
+                current.push(ch);
+                current.extend(chars.next());
             }
             '<' if !in_quotes => {
                 depth += 1;
@@ -1047,5 +1061,35 @@ mod tests {
         let msg = parse_rfc2822(raw);
         assert_eq!(msg.from_name, "Say \"hi\" \\ bye.");
         assert_eq!(msg.from_address, "a@b.c");
+    }
+
+    #[test]
+    fn escaped_quotes_inside_a_quoted_name_do_not_split_the_list() {
+        let raw = "To: \"5\\\" screen, big\" <a@b.c>, x@y.z\r\n\r\n";
+        assert_eq!(
+            parse_rfc2822(raw).to,
+            vec![
+                ("5\" screen, big".to_string(), "a@b.c".to_string()),
+                (String::new(), "x@y.z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn stray_quotes_around_a_name_are_still_trimmed() {
+        let msg = parse_rfc2822("From: \"John <j@x.com>\r\n\r\n");
+        assert_eq!(
+            (msg.from_name.as_str(), msg.from_address.as_str()),
+            ("John", "j@x.com")
+        );
+    }
+
+    #[test]
+    fn address_headers_accept_a_bare_lf_message() {
+        // Same separator rules as parse_rfc2822: the body's "To:" is not a header.
+        assert_eq!(
+            parse_address_headers("To: a@b.c\n\nTo: not-a-header@x.y").to,
+            vec![(String::new(), "a@b.c".to_string())]
+        );
     }
 }

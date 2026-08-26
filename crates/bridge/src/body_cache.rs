@@ -12,9 +12,9 @@
 //! footprint. Now memory is bounded no matter how many bodies a client pulls.
 //!
 //! `MailDetails` is in-memory only (it is not persisted): after an eviction or
-//! a restart a body re-read from disk has `details: None`. Consumers fall back
-//! to metadata (e.g. ENVELOPE uses `firstRecipient`), which is the same
-//! behavior mails outside the prefetch window always had.
+//! a restart a body re-read from disk has `details: None`. Consumers that need
+//! the addresses (ENVELOPE, SEARCH) then parse them back from the rendered
+//! message, so what they answer follows the on-disk rendering.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
