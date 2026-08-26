@@ -43,6 +43,18 @@ pub fn mail_to_rfc2822(
         if !cc_addrs.is_empty() {
             msg.push_str(&format!("Cc: {}\r\n", cc_addrs.join(", ")));
         }
+
+        // Received mail may carry a Reply-To: transactional senders use it to
+        // route replies away from the no-reply address they send from. Tuta
+        // keeps it in `replyTos`, so emit it or the client replies to `From:`,
+        // i.e. to the wrong place. Rendered through the same helper as To/Cc
+        // so the three headers cannot drift apart.
+        let reply_tos: Vec<String> = reply_to_addresses(details)
+            .map(|(name, address)| format_name_and_address(name, address))
+            .collect();
+        if !reply_tos.is_empty() {
+            msg.push_str(&format!("Reply-To: {}\r\n", reply_tos.join(", ")));
+        }
     } else if let Some(ref first) = mail.firstRecipient {
         msg.push_str(&format!("To: {}\r\n", format_address(first)));
     }
@@ -241,11 +253,29 @@ pub(crate) fn html_to_text(html: &str) -> String {
     decode_entities(&out)
 }
 
+/// The `(name, address)` pairs of a received mail's Reply-To, addresses
+/// trimmed and blank entries dropped. The `Reply-To:` header and the IMAP
+/// ENVELOPE both read this, so they cannot disagree on what counts as an
+/// address.
+pub(crate) fn reply_to_addresses(details: &MailDetails) -> impl Iterator<Item = (&str, &str)> {
+    details
+        .replyTos
+        .iter()
+        .map(|a| (a.name.as_str(), a.address.trim()))
+        .filter(|(_, address)| !address.is_empty())
+}
+
 pub(crate) fn format_address(addr: &MailAddress) -> String {
-    if addr.name.is_empty() {
-        addr.address.clone()
+    format_name_and_address(&addr.name, &addr.address)
+}
+
+/// `Name <addr>` when there is a display name, the bare address otherwise.
+/// Single rendering for every address-bearing header we emit.
+fn format_name_and_address(name: &str, address: &str) -> String {
+    if name.is_empty() {
+        address.to_string()
     } else {
-        format!("{} <{}>", encode_header_value(&addr.name), addr.address)
+        format!("{} <{}>", encode_header_value(name), address)
     }
 }
 
@@ -688,6 +718,161 @@ mod tests {
         assert!(rfc.contains("Message-ID: <"));
         // Body should be base64 of "<p>(No body available)</p>"
         assert!(rfc.contains("\r\n\r\n"));
+    }
+
+    // --- Reply-To on received mail ---
+
+    /// A received mail with the given `(name, address)` reply-to entries.
+    fn mail_with_reply_tos(pairs: &[(&str, &str)]) -> (Mail, MailDetails) {
+        use tutasdk::date::DateTime;
+        use tutasdk::entities::generated::tutanota::{Body, EncryptedMailAddress, Recipients};
+        use tutasdk::IdTupleGenerated;
+
+        let mail = Mail {
+            _id: Some(IdTupleGenerated::new(test_id("rlist"), test_id("relem"))),
+            _permissions: test_id("rperm"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            subject: "Receipt".to_string(),
+            receivedDate: DateTime::from_millis(0),
+            state: 2,
+            unread: false,
+            confidential: false,
+            replyType: 0,
+            _ownerGroup: None,
+            differentEnvelopeSender: None,
+            listUnsubscribe: false,
+            movedTime: None,
+            phishingStatus: 0,
+            authStatus: None,
+            method: 0,
+            recipientCount: 1,
+            encryptionAuthStatus: None,
+            _ownerKeyVersion: None,
+            processingState: 0,
+            processNeeded: false,
+            sendAt: None,
+            serverClassificationData: None,
+            _kdfNonce: None,
+            sender: MailAddress {
+                _id: None,
+                name: String::new(),
+                address: "noreply@uber.com".to_string(),
+                contact: None,
+                _errors: Default::default(),
+            },
+            attachments: vec![],
+            conversationEntry: IdTupleGenerated::new(test_id("rclist"), test_id("rcelem")),
+            firstRecipient: None,
+            mailDetails: None,
+            mailDetailsDraft: None,
+            bucketKey: None,
+            sets: vec![],
+            clientSpamClassifierResult: None,
+            _errors: Default::default(),
+        };
+
+        let details = MailDetails {
+            _id: None,
+            sentDate: DateTime::from_millis(0),
+            authStatus: 0,
+            replyTos: pairs
+                .iter()
+                .map(|(name, address)| EncryptedMailAddress {
+                    _id: None,
+                    name: (*name).to_string(),
+                    address: (*address).to_string(),
+                    _errors: Default::default(),
+                })
+                .collect(),
+            recipients: Recipients {
+                _id: None,
+                toRecipients: vec![MailAddress {
+                    _id: None,
+                    name: String::new(),
+                    address: "me@tuta.io".to_string(),
+                    contact: None,
+                    _errors: Default::default(),
+                }],
+                ccRecipients: vec![],
+                bccRecipients: vec![],
+            },
+            headers: None,
+            body: Body {
+                _id: None,
+                text: Some("<p>body</p>".to_string()),
+                compressedText: None,
+                _errors: Default::default(),
+            },
+        };
+        (mail, details)
+    }
+
+    /// The whole `Reply-To:` line, or `None` when the header is absent.
+    fn reply_to_line(pairs: &[(&str, &str)]) -> Option<String> {
+        let (mail, details) = mail_with_reply_tos(pairs);
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        rfc.split("\r\n")
+            .find(|l| l.starts_with("Reply-To:"))
+            .map(|l| l.to_string())
+    }
+
+    #[test]
+    fn reply_to_without_a_display_name_is_the_bare_address() {
+        // The real-world shape: Uber and Kraken send from a no-reply address
+        // and set a Reply-To with no display name.
+        assert_eq!(
+            reply_to_line(&[("", "no-reply@replies.uber.com")]),
+            Some("Reply-To: no-reply@replies.uber.com".to_string())
+        );
+    }
+
+    #[test]
+    fn reply_to_with_a_display_name_keeps_it() {
+        assert_eq!(
+            reply_to_line(&[("Support", "help@example.com")]),
+            Some("Reply-To: Support <help@example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn reply_to_non_ascii_display_name_is_an_encoded_word() {
+        assert_eq!(
+            reply_to_line(&[("Réponses", "help@example.com")]),
+            Some("Reply-To: =?UTF-8?B?UsOpcG9uc2Vz?= <help@example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn several_reply_tos_are_joined() {
+        assert_eq!(
+            reply_to_line(&[("One", "one@x.com"), ("", "two@x.com")]),
+            Some("Reply-To: One <one@x.com>, two@x.com".to_string())
+        );
+    }
+
+    #[test]
+    fn no_reply_tos_emits_no_header() {
+        // Absent must stay absent: no empty header, and no echoing the sender.
+        assert_eq!(reply_to_line(&[]), None);
+    }
+
+    #[test]
+    fn blank_reply_to_addresses_are_skipped() {
+        assert_eq!(
+            reply_to_line(&[("Ghost", "   "), ("Real", "real@x.com")]),
+            Some("Reply-To: Real <real@x.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn padded_reply_to_address_is_trimmed() {
+        // Whitespace around the address would otherwise land inside the angle
+        // brackets and give the client an unparseable mailbox.
+        assert_eq!(
+            reply_to_line(&[("Support", "  help@x.com ")]),
+            Some("Reply-To: Support <help@x.com>".to_string())
+        );
     }
 
     #[test]

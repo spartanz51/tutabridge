@@ -4,7 +4,9 @@ use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, Tut
 
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
-use crate::mail::rfc2822::{extract_headers, format_address, format_internal_date};
+use crate::mail::rfc2822::{
+    extract_headers, format_address, format_internal_date, reply_to_addresses,
+};
 use crate::store::LocalStore;
 use crate::sync::MailStore;
 use crate::tuta::{FolderInfo, MailBackend};
@@ -1097,7 +1099,20 @@ fn build_envelope(cached: &CachedMail, details: Option<&MailDetails>) -> String 
         .unwrap_or_default();
     let msg_id = imap_string(&msg_id);
 
-    format!("(\"{date}\" {subject} ({from}) ({from}) ({from}) ({to}) NIL NIL NIL {msg_id})")
+    // RFC 3501 §7.4.2: the reply-to slot carries the message's Reply-To, and
+    // falls back to From only when the header is absent. Same addresses as
+    // the `Reply-To:` line rendered in the RFC 2822 message.
+    let reply_to = details
+        .map(|d| {
+            reply_to_addresses(d)
+                .map(|(name, address)| format_envelope_mailbox(name, address))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| from.clone());
+
+    format!("(\"{date}\" {subject} ({from}) ({from}) ({reply_to}) ({to}) NIL NIL NIL {msg_id})")
 }
 
 /// Encode a string as an IMAP nstring. Safe 7-bit text becomes a quoted string;
@@ -1118,11 +1133,16 @@ fn imap_string(s: &str) -> String {
 }
 
 fn format_envelope_addr(addr: &tutasdk::entities::generated::tutanota::MailAddress) -> String {
-    let (user, domain) = addr.address.split_once('@').unwrap_or((&addr.address, ""));
-    let name = if addr.name.is_empty() {
+    format_envelope_mailbox(&addr.name, &addr.address)
+}
+
+/// One ENVELOPE address structure: `(name NIL mailbox host)`.
+fn format_envelope_mailbox(name: &str, address: &str) -> String {
+    let (user, domain) = address.split_once('@').unwrap_or((address, ""));
+    let name = if name.is_empty() {
         "NIL".to_string()
     } else {
-        imap_string(&addr.name)
+        imap_string(name)
     };
     format!(
         "({} NIL {} {})",
@@ -1404,6 +1424,46 @@ mod tests {
             !env.contains("\"La"),
             "subject must not be a quoted string holding the newline: {env}"
         );
+    }
+
+    #[test]
+    fn build_envelope_reply_to_slot_carries_the_header() {
+        use tutasdk::entities::generated::tutanota::EncryptedMailAddress;
+
+        let mut details = make_details("<p>b</p>");
+        details.replyTos = vec![
+            EncryptedMailAddress {
+                _id: None,
+                name: "Support".to_string(),
+                address: " help@replies.example.com ".to_string(),
+                _errors: Default::default(),
+            },
+            EncryptedMailAddress {
+                _id: None,
+                name: String::new(),
+                address: String::new(),
+                _errors: Default::default(),
+            },
+        ];
+        let env = build_envelope(&make_test_mail(1, "Receipt", false), Some(&details));
+        let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
+        let reply_to = "((\"Support\" NIL \"help\" \"replies.example.com\"))";
+        assert!(
+            env.contains(&format!("{from} {from} {reply_to} ((")),
+            "from, sender, then reply-to: {env}"
+        );
+    }
+
+    #[test]
+    fn build_envelope_reply_to_slot_falls_back_to_from() {
+        // RFC 3501 §7.4.2: without a Reply-To header the slot repeats From,
+        // whether details are missing or carry no reply-to at all.
+        let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
+        let cold = build_envelope(&make_test_mail(1, "Receipt", false), None);
+        assert!(cold.contains(&format!("{from} {from} {from} ")), "{cold}");
+        let details = make_details("<p>b</p>");
+        let warm = build_envelope(&make_test_mail(1, "Receipt", false), Some(&details));
+        assert!(warm.contains(&format!("{from} {from} {from} ")), "{warm}");
     }
 
     // --- parse_command ---
@@ -2529,6 +2589,47 @@ mod tests {
             .handle_command(r#"A006 SEARCH SUBJECT "nonexistent""#)
             .await;
         assert_eq!(resp[0], "* SEARCH \r\n");
+    }
+
+    #[tokio::test]
+    async fn test_search_header_reply_to_on_warm_body() {
+        use tutasdk::entities::generated::tutanota::EncryptedMailAddress;
+
+        let m1 = make_mail("m1", "Receipt", false);
+        let m2 = make_mail("m2", "Newsletter", false);
+        let mut d1 = make_details("<p>Body 1</p>");
+        d1.replyTos = vec![EncryptedMailAddress {
+            _id: None,
+            name: String::new(),
+            address: "no-reply@replies.uber.com".to_string(),
+            _errors: Default::default(),
+        }];
+        let d2 = make_details("<p>Body 2</p>");
+
+        let backend = Arc::new(MockBackend::with_mails(vec![m1.clone(), m2.clone()]));
+        let (store, mut session) = make_session(backend).await;
+        for (id, mail, details) in [("m1", &m1, d1), ("m2", &m2, d2)] {
+            let rfc2822 = crate::mail::mail_to_rfc2822(mail, Some(&details), &[]);
+            store.bodies().insert(
+                id,
+                crate::body_cache::BodyEntry {
+                    details: Some(details),
+                    rfc2822,
+                },
+            );
+        }
+        session.handle_command("A001 LOGIN user pass").await;
+        session.handle_command("A002 SELECT INBOX").await;
+
+        // Only the mail carrying a Reply-To matches, by value or by presence.
+        let resp = session
+            .handle_command(r#"A003 SEARCH HEADER Reply-To "replies.uber.com""#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH 1\r\n");
+        let resp = session
+            .handle_command(r#"A004 SEARCH HEADER Reply-To """#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH 1\r\n");
     }
 
     #[tokio::test]
