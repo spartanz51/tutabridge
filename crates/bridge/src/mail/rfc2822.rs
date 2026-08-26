@@ -281,7 +281,7 @@ pub(crate) fn format_address(addr: &MailAddress) -> String {
 /// the characters that delimit a mailbox (`<>`, `,`, `;`, quotes, parentheses,
 /// whitespace) would let a Reply-To we did not write smuggle in a second
 /// recipient for the reply to go to.
-fn format_name_and_address(name: &str, address: &str) -> String {
+pub(crate) fn format_name_and_address(name: &str, address: &str) -> String {
     let address: String = address
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '<' | '>' | ',' | ';' | '"' | '(' | ')'))

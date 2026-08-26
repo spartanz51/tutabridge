@@ -4,8 +4,10 @@ use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, Tut
 
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
+use crate::mail::parser::{parse_address_headers, AddressHeaders};
 use crate::mail::rfc2822::{
-    extract_headers, format_address, format_internal_date, reply_to_addresses,
+    extract_headers, format_address, format_internal_date, format_name_and_address,
+    reply_to_addresses,
 };
 use crate::store::LocalStore;
 use crate::sync::MailStore;
@@ -572,26 +574,8 @@ impl ImapSession {
         let headers = extract_headers(rfc);
         let size = rfc.len() as u64;
 
-        // To/Cc/Bcc come from details when the body entry is warm; otherwise
-        // only the envelope `firstRecipient` (rendered as To) is available.
         let details = body.and_then(|b| b.details.as_ref());
-        let (to, cc, bcc) = match details {
-            Some(d) => (
-                join_addrs(&d.recipients.toRecipients),
-                join_addrs(&d.recipients.ccRecipients),
-                join_addrs(&d.recipients.bccRecipients),
-            ),
-            None => (
-                cached
-                    .mail
-                    .firstRecipient
-                    .as_ref()
-                    .map(format_address)
-                    .unwrap_or_default(),
-                String::new(),
-                String::new(),
-            ),
-        };
+        let addresses = address_headers(details, rfc);
 
         let sent_ms = details
             .map(|d| d.sentDate.as_millis())
@@ -610,9 +594,9 @@ impl ImapSession {
             element_id,
             subject: &cached.mail.subject,
             from: format_address(&cached.mail.sender),
-            to,
-            cc,
-            bcc,
+            to: join_mailboxes(&addresses.to),
+            cc: join_mailboxes(&addresses.cc),
+            bcc: join_mailboxes(&addresses.bcc),
             headers,
             date_ms: cached.mail.receivedDate.as_millis(),
             sent_ms,
@@ -903,10 +887,36 @@ impl ImapSession {
 }
 
 /// Join a recipient list into a single comparable string for SEARCH.
-fn join_addrs(addrs: &[MailAddress]) -> String {
-    addrs
+/// To / Cc / Bcc / Reply-To of a message as the client should see them.
+/// Exact from `details` while they are in memory; otherwise parsed back from
+/// the rendered message, which is all the disk cache holds after a restart
+/// (the placeholder of an unloaded message included). Bcc is never rendered,
+/// so it is only known while `details` are warm.
+fn address_headers(details: Option<&MailDetails>, rfc: &str) -> AddressHeaders {
+    let pairs = |addrs: &[MailAddress]| {
+        addrs
+            .iter()
+            .map(|a| (a.name.clone(), a.address.clone()))
+            .collect()
+    };
+    match details {
+        Some(d) => AddressHeaders {
+            to: pairs(&d.recipients.toRecipients),
+            cc: pairs(&d.recipients.ccRecipients),
+            bcc: pairs(&d.recipients.bccRecipients),
+            reply_to: reply_to_addresses(d)
+                .map(|(name, address)| (name.to_string(), address.to_string()))
+                .collect(),
+        },
+        None => parse_address_headers(rfc),
+    }
+}
+
+/// `Name <addr>, ...` for SEARCH substring matching.
+fn join_mailboxes(mailboxes: &[(String, String)]) -> String {
+    mailboxes
         .iter()
-        .map(format_address)
+        .map(|(name, address)| format_name_and_address(name, address))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -941,7 +951,6 @@ fn build_fetch_response(
         None
     };
     let rfc: Option<&str> = body.map(|b| b.rfc2822.as_str()).or(placeholder.as_deref());
-    let details: Option<&MailDetails> = body.and_then(|b| b.details.as_ref());
 
     if uid_mode || items_upper.contains("UID") {
         parts.push(format!("UID {}", cached.uid));
@@ -969,7 +978,11 @@ fn build_fetch_response(
     }
 
     if items_upper.contains("ENVELOPE") {
-        parts.push(format!("ENVELOPE {}", build_envelope(cached, details)));
+        if let Some(rfc) = rfc {
+            let details = body.and_then(|b| b.details.as_ref());
+            let addresses = address_headers(details, rfc);
+            parts.push(format!("ENVELOPE {}", build_envelope(cached, &addresses)));
+        }
     }
 
     if items_upper.contains("BODYSTRUCTURE") {
@@ -1071,26 +1084,22 @@ fn filter_header_fields(rfc: &str, fields: &[String], negate: bool) -> String {
     out
 }
 
-/// `details` (when the body entry is warm in cache) provides the full To list;
-/// otherwise the envelope falls back to the metadata `firstRecipient`, as
-/// unloaded messages always have.
-fn build_envelope(cached: &CachedMail, details: Option<&MailDetails>) -> String {
+/// RFC 3501 §7.4.2 envelope. From and sender are the mail's sender; the
+/// address lists come from [`address_headers`]. Bcc, in-reply-to stay NIL.
+fn build_envelope(cached: &CachedMail, addresses: &AddressHeaders) -> String {
     let mail = &cached.mail;
     let date = format_internal_date(mail.receivedDate.as_millis());
     let subject = imap_string(&mail.subject);
 
-    let from = format_envelope_addr(&mail.sender);
-    let to = details
-        .map(|d| {
-            d.recipients
-                .toRecipients
-                .iter()
-                .map(format_envelope_addr)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .or_else(|| mail.firstRecipient.as_ref().map(format_envelope_addr))
-        .unwrap_or_else(|| "NIL".to_string());
+    let from = format!("({})", format_envelope_addr(&mail.sender));
+    let to = envelope_address_list(&addresses.to);
+    let cc = envelope_address_list(&addresses.cc);
+    // The reply-to slot falls back to From only when the header is absent.
+    let reply_to = if addresses.reply_to.is_empty() {
+        from.clone()
+    } else {
+        envelope_address_list(&addresses.reply_to)
+    };
 
     let msg_id = mail
         ._id
@@ -1099,20 +1108,20 @@ fn build_envelope(cached: &CachedMail, details: Option<&MailDetails>) -> String 
         .unwrap_or_default();
     let msg_id = imap_string(&msg_id);
 
-    // RFC 3501 §7.4.2: the reply-to slot carries the message's Reply-To, and
-    // falls back to From only when the header is absent. Same addresses as
-    // the `Reply-To:` line rendered in the RFC 2822 message.
-    let reply_to = details
-        .map(|d| {
-            reply_to_addresses(d)
-                .map(|(name, address)| format_envelope_mailbox(name, address))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| from.clone());
+    format!("(\"{date}\" {subject} {from} {from} {reply_to} {to} {cc} NIL NIL {msg_id})")
+}
 
-    format!("(\"{date}\" {subject} ({from}) ({from}) ({reply_to}) ({to}) NIL NIL NIL {msg_id})")
+/// An ENVELOPE address list: `((addr) (addr) ...)`, or `NIL` when empty.
+fn envelope_address_list(mailboxes: &[(String, String)]) -> String {
+    if mailboxes.is_empty() {
+        return "NIL".to_string();
+    }
+    let inner = mailboxes
+        .iter()
+        .map(|(name, address)| format_envelope_mailbox(name, address))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("({inner})")
 }
 
 /// Encode a string as an IMAP nstring. Safe 7-bit text becomes a quoted string;
@@ -1415,7 +1424,7 @@ mod tests {
         // string, producing a malformed FETCH response that broke the client's
         // parse of the message list (an empty mailbox in Thunderbird).
         let subj = "La\nselection Courtois - Le bien du mois";
-        let env = build_envelope(&make_test_mail(1, subj, false), None);
+        let env = build_envelope(&make_test_mail(1, subj, false), &AddressHeaders::default());
         assert!(
             env.contains(&format!("{{{}}}\r\n{}", subj.len(), subj)),
             "subject must be a literal, got: {env}"
@@ -1426,11 +1435,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_envelope_reply_to_slot_carries_the_header() {
+    // --- address_headers / build_envelope ---
+
+    fn mailbox(name: &str, address: &str) -> (String, String) {
+        (name.to_string(), address.to_string())
+    }
+
+    /// Details with a To, a Cc and a Reply-To, as a received mail carries them.
+    fn full_details() -> MailDetails {
         use tutasdk::entities::generated::tutanota::EncryptedMailAddress;
 
         let mut details = make_details("<p>b</p>");
+        details.recipients.ccRecipients = vec![MailAddress {
+            _id: None,
+            name: "Zoë".to_string(),
+            address: "zoe@test.com".to_string(),
+            contact: None,
+            _errors: Default::default(),
+        }];
         details.replyTos = vec![
             EncryptedMailAddress {
                 _id: None,
@@ -1445,25 +1467,83 @@ mod tests {
                 _errors: Default::default(),
             },
         ];
-        let env = build_envelope(&make_test_mail(1, "Receipt", false), Some(&details));
-        let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
-        let reply_to = "((\"Support\" NIL \"help\" \"replies.example.com\"))";
-        assert!(
-            env.contains(&format!("{from} {from} {reply_to} ((")),
-            "from, sender, then reply-to: {env}"
+        details
+    }
+
+    #[test]
+    fn address_headers_come_from_details_while_they_are_warm() {
+        let details = full_details();
+        // A rendered message that disagrees must lose to the details.
+        let rfc = "To: other@x.com\r\nReply-To: other@x.com\r\n\r\nbody";
+        assert_eq!(
+            address_headers(Some(&details), rfc),
+            AddressHeaders {
+                to: vec![mailbox("Recip", "recip@test.com")],
+                cc: vec![mailbox("Zoë", "zoe@test.com")],
+                bcc: vec![],
+                reply_to: vec![mailbox("Support", "help@replies.example.com")],
+            }
         );
     }
 
     #[test]
-    fn build_envelope_reply_to_slot_falls_back_to_from() {
-        // RFC 3501 §7.4.2: without a Reply-To header the slot repeats From,
-        // whether details are missing or carry no reply-to at all.
+    fn address_headers_are_parsed_back_from_the_rendered_message() {
+        // After a restart the disk cache only holds the rendered message: the
+        // addresses must round-trip through it, display names decoded.
+        let details = full_details();
+        let rfc =
+            crate::mail::mail_to_rfc2822(&make_mail("m1", "Receipt", false), Some(&details), &[]);
+        assert_eq!(
+            address_headers(None, &rfc),
+            AddressHeaders {
+                to: vec![mailbox("Recip", "recip@test.com")],
+                cc: vec![mailbox("Zoë", "zoe@test.com")],
+                bcc: vec![],
+                reply_to: vec![mailbox("Support", "help@replies.example.com")],
+            }
+        );
+    }
+
+    #[test]
+    fn address_headers_of_an_unloaded_message_are_its_placeholder_to() {
+        let rfc = crate::mail::mail_to_rfc2822(&make_mail("m1", "Receipt", false), None, &[]);
+        assert_eq!(
+            address_headers(None, &rfc),
+            AddressHeaders {
+                to: vec![mailbox("Recip", "recip@test.com")],
+                ..AddressHeaders::default()
+            }
+        );
+    }
+
+    #[test]
+    fn build_envelope_lists_reply_to_and_cc() {
+        let addresses = address_headers(Some(&full_details()), "");
+        let env = build_envelope(&make_test_mail(1, "Receipt", false), &addresses);
         let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
-        let cold = build_envelope(&make_test_mail(1, "Receipt", false), None);
-        assert!(cold.contains(&format!("{from} {from} {from} ")), "{cold}");
-        let details = make_details("<p>b</p>");
-        let warm = build_envelope(&make_test_mail(1, "Receipt", false), Some(&details));
-        assert!(warm.contains(&format!("{from} {from} {from} ")), "{warm}");
+        let reply_to = "((\"Support\" NIL \"help\" \"replies.example.com\"))";
+        let to = "((\"Recip\" NIL \"recip\" \"test.com\"))";
+        let cc = "(({4}\r\nZoë NIL \"zoe\" \"test.com\"))";
+        assert!(
+            env.ends_with(&format!(
+                "{from} {from} {reply_to} {to} {cc} NIL NIL \"<mail_list.mail_elem@tutabridge.local>\")"
+            )),
+            "{env}"
+        );
+    }
+
+    #[test]
+    fn build_envelope_without_reply_to_or_cc_falls_back_to_from_and_nil() {
+        // RFC 3501 §7.4.2: the reply-to slot repeats From when the header is
+        // absent; an empty list is a bare NIL, not an empty parenthesised list.
+        let addresses = address_headers(Some(&make_details("<p>b</p>")), "");
+        let env = build_envelope(&make_test_mail(1, "Receipt", false), &addresses);
+        let from = "((\"Sender\" NIL \"sender\" \"tuta.com\"))";
+        let to = "((\"Recip\" NIL \"recip\" \"test.com\"))";
+        assert!(
+            env.contains(&format!("{from} {from} {from} {to} NIL NIL NIL ")),
+            "{env}"
+        );
     }
 
     // --- parse_command ---
@@ -2892,5 +2972,50 @@ mod tests {
             expunge_idx_3 < expunge_idx_2,
             "EXPUNGE 3 must come before EXPUNGE 2, got {resp:?}",
         );
+    }
+
+    /// A body reloaded from disk: the rendered message without its details.
+    fn disk_reloaded(mail: &Mail, details: &MailDetails) -> crate::body_cache::BodyEntry {
+        crate::body_cache::BodyEntry {
+            details: None,
+            rfc2822: crate::mail::mail_to_rfc2822(mail, Some(details), &[]),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_envelope_and_search_survive_a_body_reloaded_from_disk() {
+        let m1 = make_mail("m1", "Receipt", false);
+        let m2 = make_mail("m2", "Newsletter", false);
+        let backend = Arc::new(MockBackend::with_mails(vec![m1.clone(), m2.clone()]));
+        let (store, mut session) = make_session(backend).await;
+        store
+            .bodies()
+            .insert("m1", disk_reloaded(&m1, &full_details()));
+        store
+            .bodies()
+            .insert("m2", disk_reloaded(&m2, &make_details("<p>b</p>")));
+        session.handle_command("A001 LOGIN user pass").await;
+        session.handle_command("A002 SELECT INBOX").await;
+
+        let resp = session.handle_command("A003 FETCH 1 (ENVELOPE)").await;
+        assert!(
+            resp[0].contains("((\"Support\" NIL \"help\" \"replies.example.com\"))"),
+            "reply-to slot: {}",
+            resp[0]
+        );
+        assert!(
+            resp[0].contains("Zoë NIL \"zoe\" \"test.com\""),
+            "cc slot: {}",
+            resp[0]
+        );
+
+        let resp = session
+            .handle_command(r#"A004 SEARCH CC "zoe@test.com""#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH 1\r\n");
+        let resp = session
+            .handle_command(r#"A005 SEARCH TO "recip@test.com""#)
+            .await;
+        assert_eq!(resp[0], "* SEARCH 1 2\r\n");
     }
 }

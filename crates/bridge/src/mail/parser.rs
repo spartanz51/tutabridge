@@ -55,20 +55,12 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
     let from_raw = get_header(&headers, "from").unwrap_or_default();
     let (from_name, from_address) = parse_address_single(&from_raw);
 
-    let to = get_header(&headers, "to")
-        .map(|v| parse_address_list(&v))
-        .unwrap_or_default();
-    let cc = get_header(&headers, "cc")
-        .map(|v| parse_address_list(&v))
-        .unwrap_or_default();
-    let bcc = get_header(&headers, "bcc")
-        .map(|v| parse_address_list(&v))
-        .unwrap_or_default();
-    // A list, not a single address: RFC 5322 §3.6.2 makes Reply-To an
-    // address-list.
-    let reply_to = get_header(&headers, "reply-to")
-        .map(|v| parse_address_list(&v))
-        .unwrap_or_default();
+    let AddressHeaders {
+        to,
+        cc,
+        bcc,
+        reply_to,
+    } = address_headers_of(&headers);
 
     let subject = get_header(&headers, "subject")
         .map(|s| decode_header_value(&s))
@@ -116,6 +108,38 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         message_id,
         in_reply_to,
         attachments,
+    }
+}
+
+/// The address-list headers of a message, as `(name, address)` pairs with
+/// display names decoded. A header that is absent yields an empty list.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct AddressHeaders {
+    pub to: Vec<(String, String)>,
+    pub cc: Vec<(String, String)>,
+    pub bcc: Vec<(String, String)>,
+    /// RFC 5322 §3.6.2 makes Reply-To an address-list, not a single address.
+    pub reply_to: Vec<(String, String)>,
+}
+
+/// The address-list headers of a rendered message. Reads the header section
+/// only, so it is cheap on a message with a large body.
+pub(crate) fn parse_address_headers(raw: &str) -> AddressHeaders {
+    let header_section = raw.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(raw);
+    address_headers_of(&parse_headers(header_section))
+}
+
+fn address_headers_of(headers: &[(String, String)]) -> AddressHeaders {
+    let list = |name: &str| {
+        get_header(headers, name)
+            .map(|v| parse_address_list(&v))
+            .unwrap_or_default()
+    };
+    AddressHeaders {
+        to: list("to"),
+        cc: list("cc"),
+        bcc: list("bcc"),
+        reply_to: list("reply-to"),
     }
 }
 
@@ -946,5 +970,36 @@ mod tests {
         let input = "caf=C3=A9";
         let result = decode_quoted_printable(input);
         assert_eq!(result, "caf\u{e9}");
+    }
+
+    #[test]
+    fn address_headers_come_from_the_header_section_only() {
+        // Folded To, encoded Cc name, Reply-To list; the body's "To:" line and
+        // the missing Bcc must not leak in.
+        let raw = "From: a@b.com\r\nTo: Bob <bob@x.com>,\r\n charlie@x.com\r\nCc: =?UTF-8?B?Wm/Dqw==?= <zoe@x.com>\r\nReply-To: one@x.com, Two <two@x.com>\r\n\r\nTo: not-a-header@x.com";
+        let parsed = parse_address_headers(raw);
+        assert_eq!(
+            parsed,
+            AddressHeaders {
+                to: vec![
+                    ("Bob".to_string(), "bob@x.com".to_string()),
+                    (String::new(), "charlie@x.com".to_string()),
+                ],
+                cc: vec![("Zoë".to_string(), "zoe@x.com".to_string())],
+                bcc: vec![],
+                reply_to: vec![
+                    (String::new(), "one@x.com".to_string()),
+                    ("Two".to_string(), "two@x.com".to_string()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn address_headers_of_a_message_without_any_are_empty() {
+        assert_eq!(
+            parse_address_headers("Subject: hi\r\n\r\nbody"),
+            AddressHeaders::default()
+        );
     }
 }
