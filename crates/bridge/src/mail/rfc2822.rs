@@ -271,12 +271,44 @@ pub(crate) fn format_address(addr: &MailAddress) -> String {
 
 /// `Name <addr>` when there is a display name, the bare address otherwise.
 /// Single rendering for every address-bearing header we emit.
+///
+/// A display name is a phrase (RFC 5322 §3.2.3): plain ASCII goes bare, ASCII
+/// holding a special goes in a quoted-string (or `Doe, Jane` reads as two
+/// mailboxes), non-ASCII goes as an encoded-word, which must stay bare.
+///
+/// The address is emitted as one addr-spec whatever it holds: line breaks
+/// would let a mail we did not write inject a header into what we serve, and
+/// the characters that delimit a mailbox (`<>`, `,`, `;`, quotes, parentheses,
+/// whitespace) would let a Reply-To we did not write smuggle in a second
+/// recipient for the reply to go to.
 fn format_name_and_address(name: &str, address: &str) -> String {
+    let address: String = address
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '<' | '>' | ',' | ';' | '"' | '(' | ')'))
+        .collect();
     if name.is_empty() {
-        address.to_string()
+        address
+    } else if needs_quoting(name) {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\" <{address}>")
     } else {
         format!("{} <{}>", encode_header_value(name), address)
     }
+}
+
+/// An ASCII phrase holding a special goes in a quoted-string. Anything with
+/// a line break is left to the encoded-word, since a quoted-string would
+/// carry the break through to the wire.
+fn needs_quoting(name: &str) -> bool {
+    name.is_ascii() && !name.contains(['\r', '\n']) && name.contains(is_rfc5322_special)
+}
+
+/// RFC 5322 §3.2.3 `specials`: the characters a bare phrase cannot hold.
+fn is_rfc5322_special(c: char) -> bool {
+    matches!(
+        c,
+        '(' | ')' | '<' | '>' | '[' | ']' | ':' | ';' | '@' | '\\' | ',' | '.' | '"'
+    )
 }
 
 pub(crate) fn encode_header_value(s: &str) -> String {
@@ -599,6 +631,74 @@ mod tests {
             _errors: Default::default(),
         };
         assert_eq!(format_address(&addr), "john@example.com");
+    }
+
+    #[test]
+    fn ascii_name_with_a_comma_is_one_quoted_mailbox() {
+        // The "Last, First" shape corporate senders use: unquoted, RFC 5322
+        // reads it as two mailboxes and the reply goes to a bogus recipient.
+        let rendered = format_name_and_address("Doe, Jane", "j.doe@example.com");
+        assert_eq!(rendered, "\"Doe, Jane\" <j.doe@example.com>");
+        assert_eq!(
+            crate::mail::parser::parse_rfc2822(&format!(
+                "From: {rendered}\r\nTo: {rendered}\r\n\r\n"
+            ))
+            .to,
+            vec![("Doe, Jane".to_string(), "j.doe@example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn quotes_and_backslashes_inside_a_quoted_name_are_escaped() {
+        assert_eq!(
+            format_name_and_address(r#"Say "hi" \ bye."#, "a@b.c"),
+            r#""Say \"hi\" \\ bye." <a@b.c>"#
+        );
+    }
+
+    #[test]
+    fn plain_ascii_name_stays_bare() {
+        assert_eq!(
+            format_name_and_address("Amazon Web Services", "no-reply-aws@amazon.com"),
+            "Amazon Web Services <no-reply-aws@amazon.com>"
+        );
+    }
+
+    #[test]
+    fn non_ascii_name_with_a_special_is_an_encoded_word_not_a_quoted_string() {
+        // Quoting an encoded-word would make receivers show the raw =?UTF-8?B?…?=.
+        assert_eq!(
+            format_name_and_address("Müller, Hans", "h@x.de"),
+            "=?UTF-8?B?TcO8bGxlciwgSGFucw==?= <h@x.de>"
+        );
+    }
+
+    #[test]
+    fn an_address_cannot_smuggle_a_second_mailbox() {
+        // A Reply-To address is chosen by the sender; one that closes its own
+        // angle-addr and opens another must not become a second reply target.
+        let rendered = format_name_and_address("Support", "a@b.c>, <attacker@evil.x");
+        assert_eq!(rendered, "Support <a@b.cattacker@evil.x>");
+        assert_eq!(
+            crate::mail::parser::parse_rfc2822(&format!(
+                "From: x@y.z\r\nReply-To: {rendered}\r\n\r\n"
+            ))
+            .reply_to
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn line_breaks_in_an_address_cannot_inject_a_header() {
+        assert_eq!(
+            format_name_and_address("", "a@b.c\r\nX-Injected: yes"),
+            "a@b.cX-Injected:yes"
+        );
+        assert_eq!(
+            format_name_and_address("Bad\r\nX-Injected: yes", "a@b.c"),
+            "=?UTF-8?B?QmFkDQpYLUluamVjdGVkOiB5ZXM=?= <a@b.c>"
+        );
     }
 
     #[test]
