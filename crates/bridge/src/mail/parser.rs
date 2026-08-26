@@ -223,16 +223,36 @@ pub(super) fn get_header(headers: &[(String, String)], name: &str) -> Option<Str
         .map(|(_, v)| v.clone())
 }
 
+/// One mailbox: `Name <addr>` or a bare `addr`. The angle-addr is the last
+/// `<`…`>` pair, since a quoted display name may itself hold `<` or `>`
+/// (`"a > b" <x@y>` used to slice backwards and panic).
 fn parse_address_single(raw: &str) -> (String, String) {
     let raw = raw.trim();
-    if let Some(lt) = raw.find('<') {
-        if let Some(gt) = raw.find('>') {
-            let addr = raw[lt + 1..gt].trim().to_string();
-            let name = decode_header_value(raw[..lt].trim().trim_matches('"'));
+    if let Some(lt) = raw.rfind('<') {
+        if let Some(gt) = raw[lt..].find('>') {
+            let addr = raw[lt + 1..lt + gt].trim().to_string();
+            let name = decode_header_value(&unquote(raw[..lt].trim()));
             return (name, addr);
         }
     }
     (String::new(), raw.to_string())
+}
+
+/// Strip the quotes of an RFC 5322 quoted-string and undo its `\` escapes;
+/// anything else is returned as is.
+fn unquote(phrase: &str) -> String {
+    let Some(inner) = phrase.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+        return phrase.to_string();
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn parse_address_list(raw: &str) -> Vec<(String, String)> {
@@ -1001,5 +1021,31 @@ mod tests {
             parse_address_headers("Subject: hi\r\n\r\nbody"),
             AddressHeaders::default()
         );
+    }
+
+    #[test]
+    fn angle_brackets_inside_a_quoted_name_do_not_break_the_mailbox() {
+        // A `>` before the `<` used to slice backwards and panic the parser.
+        let raw = "From: \"a > b\" <x@y.com>\r\nTo: \"c <d>\" <e@f.com>, g@h.com\r\n\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(
+            (msg.from_name.as_str(), msg.from_address.as_str()),
+            ("a > b", "x@y.com")
+        );
+        assert_eq!(
+            msg.to,
+            vec![
+                ("c <d>".to_string(), "e@f.com".to_string()),
+                (String::new(), "g@h.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_name_escapes_are_undone() {
+        let raw = "From: \"Say \\\"hi\\\" \\\\ bye.\" <a@b.c>\r\n\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.from_name, "Say \"hi\" \\ bye.");
+        assert_eq!(msg.from_address, "a@b.c");
     }
 }
