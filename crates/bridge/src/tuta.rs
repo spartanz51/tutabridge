@@ -597,9 +597,9 @@ impl TutaSession {
                 // is a real failure and must not be swallowed -- falling
                 // back on a transport error would turn "the network is
                 // down" into a silently mis-addressed mail.
-                Err(ApiCallError::ServerResponseError { source })
-                    if matches!(source, tutasdk::rest_error::HttpError::NotFoundError) =>
-                {
+                Err(ApiCallError::ServerResponseError {
+                    source: tutasdk::rest_error::HttpError::NotFoundError,
+                }) => {
                     log::warn!(
                         "sending as {} instead of {}: not an enabled alias on this account",
                         self.email,

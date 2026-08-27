@@ -1,6 +1,6 @@
 use log::{debug, info};
 use std::sync::Arc;
-use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, TutanotaFile};
+use tutasdk::entities::generated::tutanota::{Mail, MailAddress, TutanotaFile};
 
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
@@ -1308,7 +1308,7 @@ mod tests {
     use super::*;
     use base64::Engine;
     use tutasdk::date::DateTime;
-    use tutasdk::entities::generated::tutanota::MailAddress;
+    use tutasdk::entities::generated::tutanota::{MailAddress, MailDetails};
     use tutasdk::GeneratedId;
     use tutasdk::IdTupleGenerated;
 
