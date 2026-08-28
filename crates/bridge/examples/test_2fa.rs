@@ -21,7 +21,7 @@ use tutasdk::Sdk;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let email = std::env::var("TUTA_EMAIL").unwrap_or_else(|_| "mck1@tuta.io".to_string());
+    let email = std::env::var("TUTA_EMAIL").expect("set TUTA_EMAIL to the account to log in as");
     let api_url =
         std::env::var("TUTA_API_URL").unwrap_or_else(|_| "https://app.tuta.com".to_string());
     let password = match std::env::var("TUTA_PASSWORD") {
