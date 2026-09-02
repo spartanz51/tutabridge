@@ -69,6 +69,31 @@ fn is_close_notify_eof(e: &std::io::Error) -> bool {
     e.kind() == ErrorKind::UnexpectedEof
 }
 
+/// The client line as it may be logged: a `LOGIN` keeps its tag and verb but
+/// loses its arguments, `AUTHENTICATE` loses any initial response, and the
+/// continuation line that answers an `AUTHENTICATE` challenge is replaced
+/// whole, since it is nothing but the base64 credentials. Every other line is
+/// returned as is. The GUI shows the log on screen, so a mail client logging
+/// in must not put the bridge password there.
+fn redact_credentials(line: &str, awaiting_auth: bool) -> std::borrow::Cow<'_, str> {
+    if awaiting_auth {
+        return "<credentials>".into();
+    }
+    let mut words = line.split_whitespace();
+    let (Some(tag), Some(verb)) = (words.next(), words.next()) else {
+        return line.into();
+    };
+    if verb.eq_ignore_ascii_case("LOGIN") {
+        return format!("{tag} {verb} <credentials>").into();
+    }
+    if verb.eq_ignore_ascii_case("AUTHENTICATE") {
+        if let (Some(mechanism), Some(_initial_response)) = (words.next(), words.next()) {
+            return format!("{tag} {verb} {mechanism} <credentials>").into();
+        }
+    }
+    line.into()
+}
+
 async fn handle_connection(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     store: Arc<MailStore>,
@@ -156,7 +181,10 @@ where
         }
 
         let trimmed = line.trim_end();
-        debug!("IMAP C: {}", trimmed);
+        debug!(
+            "IMAP C: {}",
+            redact_credentials(trimmed, session.is_awaiting_auth())
+        );
 
         // APPEND carries a message literal the line-based session layer cannot
         // read, so it is handled here at the socket level.
@@ -239,6 +267,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_arguments_are_redacted() {
+        assert_eq!(
+            redact_credentials(r#"a1 LOGIN "me@tuta.com" "s3cret-pw""#, false),
+            "a1 LOGIN <credentials>"
+        );
+        assert_eq!(
+            redact_credentials("a1 login me@tuta.com s3cret-pw", false),
+            "a1 login <credentials>"
+        );
+    }
+
+    #[test]
+    fn authenticate_challenge_response_is_redacted_whole() {
+        // The bare `AUTHENTICATE PLAIN` carries nothing; the next line is the
+        // base64 of \0user\0password and must not reach the log.
+        assert_eq!(
+            redact_credentials("a1 AUTHENTICATE PLAIN", false),
+            "a1 AUTHENTICATE PLAIN"
+        );
+        assert_eq!(
+            redact_credentials("AG1lQHR1dGEuY29tAHMzY3JldC1wdw==", true),
+            "<credentials>"
+        );
+    }
+
+    #[test]
+    fn authenticate_initial_response_is_redacted() {
+        // SASL-IR (RFC 4959): a client may send the credentials inline.
+        assert_eq!(
+            redact_credentials(
+                "a1 AUTHENTICATE PLAIN AG1lQHR1dGEuY29tAHMzY3JldC1wdw==",
+                false
+            ),
+            "a1 AUTHENTICATE PLAIN <credentials>"
+        );
+    }
+
+    #[test]
+    fn other_commands_are_logged_verbatim() {
+        for line in ["a2 SELECT INBOX", "a3 FETCH 1:* (FLAGS)", "DONE", ""] {
+            assert_eq!(redact_credentials(line, false), line);
+        }
+    }
     use crate::mail::parser::ParsedMessage;
     use crate::tuta::FolderInfo;
     use tokio::io::AsyncReadExt;

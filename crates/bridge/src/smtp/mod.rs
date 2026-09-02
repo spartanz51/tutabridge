@@ -121,6 +121,25 @@ enum AuthStep {
     WaitLoginPass,
 }
 
+/// The client line as it may be logged. While an `AUTH` exchange is in
+/// progress every line is a credential (the PLAIN blob, or LOGIN's username
+/// then password), and `AUTH <mechanism> <initial-response>` carries them
+/// inline; those are replaced. Everything else is returned as is.
+fn redact_credentials<'a>(line: &'a str, step: &AuthStep) -> std::borrow::Cow<'a, str> {
+    if !matches!(step, AuthStep::None) {
+        return "<credentials>".into();
+    }
+    let mut words = line.split_whitespace();
+    if let (Some(verb), Some(mechanism), Some(_initial_response)) =
+        (words.next(), words.next(), words.next())
+    {
+        if verb.eq_ignore_ascii_case("AUTH") {
+            return format!("{verb} {mechanism} <credentials>").into();
+        }
+    }
+    line.into()
+}
+
 pub async fn serve(
     port: u16,
     tuta: Arc<dyn MailBackend>,
@@ -193,7 +212,7 @@ where
         }
 
         let trimmed = line.trim_end();
-        debug!("SMTP C: {}", trimmed);
+        debug!("SMTP C: {}", redact_credentials(trimmed, &auth_step));
 
         if !matches!(auth_step, AuthStep::None) {
             let response = match auth_step {
@@ -428,6 +447,45 @@ fn verify_smtp_password(password: &str, expected: &Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_plain_inline_credentials_are_redacted() {
+        assert_eq!(
+            redact_credentials(
+                "AUTH PLAIN AG1lQHR1dGEuY29tAHMzY3JldC1wdw==",
+                &AuthStep::None
+            ),
+            "AUTH PLAIN <credentials>"
+        );
+        assert_eq!(
+            redact_credentials("AUTH PLAIN", &AuthStep::None),
+            "AUTH PLAIN"
+        );
+    }
+
+    #[test]
+    fn every_line_of_an_auth_exchange_is_redacted() {
+        // PLAIN's blob after `334 `, then LOGIN's username and password lines.
+        for step in [
+            AuthStep::WaitPlainData,
+            AuthStep::WaitLoginUser,
+            AuthStep::WaitLoginPass,
+        ] {
+            assert_eq!(redact_credentials("czNjcmV0LXB3", &step), "<credentials>");
+        }
+    }
+
+    #[test]
+    fn other_commands_are_logged_verbatim() {
+        for line in [
+            "EHLO localhost",
+            "MAIL FROM:<me@tuta.com>",
+            "AUTH LOGIN",
+            "QUIT",
+        ] {
+            assert_eq!(redact_credentials(line, &AuthStep::None), line);
+        }
+    }
 
     #[test]
     fn test_extract_address_angle_brackets() {
