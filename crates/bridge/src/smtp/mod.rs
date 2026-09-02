@@ -202,7 +202,15 @@ where
     let mut authenticated = password_hash.is_none();
 
     loop {
-        match read_line_capped(&mut reader, limits.max_line_bytes, &mut line).await? {
+        let outcome = match read_line_capped(&mut reader, limits.max_line_bytes, &mut line).await {
+            Ok(outcome) => outcome,
+            Err(e) if crate::net::is_benign_disconnect(&e) => {
+                debug!("SMTP client went away without a clean shutdown: {e}");
+                break;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        match outcome {
             LineOutcome::Eof => break,
             LineOutcome::TooLong => {
                 writer.write_all(b"500 5.5.2 line too long\r\n").await?;
@@ -877,5 +885,114 @@ mod tests {
 
         client.write_all(b"QUIT\r\n").await.unwrap();
         let _ = h.await;
+    }
+
+    /// Replays scripted reads (bytes or an error per `poll_read`) and swallows
+    /// writes, so a test can put the connection handler through a disconnect a
+    /// `duplex` cannot produce.
+    struct ScriptedStream {
+        script: std::collections::VecDeque<std::io::Result<Vec<u8>>>,
+    }
+
+    impl tokio::io::AsyncRead for ScriptedStream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            match self.script.pop_front() {
+                Some(Ok(chunk)) => {
+                    buf.put_slice(&chunk);
+                    std::task::Poll::Ready(Ok(()))
+                }
+                Some(Err(e)) => std::task::Poll::Ready(Err(e)),
+                None => std::task::Poll::Ready(Ok(())),
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ScriptedStream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_ends_quietly_when_client_vanishes_after_ehlo() {
+        // Both ways a one-shot client goes away, neither may end as an error.
+        for kind in [
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
+            let mut script = std::collections::VecDeque::new();
+            script.push_back(Ok(b"EHLO localhost\r\n".to_vec()));
+            script.push_back(Err(std::io::Error::new(kind, "peer went away")));
+            let result = handle_connection(
+                ScriptedStream { script },
+                Arc::new(CountingBackend::default()) as Arc<dyn MailBackend>,
+                None,
+                SmtpLimits::default(),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "{kind:?} must end the session quietly: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_command_log_never_carries_auth_credentials() {
+        // Real handler, real logger output: proves the redaction is wired at
+        // the emission site. The marker is unique to this test so the shared
+        // capture can be filtered despite parallel tests.
+        crate::net::log_capture::install();
+        let marker = "PW-9f8e7d-smtp";
+        let blob = base64::engine::general_purpose::STANDARD.encode(format!("\0user\0{marker}"));
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"EHLO localhost\r\n".to_vec()));
+        script.push_back(Ok(format!("AUTH PLAIN {blob}\r\n").into_bytes()));
+        script.push_back(Ok(b"AUTH LOGIN\r\n".to_vec()));
+        script.push_back(Ok(format!(
+            "{}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(marker)
+        )
+        .into_bytes()));
+        script.push_back(Ok(b"QUIT\r\n".to_vec()));
+        handle_connection(
+            ScriptedStream { script },
+            Arc::new(CountingBackend::default()) as Arc<dyn MailBackend>,
+            None,
+            SmtpLimits::default(),
+        )
+        .await
+        .unwrap();
+
+        for needle in [marker, blob.as_str()] {
+            assert!(
+                crate::net::log_capture::lines_containing(needle).is_empty(),
+                "credentials reached the log: {needle}"
+            );
+        }
+        assert!(
+            !crate::net::log_capture::lines_containing("SMTP C: AUTH PLAIN <credentials>")
+                .is_empty()
+        );
     }
 }

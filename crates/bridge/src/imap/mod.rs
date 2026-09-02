@@ -3,7 +3,6 @@ mod session;
 mod utf7;
 
 use log::{debug, error, info};
-use std::io::ErrorKind;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -75,17 +74,6 @@ pub async fn serve(
     Ok(())
 }
 
-/// True for the io::Error rustls reports when a peer closes the TCP
-/// connection without sending a TLS close_notify alert first. Under TLS 1.3's
-/// AEAD framing this can't hide a truncated response the way it could
-/// pre-1.3, and short-lived clients that open a connection, run one command
-/// and exit (as most non-interactive IMAP CLI tools do) routinely skip the
-/// clean shutdown. Treating it as an ordinary EOF keeps that common,
-/// harmless case out of the error log.
-fn is_close_notify_eof(e: &std::io::Error) -> bool {
-    e.kind() == ErrorKind::UnexpectedEof
-}
-
 /// The client line as it may be logged: a `LOGIN` keeps its tag and verb but
 /// loses its arguments, `AUTHENTICATE` loses any initial response, and the
 /// continuation line that answers an `AUTHENTICATE` challenge is replaced
@@ -155,8 +143,8 @@ where
                 result = reader.read_line(&mut line) => {
                     let n = match result {
                         Ok(n) => n,
-                        Err(e) if is_close_notify_eof(&e) => {
-                            debug!("IMAP session {session_id}: ended, client disconnected without a TLS close_notify while idle: {e}");
+                        Err(e) if crate::net::is_benign_disconnect(&e) => {
+                            debug!("IMAP session {session_id}: ended, client went away without a clean shutdown while idle: {e}");
                             break;
                         }
                         Err(e) => return Err(e.into()),
@@ -166,7 +154,10 @@ where
                         break;
                     }
                     let trimmed = line.trim_end();
-                    debug!("IMAP C (idle): {}", trimmed);
+                    debug!(
+                        "IMAP C (idle): {}",
+                        redact_credentials(trimmed, session.is_awaiting_auth())
+                    );
                     if trimmed.eq_ignore_ascii_case("DONE") {
                         let responses = session.end_idle();
                         for resp in &responses {
@@ -191,8 +182,8 @@ where
         line.clear();
         let n = match reader.read_line(&mut line).await {
             Ok(n) => n,
-            Err(e) if is_close_notify_eof(&e) => {
-                debug!("IMAP session {session_id}: ended, client disconnected without a TLS close_notify: {e}");
+            Err(e) if crate::net::is_benign_disconnect(&e) => {
+                debug!("IMAP session {session_id}: ended, client went away without a clean shutdown: {e}");
                 break;
             }
             Err(e) => return Err(e.into()),
@@ -432,21 +423,6 @@ mod tests {
         ImapSession::new(store, Arc::new(NoopBackend), None, None)
     }
 
-    #[test]
-    fn close_notify_eof_is_recognized() {
-        let e = std::io::Error::new(
-            ErrorKind::UnexpectedEof,
-            "peer closed connection without sending TLS close_notify",
-        );
-        assert!(is_close_notify_eof(&e));
-    }
-
-    #[test]
-    fn other_io_errors_are_not_treated_as_close_notify() {
-        let e = std::io::Error::new(ErrorKind::ConnectionReset, "connection reset by peer");
-        assert!(!is_close_notify_eof(&e));
-    }
-
     /// Replays a fixed script of reads: each entry is either a chunk of bytes
     /// or an error to return, one per `poll_read` call. Lets a test drive the
     /// connection loop through a scenario a real socket can produce (like a
@@ -480,7 +456,7 @@ mod tests {
         let mut script = std::collections::VecDeque::new();
         script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
         script.push_back(Err(std::io::Error::new(
-            ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::UnexpectedEof,
             "peer closed connection without sending TLS close_notify",
         )));
         let reader = ScriptedReader { script };
@@ -496,6 +472,98 @@ mod tests {
         assert!(
             result.is_ok(),
             "a close_notify-less disconnect must end the session quietly, not as an error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_loop_ends_quietly_when_client_resets_after_login() {
+        // The other way a one-shot client goes away: it exits with the
+        // server's reply still unread, so the kernel answers with a reset
+        // rather than a FIN. Same outcome expected: no error.
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+        script.push_back(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "Connection reset by peer (os error 54)",
+        )));
+        let mut reader = BufReader::new(ScriptedReader { script });
+        let mut writer = tokio::io::sink();
+        let (_watch_tx, mut store_watch) = watch::channel(0u64);
+        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+
+        let result =
+            run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
+
+        assert!(
+            result.is_ok(),
+            "a reset must end the session quietly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_command_log_never_carries_a_login_password() {
+        // Drives the real connection loop and reads the real logger output:
+        // this is what proves the redaction sits at the emission site and
+        // not only in a helper. The marker is unique to this test so the
+        // shared capture can be filtered despite parallel tests.
+        crate::net::log_capture::install();
+        let marker = "PW-a1b2c3-main-loop";
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(
+            format!("a1 LOGIN \"user\" \"{marker}\"\r\n").into_bytes()
+        ));
+        script.push_back(Ok(b"a2 LOGOUT\r\n".to_vec()));
+        let mut reader = BufReader::new(ScriptedReader { script });
+        let mut writer = tokio::io::sink();
+        let (_watch_tx, mut store_watch) = watch::channel(0u64);
+        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+
+        run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch)
+            .await
+            .unwrap();
+
+        assert!(
+            crate::net::log_capture::lines_containing(marker).is_empty(),
+            "the password reached the log"
+        );
+        assert!(
+            !crate::net::log_capture::lines_containing("IMAP C: a1 LOGIN <credentials>").is_empty(),
+            "the LOGIN line should be logged, redacted"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_idle_command_log_never_carries_a_login_password() {
+        // A client is not supposed to send anything but DONE while idling; one
+        // that sends a LOGIN anyway must not have it echoed in clear.
+        crate::net::log_capture::install();
+        let marker = "PW-d4e5f6-idle-loop";
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+        script.push_back(Ok(b"a2 SELECT Sent\r\n".to_vec()));
+        script.push_back(Ok(b"a3 IDLE\r\n".to_vec()));
+        script.push_back(Ok(
+            format!("a4 LOGIN \"user\" \"{marker}\"\r\n").into_bytes()
+        ));
+        script.push_back(Ok(b"DONE\r\n".to_vec()));
+        script.push_back(Ok(b"a5 LOGOUT\r\n".to_vec()));
+        let mut reader = BufReader::new(ScriptedReader { script });
+        let mut writer = tokio::io::sink();
+        let (_watch_tx, mut store_watch) = watch::channel(0u64);
+        let mut session = session_with_sent().await;
+
+        run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch)
+            .await
+            .unwrap();
+
+        assert!(
+            crate::net::log_capture::lines_containing(marker).is_empty(),
+            "the password reached the log through the idle echo"
+        );
+        assert!(
+            !crate::net::log_capture::lines_containing("IMAP C (idle): a4 LOGIN <credentials>")
+                .is_empty(),
+            "the idle LOGIN line should be logged, redacted"
         );
     }
 
