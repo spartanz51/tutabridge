@@ -958,6 +958,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_real_read_error_still_ends_the_connection_as_an_error() {
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"EHLO localhost\r\n".to_vec()));
+        script.push_back(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "received corrupt message",
+        )));
+        let result = handle_connection(
+            ScriptedStream { script },
+            Arc::new(CountingBackend::default()) as Arc<dyn MailBackend>,
+            None,
+            SmtpLimits::default(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a corrupt stream must not pass for a disconnect"
+        );
+    }
+
+    #[tokio::test]
     async fn the_command_log_never_carries_auth_credentials() {
         // Real handler, real logger output: proves the redaction is wired at
         // the emission site. The capture is scoped to this test's thread; the

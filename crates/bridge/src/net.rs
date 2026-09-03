@@ -146,6 +146,32 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     #[test]
+    fn captured_records_are_scoped_to_the_thread_that_logged_them() {
+        // The whole point of the capture: what another thread logs is
+        // invisible here, and what this thread logs is not visible there.
+        super::log_capture::install();
+        let here = "CAPTURE-SCOPE-here";
+        let there = "CAPTURE-SCOPE-there";
+        log::debug!("{here}");
+        let seen_there = std::thread::spawn(move || {
+            log::debug!("{there}");
+            (
+                super::log_capture::lines_containing(there).len(),
+                super::log_capture::lines_containing(here).len(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            seen_there,
+            (1, 0),
+            "the other thread sees only its own record"
+        );
+        assert_eq!(super::log_capture::lines_containing(here).len(), 1);
+        assert!(super::log_capture::lines_containing(there).is_empty());
+    }
+
+    #[test]
     fn a_peer_that_vanishes_is_a_benign_disconnect() {
         use std::io::{Error, ErrorKind};
         // rustls: TCP EOF with no close_notify.

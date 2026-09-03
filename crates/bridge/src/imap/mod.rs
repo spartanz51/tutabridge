@@ -501,6 +501,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_real_read_error_still_ends_the_connection_as_an_error() {
+        // Only a peer going away is benign. Anything else the stream reports
+        // must keep surfacing, or a broken TLS record would be logged as a
+        // quiet disconnect.
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+        script.push_back(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "received corrupt message",
+        )));
+        let mut reader = BufReader::new(ScriptedReader { script });
+        let mut writer = tokio::io::sink();
+        let (_watch_tx, mut store_watch) = watch::channel(0u64);
+        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+
+        let result =
+            run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
+
+        assert!(
+            result.is_err(),
+            "a corrupt stream must not pass for a disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn while_idle_a_disconnect_ends_quietly_and_a_real_error_does_not() {
+        // The IDLE branch has its own read site with the same two outcomes.
+        for (kind, expect_ok) in [
+            (std::io::ErrorKind::UnexpectedEof, true),
+            (std::io::ErrorKind::ConnectionReset, true),
+            (std::io::ErrorKind::InvalidData, false),
+        ] {
+            let mut script = std::collections::VecDeque::new();
+            script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+            script.push_back(Ok(b"a2 SELECT Sent\r\n".to_vec()));
+            script.push_back(Ok(b"a3 IDLE\r\n".to_vec()));
+            script.push_back(Err(std::io::Error::new(kind, "while idling")));
+            let mut reader = BufReader::new(ScriptedReader { script });
+            let mut writer = tokio::io::sink();
+            let (_watch_tx, mut store_watch) = watch::channel(0u64);
+            let mut session = session_with_sent().await;
+
+            let result =
+                run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
+
+            assert!(
+                session.is_idle(),
+                "the script must have reached IDLE for this to test the idle read site"
+            );
+            assert_eq!(result.is_ok(), expect_ok, "{kind:?} while idle: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_append_literal_cut_short_is_still_an_error() {
+        // The one place a mid-stream EOF means a truncated message: the client
+        // announced a 10-byte literal and vanished. This must not be filed
+        // under "went away quietly".
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+        script.push_back(Ok(b"a2 APPEND Sent {10}\r\n".to_vec()));
+        let mut reader = BufReader::new(ScriptedReader { script });
+        let mut writer = tokio::io::sink();
+        let (_watch_tx, mut store_watch) = watch::channel(0u64);
+        let mut session = session_with_sent().await;
+
+        let result =
+            run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
+
+        assert!(
+            result.is_err(),
+            "a truncated APPEND literal must surface: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_command_log_never_carries_a_login_password() {
         // Drives the real connection loop and reads the real logger output:
         // this is what proves the redaction sits at the emission site and
