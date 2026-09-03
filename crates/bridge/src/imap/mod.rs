@@ -504,8 +504,8 @@ mod tests {
     async fn the_command_log_never_carries_a_login_password() {
         // Drives the real connection loop and reads the real logger output:
         // this is what proves the redaction sits at the emission site and
-        // not only in a helper. The marker is unique to this test so the
-        // shared capture can be filtered despite parallel tests.
+        // not only in a helper. The capture is scoped to this test's thread;
+        // the marker is the one string that must never show up in it.
         crate::net::log_capture::install();
         let marker = "PW-a1b2c3-main-loop";
         let mut script = std::collections::VecDeque::new();

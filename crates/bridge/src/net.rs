@@ -69,9 +69,7 @@ pub(crate) mod log_capture {
         }
         fn log(&self, record: &log::Record) {
             if record.target().starts_with("tutabridge_core") {
-                RECORDS
-                    .lock()
-                    .unwrap()
+                crate::util::lock_recover(&RECORDS)
                     .push((thread::current().id(), record.args().to_string()));
             }
         }
@@ -91,9 +89,7 @@ pub(crate) mod log_capture {
     /// Every record the calling thread logged that contains `needle`.
     pub(crate) fn lines_containing(needle: &str) -> Vec<String> {
         let me = thread::current().id();
-        RECORDS
-            .lock()
-            .unwrap()
+        crate::util::lock_recover(&RECORDS)
             .iter()
             .filter(|(t, l)| *t == me && l.contains(needle))
             .map(|(_, l)| l.clone())
@@ -145,16 +141,20 @@ pub(crate) async fn accept_loop<F, Fut>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncWriteExt;
+
     #[test]
     fn a_peer_that_vanishes_is_a_benign_disconnect() {
         use std::io::{Error, ErrorKind};
         // rustls: TCP EOF with no close_notify.
-        assert!(super::is_benign_disconnect(&Error::new(
+        assert!(is_benign_disconnect(&Error::new(
             ErrorKind::UnexpectedEof,
             "peer closed connection without sending TLS close_notify"
         )));
         // The kernel: peer closed with data still unread.
-        assert!(super::is_benign_disconnect(&Error::new(
+        assert!(is_benign_disconnect(&Error::new(
             ErrorKind::ConnectionReset,
             "Connection reset by peer (os error 54)"
         )));
@@ -163,16 +163,12 @@ mod tests {
     #[test]
     fn a_real_stream_error_is_not() {
         use std::io::{Error, ErrorKind};
-        assert!(!super::is_benign_disconnect(&Error::new(
+        assert!(!is_benign_disconnect(&Error::new(
             ErrorKind::InvalidData,
             "received corrupt message"
         )));
-        assert!(!super::is_benign_disconnect(&Error::from(ErrorKind::Other)));
+        assert!(!is_benign_disconnect(&Error::from(ErrorKind::Other)));
     }
-
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::AsyncWriteExt;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn loop_keeps_accepting_across_connections() {

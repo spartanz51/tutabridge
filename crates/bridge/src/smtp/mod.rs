@@ -960,8 +960,8 @@ mod tests {
     #[tokio::test]
     async fn the_command_log_never_carries_auth_credentials() {
         // Real handler, real logger output: proves the redaction is wired at
-        // the emission site. The marker is unique to this test so the shared
-        // capture can be filtered despite parallel tests.
+        // the emission site. The capture is scoped to this test's thread; the
+        // marker is the one string that must never show up in it.
         crate::net::log_capture::install();
         let marker = "PW-9f8e7d-smtp";
         let blob = base64::engine::general_purpose::STANDARD.encode(format!("\0user\0{marker}"));
