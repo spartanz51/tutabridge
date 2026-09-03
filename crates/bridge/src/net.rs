@@ -46,14 +46,19 @@ pub(crate) fn is_benign_disconnect(e: &std::io::Error) -> bool {
 
 /// A `log::Log` that keeps every record from this crate so a test can assert
 /// on what a code path logged, which is the only way to prove a log line was
-/// redacted at its emission site rather than in a helper nobody calls. The
-/// logger is process-global and can be installed once, so it is shared by
-/// every test module and filtered by content, since tests run in parallel.
+/// redacted at its emission site rather than in a helper nobody calls.
+///
+/// The logger is process-global and can be installed once, so it is shared by
+/// every test module. Each record remembers the thread that emitted it and a
+/// test only ever reads its own: tests run in parallel, each on its own
+/// thread, on a `current_thread` runtime, so nothing another test logs can
+/// satisfy or spoil an assertion here.
 #[cfg(test)]
 pub(crate) mod log_capture {
     use std::sync::{Mutex, Once};
+    use std::thread::{self, ThreadId};
 
-    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static RECORDS: Mutex<Vec<(ThreadId, String)>> = Mutex::new(Vec::new());
     static INSTALL: Once = Once::new();
 
     struct Capture;
@@ -64,7 +69,10 @@ pub(crate) mod log_capture {
         }
         fn log(&self, record: &log::Record) {
             if record.target().starts_with("tutabridge_core") {
-                RECORDS.lock().unwrap().push(record.args().to_string());
+                RECORDS
+                    .lock()
+                    .unwrap()
+                    .push((thread::current().id(), record.args().to_string()));
             }
         }
         fn flush(&self) {}
@@ -80,14 +88,15 @@ pub(crate) mod log_capture {
         });
     }
 
-    /// Every captured record that contains `needle`.
+    /// Every record the calling thread logged that contains `needle`.
     pub(crate) fn lines_containing(needle: &str) -> Vec<String> {
+        let me = thread::current().id();
         RECORDS
             .lock()
             .unwrap()
             .iter()
-            .filter(|l| l.contains(needle))
-            .cloned()
+            .filter(|(t, l)| *t == me && l.contains(needle))
+            .map(|(_, l)| l.clone())
             .collect()
     }
 }

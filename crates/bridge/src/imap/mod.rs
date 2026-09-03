@@ -510,9 +510,9 @@ mod tests {
         let marker = "PW-a1b2c3-main-loop";
         let mut script = std::collections::VecDeque::new();
         script.push_back(Ok(
-            format!("a1 LOGIN \"user\" \"{marker}\"\r\n").into_bytes()
+            format!("m1 LOGIN \"user\" \"{marker}\"\r\n").into_bytes()
         ));
-        script.push_back(Ok(b"a2 LOGOUT\r\n".to_vec()));
+        script.push_back(Ok(b"m2 LOGOUT\r\n".to_vec()));
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
@@ -527,9 +527,11 @@ mod tests {
             "the password reached the log"
         );
         assert!(
-            !crate::net::log_capture::lines_containing("IMAP C: a1 LOGIN <credentials>").is_empty(),
+            !crate::net::log_capture::lines_containing("IMAP C: m1 LOGIN <credentials>").is_empty(),
             "the LOGIN line should be logged, redacted"
         );
+        // The script was consumed as written, down to the LOGOUT.
+        assert!(!crate::net::log_capture::lines_containing("IMAP C: m2 LOGOUT").is_empty());
     }
 
     #[tokio::test]
@@ -539,14 +541,14 @@ mod tests {
         crate::net::log_capture::install();
         let marker = "PW-d4e5f6-idle-loop";
         let mut script = std::collections::VecDeque::new();
-        script.push_back(Ok(b"a1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
-        script.push_back(Ok(b"a2 SELECT Sent\r\n".to_vec()));
-        script.push_back(Ok(b"a3 IDLE\r\n".to_vec()));
+        script.push_back(Ok(b"i1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+        script.push_back(Ok(b"i2 SELECT Sent\r\n".to_vec()));
+        script.push_back(Ok(b"i3 IDLE\r\n".to_vec()));
         script.push_back(Ok(
-            format!("a4 LOGIN \"user\" \"{marker}\"\r\n").into_bytes()
+            format!("i4 LOGIN \"user\" \"{marker}\"\r\n").into_bytes()
         ));
         script.push_back(Ok(b"DONE\r\n".to_vec()));
-        script.push_back(Ok(b"a5 LOGOUT\r\n".to_vec()));
+        script.push_back(Ok(b"i5 LOGOUT\r\n".to_vec()));
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
@@ -561,10 +563,13 @@ mod tests {
             "the password reached the log through the idle echo"
         );
         assert!(
-            !crate::net::log_capture::lines_containing("IMAP C (idle): a4 LOGIN <credentials>")
+            !crate::net::log_capture::lines_containing("IMAP C (idle): i4 LOGIN <credentials>")
                 .is_empty(),
             "the idle LOGIN line should be logged, redacted"
         );
+        // The script was consumed as written: IDLE was entered (the LOGIN
+        // above went through the idle echo), DONE left it, and LOGOUT ran.
+        assert!(!crate::net::log_capture::lines_containing("IMAP C: i5 LOGOUT").is_empty());
     }
 
     #[tokio::test]
