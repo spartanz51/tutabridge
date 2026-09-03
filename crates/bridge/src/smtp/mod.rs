@@ -968,12 +968,13 @@ mod tests {
         let mut script = std::collections::VecDeque::new();
         script.push_back(Ok(b"EHLO localhost\r\n".to_vec()));
         script.push_back(Ok(format!("AUTH PLAIN {blob}\r\n").into_bytes()));
+        // AUTH LOGIN reads two lines after the command: the username, then
+        // the password. The marker goes in the password line only, so the
+        // assertion below pins that step and not the username one.
+        let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
         script.push_back(Ok(b"AUTH LOGIN\r\n".to_vec()));
-        script.push_back(Ok(format!(
-            "{}\r\n",
-            base64::engine::general_purpose::STANDARD.encode(marker)
-        )
-        .into_bytes()));
+        script.push_back(Ok(format!("{}\r\n", b64("user")).into_bytes()));
+        script.push_back(Ok(format!("{}\r\n", b64(marker)).into_bytes()));
         script.push_back(Ok(b"QUIT\r\n".to_vec()));
         handle_connection(
             ScriptedStream { script },
@@ -984,7 +985,7 @@ mod tests {
         .await
         .unwrap();
 
-        for needle in [marker, blob.as_str()] {
+        for needle in [marker, blob.as_str(), b64(marker).as_str()] {
             assert!(
                 crate::net::log_capture::lines_containing(needle).is_empty(),
                 "credentials reached the log: {needle}"
@@ -993,6 +994,12 @@ mod tests {
         assert!(
             !crate::net::log_capture::lines_containing("SMTP C: AUTH PLAIN <credentials>")
                 .is_empty()
+        );
+        // The script was consumed as written: QUIT ran as a command, which it
+        // cannot have if a line went missing and it was read as the password.
+        assert!(
+            !crate::net::log_capture::lines_containing("SMTP C: QUIT").is_empty(),
+            "QUIT was swallowed by the AUTH LOGIN exchange"
         );
     }
 }
