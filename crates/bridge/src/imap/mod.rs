@@ -78,8 +78,9 @@ pub async fn serve(
 /// loses its arguments, `AUTHENTICATE` loses any initial response, and the
 /// continuation line that answers an `AUTHENTICATE` challenge is replaced
 /// whole, since it is nothing but the base64 credentials. Every other line is
-/// returned as is. The GUI shows the log on screen, so a mail client logging
-/// in must not put the bridge password there.
+/// returned as is. The GUI logs at debug by default and the CLI can be asked
+/// to, so a mail client logging in must not put the bridge password in the
+/// log stream.
 fn redact_credentials(line: &str, awaiting_auth: bool) -> std::borrow::Cow<'_, str> {
     if awaiting_auth {
         return "<credentials>".into();
@@ -282,6 +283,13 @@ where
 mod tests {
     use super::*;
 
+    use crate::mail::parser::ParsedMessage;
+    use crate::tuta::FolderInfo;
+    use tokio::io::AsyncReadExt;
+    use tutasdk::entities::generated::tutanota::{Mail, MailDetails, MailSetEntry, TutanotaFile};
+    use tutasdk::folder_system::MailSetKind;
+    use tutasdk::IdTupleGenerated;
+
     #[test]
     fn login_arguments_are_redacted() {
         assert_eq!(
@@ -326,12 +334,6 @@ mod tests {
             assert_eq!(redact_credentials(line, false), line);
         }
     }
-    use crate::mail::parser::ParsedMessage;
-    use crate::tuta::FolderInfo;
-    use tokio::io::AsyncReadExt;
-    use tutasdk::entities::generated::tutanota::{Mail, MailDetails, MailSetEntry, TutanotaFile};
-    use tutasdk::folder_system::MailSetKind;
-    use tutasdk::IdTupleGenerated;
 
     struct NoopBackend;
     #[async_trait::async_trait]
