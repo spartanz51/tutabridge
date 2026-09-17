@@ -1414,11 +1414,19 @@ fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credenti
     })
 }
 
+/// Forget a saved session the server has judged dead. The cache is set to
+/// "loaded, nothing there" rather than "not loaded": the verdict stands for
+/// this process even if the keyring refuses the deletion, so a rejected token
+/// is never read back and retried. A leftover entry is overwritten by the
+/// next successful login.
 fn delete_credentials(email: &str) {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, email) {
-        let _ = entry.delete_credential();
+    match keyring::Entry::new(KEYRING_SERVICE, email).and_then(|e| e.delete_credential()) {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(e) => log::warn!(
+            "Could not remove the stale session from the keyring ({e}); it will be replaced on the next login"
+        ),
     }
-    *CREDENTIALS_CACHE.lock().unwrap() = None;
+    *CREDENTIALS_CACHE.lock().unwrap() = Some(None);
 }
 
 /// Map SMTP recipients to `DraftRecipient`, falling back to the address when
@@ -1657,6 +1665,53 @@ mod resume_failure_tests {
         ] {
             assert_eq!(classify_resume_failure(&e), ResumeFailure::Transient, "{e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod forget_session_tests {
+    use super::{delete_credentials, has_saved_session, CREDENTIALS_CACHE};
+
+    fn fake_credentials(email: &str) -> tutasdk::login::Credentials {
+        tutasdk::login::Credentials {
+            login: email.to_string(),
+            user_id: tutasdk::GeneratedId("fakeuser0".to_string()),
+            access_token: "fake-token".to_string(),
+            encrypted_passphrase_key: vec![0; 32],
+            credential_type: tutasdk::login::CredentialType::Internal,
+        }
+    }
+
+    #[test]
+    fn a_forgotten_session_stays_forgotten_whatever_the_keyring_says() {
+        // The CLI decides whether a password prompt makes sense from
+        // `has_saved_session`. After the server judged the token dead, that
+        // must answer "no" from the in-process cache alone: if the keyring
+        // refused the deletion, re-reading it would resurrect the rejected
+        // token and the CLI would exit instead of asking for a password.
+        // The mock store keeps this off the real keyring; its entries start
+        // empty, so the deletion below reports NoEntry.
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        crate::net::log_capture::install();
+        let email = "nobody@example.invalid";
+        *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(fake_credentials(email)));
+        assert!(
+            has_saved_session(email),
+            "precondition: the session is loaded"
+        );
+
+        delete_credentials(email);
+
+        assert!(
+            matches!(*CREDENTIALS_CACHE.lock().unwrap(), Some(None)),
+            "the cache must say 'nothing there', not 'not loaded yet'"
+        );
+        assert!(!has_saved_session(email));
+        assert!(
+            crate::net::log_capture::lines_containing("Could not remove the stale session")
+                .is_empty(),
+            "a missing entry is not worth a warning"
+        );
     }
 }
 
