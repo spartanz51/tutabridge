@@ -205,11 +205,20 @@ tick "keep every message body offline" in the GUI) to download everything.
 ```bash
 cargo test --workspace        # unit + integration tests
 python3 scripts/test_imap.py  # integration test against a running bridge
+python3 scripts/smoke_tuta_api.py  # live client-version check (Python 3.11+)
 ```
 
 The IMAP integration test connects to the local server and verifies TLS, auth,
 folder list, mail count, body fetch and search. It reads the bridge password
 from `config.toml` automatically.
+
+The Tuta API smoke test calls the public `base/applicationtypesservice` endpoint
+with the client and base-model versions from the pinned SDK. It needs no account
+or secrets and runs in a separate GitHub Actions workflow on PRs, pushes to
+`main`, daily at 07:23 UTC, and manually. HTTP 474 fails with a version-rejection
+message; network errors, rate limits and server errors are retried up to three
+attempts before failing as inconclusive. Only HTTP 200 passes. This checks the
+version gate, not login, mail decryption or full SDK compatibility.
 
 ---
 
