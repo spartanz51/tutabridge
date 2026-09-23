@@ -72,9 +72,7 @@ export function Dashboard({
     ? "Bridge running"
     : isStarting
       ? "Connecting…"
-      : errored
-        ? "Connection failed"
-        : "Bridge stopped";
+      : "Bridge stopped";
 
   // Subtitle only carries information the rest of the screen doesn't already
   // show: nothing when everything is healthy. The 2FA prompt takes priority
@@ -88,7 +86,7 @@ export function Dashboard({
       : isStarting
         ? "Signing in and syncing your mailbox"
         : errored
-          ? "See the activity log below"
+          ? "" // the reason is shown right below
           : needsEmail
             ? "Sign in with your Tuta account to get started"
             : "Start the bridge to connect your mail client";

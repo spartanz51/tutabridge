@@ -31,7 +31,10 @@ function App() {
         <div className="header-left">
           <img src={logo} alt="" className="app-logo" width={24} height={24} />
           <h1>TutaBridge</h1>
-          <div className="header-status">
+          <div
+            className="header-status"
+            title={status && isError(status) ? status.Error : undefined}
+          >
             <span className="status-dot" style={{ background: statusColor }} />
             <span className="header-status-text">
               {status ? statusLabel(status) : "Loading..."}

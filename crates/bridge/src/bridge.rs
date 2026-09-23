@@ -191,11 +191,7 @@ impl BridgeHandle {
 
         let tls_acceptor = match tls::load_or_create_tls_acceptor() {
             Ok(a) => a,
-            Err(e) => {
-                let msg = format!("TLS setup failed: {e}");
-                *self.status.write().await = BridgeStatus::Error(msg.clone());
-                return Err(msg);
-            }
+            Err(e) => return Err(self.start_failed(format!("TLS setup failed: {e}")).await),
         };
         self.emit_log("TLS initialized");
 
@@ -211,6 +207,16 @@ impl BridgeHandle {
             Ok(listener) => listener,
             Err(msg) => return Err(self.start_failed(msg).await),
         };
+        // The MCP server is optional, but once the user has turned it on a
+        // port another application holds must not leave it silently absent.
+        let mcp_listener = if config.mcp_permission.is_enabled() {
+            match crate::net::bind_local("MCP", config.mcp_port).await {
+                Ok(listener) => Some(listener),
+                Err(msg) => return Err(self.start_failed(msg).await),
+            }
+        } else {
+            None
+        };
         self.emit_log(&format!("IMAP listening on 127.0.0.1:{}", config.imap_port));
         self.emit_log(&format!("SMTP listening on 127.0.0.1:{}", config.smtp_port));
 
@@ -218,31 +224,34 @@ impl BridgeHandle {
         let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await
         {
             Ok(s) => s,
-            Err(e) => {
-                let msg = format!("Login failed: {e}");
-                *self.status.write().await = BridgeStatus::Error(msg.clone());
-                return Err(msg);
-            }
+            Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
         };
         self.emit_log(&format!("Logged in as {}", config.email));
 
-        let storage_key = session.derive_storage_key().await.map_err(|e| {
-            let msg = format!("Storage key derivation failed: {e}");
-            self.emit_log(&msg);
-            msg
-        })?;
+        // Every failure from here on must go through `start_failed` too: an
+        // early return that leaves the status at Starting wedges the GUI on
+        // "Connecting…", with Stop doing nothing and Start refused as
+        // "already running" until the app is restarted.
+        let storage_key = match session.derive_storage_key().await {
+            Ok(key) => key,
+            Err(e) => {
+                let msg = format!("Storage key derivation failed: {e}");
+                return Err(self.start_failed(msg).await);
+            }
+        };
         self.emit_log("Storage encryption key derived");
 
-        let local_store = LocalStore::open(
+        let local_store = match LocalStore::open(
             &config::store_db_path(),
             &config::store_mails_dir(),
             storage_key,
-        )
-        .map_err(|e| {
-            let msg = format!("Failed to open local store: {e}");
-            self.emit_log(&msg);
-            msg
-        })?;
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                let msg = format!("Failed to open local store: {e}");
+                return Err(self.start_failed(msg).await);
+            }
+        };
         if !local_store.verify_key() {
             self.emit_log("Storage key changed — resetting local cache");
             let _ = local_store.reset();
@@ -256,9 +265,11 @@ impl BridgeHandle {
         // built from `last_batch_ids`, and the authenticated WebSocket already
         // implicitly subscribes to every group the user is a member of.
         let bus_access_token = session.access_token.clone();
-        let bus_user_id = session
-            .user_id()
-            .ok_or_else(|| "Missing user id from session".to_string())?;
+        let Some(bus_user_id) = session.user_id() else {
+            return Err(self
+                .start_failed("Missing user id from session".to_string())
+                .await);
+        };
         let bus_base_url = config.api_url.clone();
 
         let backend: Arc<dyn MailBackend> = Arc::new(session);
@@ -275,7 +286,6 @@ impl BridgeHandle {
         let log_tx = self.log_tx.clone();
         let sync_limit = config.sync_limit;
         let pw = config.bridge_password.clone();
-        let mcp_port = config.mcp_port;
         let mcp_permission = config.mcp_permission;
 
         // Build the realtime event bus and hydrate its catch-up state from
@@ -406,18 +416,20 @@ impl BridgeHandle {
                 imap_tls,
                 pw.clone(),
             ));
-            // Read-only MCP server — no-op when the tier is Disabled, so always
-            // safe to spawn. Kept out of the select! (a disabled server returns
-            // immediately and must not trigger teardown).
-            let mcp_handle = tokio::spawn(crate::mcp::serve(
-                mcp_port,
-                store.clone(),
-                local_store,
-                backend.clone(),
-                pw.clone(),
-                mcp_permission,
-                shutdown_sync_rx.clone(),
-            ));
+            // Read-only MCP server, only when enabled (its listener is then
+            // bound above). Kept out of the select!: it is optional, and
+            // logs its own failure.
+            let mcp_handle = mcp_listener.map(|listener| {
+                tokio::spawn(crate::mcp::serve_listener(
+                    listener,
+                    store.clone(),
+                    local_store,
+                    backend.clone(),
+                    pw.clone(),
+                    mcp_permission,
+                    shutdown_sync_rx.clone(),
+                ))
+            });
             let mut smtp_handle = tokio::spawn(smtp::serve_listener(
                 smtp_listener,
                 backend.clone(),
@@ -446,7 +458,9 @@ impl BridgeHandle {
             bus_handle.abort();
             handler_handle.abort();
             imap_handle.abort();
-            mcp_handle.abort();
+            if let Some(h) = &mcp_handle {
+                h.abort();
+            }
             smtp_handle.abort();
             if !syncer_handle.is_finished() {
                 let _ = syncer_handle.await;
@@ -462,6 +476,10 @@ impl BridgeHandle {
             }
             if !smtp_handle.is_finished() {
                 let _ = smtp_handle.await;
+            }
+            // Its listener too, or a restart finds the MCP port still taken.
+            if let Some(h) = mcp_handle {
+                let _ = h.await;
             }
             *status.write().await = match server_failure {
                 Some(msg) => BridgeStatus::Error(msg),
@@ -560,6 +578,23 @@ mod tests {
             server_exit_message("IMAP", task.await),
             "IMAP server stopped unexpectedly"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_leaves_an_error_status_not_starting() {
+        // Starting would wedge the GUI: Start refused as "already running",
+        // Stop a no-op. Colliding ports fail before TLS or any network call.
+        let mut handle = BridgeHandle::new();
+        let config = Config {
+            imap_port: 1143,
+            smtp_port: 1143,
+            ..Config::default()
+        };
+
+        let err = handle.start(config, None, None).await.unwrap_err();
+
+        assert_eq!(err, "IMAP and SMTP ports must differ (both are 1143)");
+        assert_eq!(*handle.status.read().await, BridgeStatus::Error(err));
     }
 
     #[tokio::test]

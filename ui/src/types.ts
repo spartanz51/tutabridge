@@ -25,8 +25,8 @@ export interface BridgeStats {
 }
 
 export function statusLabel(status: BridgeStatus): string {
-  if (typeof status === "string") return status;
-  return `Error: ${status.Error}`;
+  // The header pill only names the state; the Dashboard shows the reason.
+  return typeof status === "string" ? status : "Error";
 }
 
 export function isError(status: BridgeStatus): status is { Error: string } {

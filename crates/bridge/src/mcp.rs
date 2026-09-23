@@ -29,7 +29,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use log::info;
+use log::{error, info};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -64,11 +64,40 @@ pub async fn serve(
     backend: Arc<dyn MailBackend>,
     token: Option<String>,
     permission: McpPermission,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !permission.is_enabled() {
         return Ok(());
     }
+    // Nothing awaits this task's result (a disabled server returns at once
+    // and must not tear the bridge down), so a failure has to be logged here.
+    let listener = crate::net::bind_local("MCP", port).await.map_err(|e| {
+        error!("{e}");
+        e
+    })?;
+    serve_listener(
+        listener,
+        store,
+        local_store,
+        backend,
+        token,
+        permission,
+        shutdown,
+    )
+    .await
+}
+
+/// Serve MCP on a listener the caller has already bound (see
+/// `imap::serve_listener`).
+pub async fn serve_listener(
+    listener: tokio::net::TcpListener,
+    store: Arc<MailStore>,
+    local_store: Arc<LocalStore>,
+    backend: Arc<dyn MailBackend>,
+    token: Option<String>,
+    permission: McpPermission,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = McpState {
         store,
         local_store,
@@ -80,14 +109,18 @@ pub async fn serve(
         .route("/mcp", post(handle_post).get(handle_get))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    info!("MCP server listening on http://127.0.0.1:{port}/mcp (read-only, tier={permission:?})");
+    let addr = listener.local_addr()?;
+    info!("MCP server listening on http://{addr}/mcp (read-only, tier={permission:?})");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown.changed().await;
         })
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("MCP server failed: {e}");
+            e
+        })?;
     Ok(())
 }
 

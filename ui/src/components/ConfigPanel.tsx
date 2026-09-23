@@ -39,6 +39,12 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
     }
   }, [config]);
 
+  // A refused save describes the values as they were; editing any of them
+  // makes that message stale.
+  useEffect(() => {
+    setSaveError(null);
+  }, [email, imapPort, smtpPort, apiUrl, syncLimit, fetchAll, mcpPermission, mcpPort]);
+
   const isRunning = status === "Running" || status === "Starting";
 
   // Same rules as `Config::validate_ports` in the backend: usable ports, all
