@@ -1,0 +1,38 @@
+name: Tuta API smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Catch server-side version cutoffs even when this repository is idle.
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tuta-api-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout pinned SDK
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test smoke-check failure handling
+        run: python3 -m unittest discover -s scripts -p 'test_smoke_tuta_api.py'
+
+      - name: Check Tuta accepts the pinned SDK version (no credentials)
+        run: python3 scripts/smoke_tuta_api.py
