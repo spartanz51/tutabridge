@@ -1,0 +1,44 @@
+HEAD is now at aea5846b93 v359.260904.0
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/independent/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+warning: `tuta-sdk` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.09s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/target-validation/debug/deps/tutasdk-cee6532dfd4c584d)
+
+running 8 tests
+test json_serializer::optional_empty_tests::optional_encrypted_empty_fields_map_to_null ... ok
+test json_serializer::tests::test_parse_mail_empty_encrypted_boolean_defaults_to_false ... ok
+test json_serializer::tests::test_parse_mail ... ok
+test json_serializer::tests::test_parse_mail_with_attachments ... ok
+test json_serializer::tests::test_parse_user_with_empty_group_key ... ok
+test json_serializer::tests::test_parse_user ... ok
+test json_serializer::tests::deserialize_serialize_round_trip_works ... ok
+test json_serializer::tests::serialization_for_encrypted_works ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 293 filtered out; finished in 0.02s
+

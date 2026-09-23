@@ -1,0 +1,82 @@
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+index 55a715e7a6..fe8d7d342a 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+@@ -691,6 +691,77 @@ mod tests {
+ 		134, 182, 175, 15, 152, 117, 216, 81, 1, 120, 134, 116, 143,
+ 	];
+ 
++	#[test]
++	fn audit_valid_aead_is_rejected_by_entity_field_decryption() {
++		use crypto_primitives::aead_facade::{AeadFacade, AeadSubKeys};
++		use crypto_primitives::versioned::Versioned;
++		let sk = Aes256Key::from_bytes(&KNOWN_SK).unwrap();
++		let generic_sk = GenericAesKey::Aes256(sk.clone());
++		let facade = AeadFacade::new(RandomizerFacade::from_core(rand_core::OsRng));
++		let model = create_model_value(ValueType::String, true, Cardinality::One);
++		let plaintext = b"synthetic audit field".to_vec();
++		let aad = b"audit associated data";
++		let subkeys = [
++			AeadSubKeys::derive_from_session_key(&sk, "tutanota/0"),
++			AeadSubKeys::derive_from_group_key(&Versioned::new(generic_sk.clone(), 0), &[7; 16], "tutanota/0"),
++		];
++		for subkey in subkeys {
++			let ciphertext = facade.encrypt(&subkey, plaintext.clone(), aad).unwrap();
++			assert_eq!(facade.decrypt(&subkey, &ciphertext, aad).unwrap(), plaintext);
++			let version = ciphertext[0];
++			let result = EntityFacadeImpl::decrypt_and_parse_value(
++				ElementValue::Bytes(ciphertext), &generic_sk, "audit", &model,
++			);
++			match result {
++				Err(error) => {
++					println!("Valid AEAD v{version}: primitive round-trip OK; entity decoder rejects it: {error}");
++					assert!(error.to_string().contains("MacError"));
++				},
++				Ok(_) => panic!("Expected current upstream entity decoder to reject AEAD"),
++			}
++		}
++	}
++
++	#[test]
++	fn audit_short_encrypted_field_reproduces_invalid_data_size() {
++		let sk = GenericAesKey::Aes256(Aes256Key::from_bytes(&KNOWN_SK).unwrap());
++		let model = create_model_value(ValueType::String, true, Cardinality::One);
++		match EntityFacadeImpl::decrypt_and_parse_value(ElementValue::Bytes(vec![1, 2, 3]), &sk, "audit", &model) {
++			Err(error) => {
++				println!("Synthetic short ciphertext: {error}");
++				assert!(error.to_string().contains("InvalidDataSizeError"));
++			},
++			Ok(_) => panic!("Expected invalid ciphertext length to fail"),
++		}
++	}
++
++	#[test]
++	fn audit_optional_empty_body_fields_reproduce_invalid_data_size() {
++		use crate::entities::generated::tutanota::Body;
++		let provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()), Arc::new(MockFileClient::new()), "http://localhost:9000".into(),
++		));
++		let serializer = JsonSerializer::new(provider.clone());
++		let facade = EntityFacadeImpl::new(provider.clone(), RandomizerFacade::from_core(rand_core::OsRng));
++		let model = provider.resolve_server_type_ref(&Body::type_ref()).unwrap();
++		let sk = GenericAesKey::Aes256(Aes256Key::from_bytes(&KNOWN_SK).unwrap());
++		for (field, name) in [("1275", "Body.text"), ("1276", "Body.compressedText")] {
++			let mut raw: RawEntity = serde_json::from_str(r#"{"1274":"auditbody","1275":null,"1276":null}"#).unwrap();
++			let control = serializer.parse(&Body::type_ref(), raw.clone()).unwrap();
++			assert!(facade.decrypt_and_map_inner(&model, control, &sk).is_ok());
++			raw.insert(field.into(), JsonElement::String(String::new()));
++			let parsed = serializer.parse(&Body::type_ref(), raw).unwrap();
++			assert_eq!(parsed.get(field).unwrap(), &ElementValue::Bytes(vec![]));
++			match facade.decrypt_and_map_inner(&model, parsed, &sk) {
++				Err(error) => {
++					println!("{name} encoded as an empty string: {error}; null control succeeds");
++					assert!(error.to_string().contains("InvalidDataSizeError"));
++				},
++				Ok(_) => panic!("Expected current Rust decoder to reject the optional empty field"),
++			}
++		}
++	}
++
+ 	const ALL_VALUE_TYPES: &[ValueType] = &[
+ 		ValueType::String,
+ 		ValueType::Number,

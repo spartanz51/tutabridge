@@ -1,0 +1,60 @@
+[
+  {
+    "label": "full_series_359",
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "passed": true,
+    "tree": "48579032ee69fe8c497089d9fb83bf661311df8f",
+    "patches": [
+      "01-batch.patch",
+      "02-blob-reads.patch",
+      "03-interactive-session.patch",
+      "04-parse-raw.patch",
+      "05-optional-empty.patch",
+      "06-aead-session-reads.patch",
+      "07-aead-group-reads.patch"
+    ]
+  },
+  {
+    "label": "full_series_master",
+    "base": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+    "passed": true,
+    "tree": "325cda1169776f5edefaf6ceb3e4d5b4e88b3216",
+    "patches": [
+      "01-batch.patch",
+      "02-blob-reads.patch",
+      "03-interactive-session.patch",
+      "04-parse-raw.patch",
+      "05-optional-empty.patch",
+      "06-aead-session-reads.patch",
+      "07-aead-group-reads.patch"
+    ]
+  },
+  {
+    "label": "v3_standalone",
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "passed": true,
+    "tree": "fc75ec4bb0acf651cf6bb08711539eb7dc32ea56",
+    "patches": [
+      "06-aead-session-reads.patch"
+    ]
+  },
+  {
+    "label": "v2_on_v3_only",
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "passed": true,
+    "tree": "0dc305a2a27efad7eb31c3c302aa52ec4055293f",
+    "patches": [
+      "06-aead-session-reads.patch",
+      "07-aead-group-reads.patch"
+    ]
+  },
+  {
+    "label": "bridge_overlay",
+    "base": "b375f1c275b8162ee8f04008144e3dd2c72a10d6",
+    "passed": true,
+    "tree": "7d3132a90fe3cd1206a826cdad797e03ea465e49",
+    "patches": [
+      "bridge.patch"
+    ]
+  }
+]

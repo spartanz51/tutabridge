@@ -1,0 +1,274 @@
+[
+  {
+    "file": "src/platform-kit/network/EntityRestClient.ts",
+    "function": "async loadMultipleParsedInstances",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 260,
+        "end": 307,
+        "sha256": "5575546712580bd5cd4bccd0956c7318cc63f23201a7181467a495e2091db502"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 261,
+        "end": 308,
+        "sha256": "5575546712580bd5cd4bccd0956c7318cc63f23201a7181467a495e2091db502"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/EntityRestClient.ts",
+    "function": "private async loadMultipleBlobElements",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 320,
+        "end": 368,
+        "sha256": "656a9670a4fc0b457454b6c784893b9e5fef09dfb8ecdbf839c3ea990d7a5309"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 321,
+        "end": 369,
+        "sha256": "656a9670a4fc0b457454b6c784893b9e5fef09dfb8ecdbf839c3ea990d7a5309"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/EntityRestClient.ts",
+    "function": "export async function tryServers",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 890,
+        "end": 908,
+        "sha256": "fa961bff238126d1ec07218b6dcf8f52ba1b1e303028b05e247b493713df55d3"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 898,
+        "end": 916,
+        "sha256": "fa961bff238126d1ec07218b6dcf8f52ba1b1e303028b05e247b493713df55d3"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/EntityRestClient.ts",
+    "function": "export async function doBlobRequestWithRetry",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 917,
+        "end": 926,
+        "sha256": "e3582ad8aadff581ef78ef2baa76e958aa63778f3347f79cd0d523439690526d"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 925,
+        "end": 934,
+        "sha256": "e3582ad8aadff581ef78ef2baa76e958aa63778f3347f79cd0d523439690526d"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/BlobAccessTokenFacade.ts",
+    "function": "async requestReadTokenBlobs",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 142,
+        "end": 174,
+        "sha256": "5332ba2ca24c36ba7b36af3f2f038b9fdcf6aa02dc3741521102a6ce18e1df99"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 142,
+        "end": 174,
+        "sha256": "5332ba2ca24c36ba7b36af3f2f038b9fdcf6aa02dc3741521102a6ce18e1df99"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/BlobAccessTokenFacade.ts",
+    "function": "async requestReadTokenArchive",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 200,
+        "end": 215,
+        "sha256": "7d93b20deb77add71c65b7e51c4637059224f1c60a4e2c8fb2489c272299fa05"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 200,
+        "end": 215,
+        "sha256": "7d93b20deb77add71c65b7e51c4637059224f1c60a4e2c8fb2489c272299fa05"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/BlobAccessTokenFacade.ts",
+    "function": "public async createQueryParams",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 255,
+        "end": 265,
+        "sha256": "3a09c293dc7b721eb903bed34e7c705b7c7c0da31881ba2f66323d160dfb322c"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 255,
+        "end": 265,
+        "sha256": "3a09c293dc7b721eb903bed34e7c705b7c7c0da31881ba2f66323d160dfb322c"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/network/BlobAccessTokenFacade.ts",
+    "function": "public async getToken",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 287,
+        "end": 312,
+        "sha256": "50beec8644f6b886359b3fc1e17aecb5f52c424de03227ff16d371a8db67b35f"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 287,
+        "end": 312,
+        "sha256": "50beec8644f6b886359b3fc1e17aecb5f52c424de03227ff16d371a8db67b35f"
+      }
+    }
+  },
+  {
+    "file": "src/applications/common/api/worker/facades/lazy/BlobFacade.ts",
+    "function": "private async downloadBlobsOfOneArchive",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 970,
+        "end": 1030,
+        "sha256": "72309c6681ecc6ea31baa935d1582aae091720339d695af6a735f4701e433b65"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 970,
+        "end": 1030,
+        "sha256": "72309c6681ecc6ea31baa935d1582aae091720339d695af6a735f4701e433b65"
+      }
+    }
+  },
+  {
+    "file": "src/applications/common/api/worker/facades/lazy/BlobFacade.ts",
+    "function": "export function parseMultipleBlobsResponse",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 1146,
+        "end": 1174,
+        "sha256": "871bf233d3b5a46ee34ec6cc64e5bcdb11b35d43d6ab83d78796b0b75f1a7591"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 1146,
+        "end": 1174,
+        "sha256": "871bf233d3b5a46ee34ec6cc64e5bcdb11b35d43d6ab83d78796b0b75f1a7591"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/base/facades/LoginFacade.ts",
+    "function": "async createSession",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 273,
+        "end": 352,
+        "sha256": "5fb173ba457ea2c51d1d8ff4989a13934606757a36835ddc934781c9fbf4a2fa"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 273,
+        "end": 352,
+        "sha256": "5fb173ba457ea2c51d1d8ff4989a13934606757a36835ddc934781c9fbf4a2fa"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/base/facades/LoginFacade.ts",
+    "function": "private async loadUserPassphraseKey",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 1163,
+        "end": 1172,
+        "sha256": "c059d57ec4b1733f66fcc381694df4bb57e2e5ced1a605c3d4f9fea9a4d95a28"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 1163,
+        "end": 1172,
+        "sha256": "c059d57ec4b1733f66fcc381694df4bb57e2e5ced1a605c3d4f9fea9a4d95a28"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/base/facades/LoginFacade.ts",
+    "function": "private async waitUntilSecondFactorApproved(",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 935,
+        "end": 956,
+        "sha256": "ea75f0969502665ffeed23032c2f0ca21dd3d6feea4f2b36cb291a986a10f155"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 935,
+        "end": 956,
+        "sha256": "ea75f0969502665ffeed23032c2f0ca21dd3d6feea4f2b36cb291a986a10f155"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/base/facades/LoginFacade.ts",
+    "function": "private getSessionListId",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 1179,
+        "end": 1182,
+        "sha256": "3f599265825d4df6410cbace71c60a92d4c6a677db8f5c2dbb4fed6d13623621"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 1179,
+        "end": 1182,
+        "sha256": "3f599265825d4df6410cbace71c60a92d4c6a677db8f5c2dbb4fed6d13623621"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/base/facades/LoginFacade.ts",
+    "function": "private getSessionElementId",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 1174,
+        "end": 1177,
+        "sha256": "beeee26f97903a7cdccf6903ecd7db40e0e43fe7d1dc21d1a33feb15a615c248"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 1174,
+        "end": 1177,
+        "sha256": "beeee26f97903a7cdccf6903ecd7db40e0e43fe7d1dc21d1a33feb15a615c248"
+      }
+    }
+  },
+  {
+    "file": "src/platform-kit/instance-pipeline/CryptoMapper.ts",
+    "function": "async decryptValue",
+    "same": true,
+    "revisions": {
+      "aea5846b93a1412451e885bf99002401c3b087e8": {
+        "start": 351,
+        "end": 392,
+        "sha256": "4cf74e8cc1ecd7a4727c70100d6d42ba1300dce91f49e3b20db2113a79796964"
+      },
+      "46270557c251d1a31157d72e0aaf0cc63bb33ecf": {
+        "start": 351,
+        "end": 392,
+        "sha256": "4cf74e8cc1ecd7a4727c70100d6d42ba1300dce91f49e3b20db2113a79796964"
+      }
+    }
+  }
+]

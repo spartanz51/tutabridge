@@ -1,0 +1,337 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking tuta-sdk v359.260904.0 (/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/bridge/tuta-repo/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: called `unwrap` on `symmetric_permission` after checking its variant with `is_some`
+   --> tuta-sdk/rust/sdk/src/crypto/crypto_facade.rs:215:23
+    |
+214 |         if symmetric_permission.is_some() {
+    |         --------------------------------- help: try: `if let Some(<item>) = symmetric_permission`
+215 |             let s_permission = symmetric_permission.unwrap().clone();
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#unnecessary_unwrap
+    = note: `#[warn(clippy::unnecessary_unwrap)]` on by default
+
+warning: useless conversion to the same type: `ApiCallError`
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:169:57
+    |
+169 |                    .encrypt_and_map(type_model, &parsed_instance, &key)
+    |   _____________________________________________________________________^
+    |  |_____________________________________________________________________|
+170 | ||                 .map_err(Into::into)
+    | ||____________________________________^
+171 | |          } else {
+    | |_________- help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#useless_conversion
+    = note: `#[warn(clippy::useless_conversion)]` on by default
+
+warning: useless conversion to the same type: `std::string::String`
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:281:51
+    |
+281 |                        .get_attribute_id_by_attribute_name(ID_FIELD)
+    |   __________________________________________________________________^
+    |  |__________________________________________________________________|
+282 | ||                     .map(String::from)
+    | ||______________________________________^
+283 | |                  else {
+    | |_________________- help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#useless_conversion
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:347:10
+    |
+347 |             .get(&bucket_key_id.to_string())
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_key_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+    = note: requested on the command line with `-W clippy::implicit-clone`
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:366:12
+    |
+366 |                     .get(&bucket_key_group_id.to_string())
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_key_group_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:376:14
+    |
+376 | ...                   .get(&bucket_sender_kv_id.to_string())
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_sender_kv_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: `format!` in `error!` args
+   --> tuta-sdk/rust/sdk/src/date/event_facade.rs:698:7
+    |
+698 | /                         log::error!(
+699 | |                             "{}",
+700 | |                             format!(
+701 | |                                 "Failed to add {} days to date {}",
+...   |
+705 | |                         );
+    | |_________________________^
+    |
+    = help: combine the `format!(..)` arguments with the outer `error!(..)` call
+    = help: or consider changing `format!` to `format_args!`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#format_in_format_args
+    = note: `#[warn(clippy::format_in_format_args)]` on by default
+
+warning: `format!` in `error!` args
+   --> tuta-sdk/rust/sdk/src/date/event_facade.rs:752:8
+    |
+752 | / ...                   log::error!(
+753 | | ...                       "{}",
+754 | | ...                       format!(
+755 | | ...                           "Failed to sub {} days to end of {}",
+...   |
+759 | | ...                   );
+    | |_______________________^
+    |
+    = help: combine the `format!(..)` arguments with the outer `error!(..)` call
+    = help: or consider changing `format!` to `format_args!`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#format_in_format_args
+
+warning: `format!` in `error!` args
+   --> tuta-sdk/rust/sdk/src/date/event_facade.rs:773:8
+    |
+773 | / ...                   log::error!(
+774 | | ...                       "{}",
+775 | | ...                       format!(
+776 | | ...                           "Failed to add {} days to start of {}",
+...   |
+780 | | ...                   );
+    | |_______________________^
+    |
+    = help: combine the `format!(..)` arguments with the outer `error!(..)` call
+    = help: or consider changing `format!` to `format_args!`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#format_in_format_args
+
+warning: called `unwrap` on `target_week_day` after checking its variant with `is_none`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1005:46
+     |
+ 968 |             if target_week_day.is_none() {
+     |             ---------------------------- help: try: `if let Some(<item>) = target_week_day`
+...
+1005 |                 let parsed_weekday = Weekday::from_short(target_week_day.unwrap().as_str());
+     |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#unnecessary_unwrap
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1132:5
+     |
+1132 |                 return Ok(());
+     |                 ^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+     = note: `#[warn(clippy::needless_return)]` on by default
+help: remove `return`
+     |
+1132 -                 return Ok(());
+1132 +                 Ok(())
+     |
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1136:5
+     |
+1136 | /                 return match interval_start.checked_add(Duration::days(7)) {
+1137 | |                     Some(new_date) => Self::safe_expand_dates(new_dates, new_date),
+1138 | |                     None => Err(ApiCallError::internal(format!(
+1139 | |                         "Failed to add {} days to {}",
+...    |
+1142 | |                     ))),
+1143 | |                 };
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+     |
+1136 ~                 match interval_start.checked_add(Duration::days(7)) {
+1137 ~                     Some(new_date) => Self::safe_expand_dates(new_dates, new_date),
+1138 ~                     None => Err(ApiCallError::internal(format!(
+1139 ~                         "Failed to add {} days to {}",
+1140 ~                         7,
+1141 ~                         interval_start.assume_utc().unix_timestamp()
+1142 ~                     ))),
+1143 ~                 }
+     |
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1145:5
+     |
+1145 |                 return Self::safe_expand_dates(new_dates, new_date);
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+     |
+1145 -                 return Self::safe_expand_dates(new_dates, new_date);
+1145 +                 Self::safe_expand_dates(new_dates, new_date)
+     |
+
+warning: manual implementation of `ok`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1568:3
+     |
+1568 | /         match new_date.replace_day(target_day) {
+1569 | |             Ok(new_date) => Some(new_date),
+1570 | |             _ => None,
+1571 | |         }
+     | |_________^ help: replace with: `new_date.replace_day(target_day).ok()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_ok_err
+     = note: `#[warn(clippy::manual_ok_err)]` on by default
+
+warning: manual implementation of `ok`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1737:3
+     |
+1737 | /         match result {
+1738 | |             Ok(rt) => Some(rt),
+1739 | |             _ => None,
+1740 | |         }
+     | |_________^ help: replace with: `result.ok()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_ok_err
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/entities/entity_facade.rs:233:21
+    |
+233 |             encrypted.insert(value_id_string.to_string(), encrypted_value);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `value_id_string.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/entities/entity_facade.rs:285:21
+    |
+285 |             encrypted.insert(association_id_string.to_string(), encrypted_association);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `association_id_string.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: unneeded `return` statement
+   --> tuta-sdk/rust/sdk/src/instance_mapper.rs:630:6
+    |
+630 | /                     return Err(DeError(
+631 | |                         "None value for association with Cardinality One".to_string(),
+632 | |                     ))
+    | |______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+    |
+630 ~                     Err(DeError(
+631 ~                         "None value for association with Cardinality One".to_string(),
+632 ~                     ))
+    |
+
+warning: unneeded `return` statement
+   --> tuta-sdk/rust/sdk/src/json_serializer.rs:402:4
+    |
+402 | /             return match (
+403 | |                 &model_value.value_type,
+404 | |                 element_value,
+405 | |                 &type_model.element_type,
+...   |
+439 | |                 _ => invalid_value(),
+440 | |             };
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+    |
+402 ~             match (
+403 ~                 &model_value.value_type,
+404 ~                 element_value,
+405 ~                 &type_model.element_type,
+406 ~             ) {
+407 ~                 (
+408 ~                     ValueType::GeneratedId | ValueType::CustomId,
+409 ~                     ElementValue::String(v),
+410 ~                     ElementType::Element | ElementType::Aggregated,
+411 ~                 ) => Ok(JsonElement::String(v)),
+412 ~                 (
+413 ~                     ValueType::GeneratedId,
+414 ~                     ElementValue::IdGeneratedId(v),
+415 ~                     ElementType::Element | ElementType::Aggregated,
+416 ~                 ) => Ok(JsonElement::String(v.to_string())),
+417 ~                 (
+418 ~                     ValueType::CustomId,
+419 ~                     ElementValue::IdCustomId(v),
+420 ~                     ElementType::Element | ElementType::Aggregated,
+421 ~                 ) => Ok(JsonElement::String(v.to_string())),
+422 ~                 (
+423 ~                     ValueType::GeneratedId,
+424 ~                     ElementValue::IdTupleGeneratedElementId(arr),
+425 ~                     ElementType::ListElement,
+426 ~                 ) => Ok(JsonElement::Array(vec![
+427 ~                     JsonElement::String(arr.list_id.into()),
+428 ~                     JsonElement::String(arr.element_id.into()),
+429 ~                 ])),
+430 ~                 (
+431 ~                     ValueType::CustomId,
+432 ~                     ElementValue::IdTupleCustomElementId(arr),
+433 ~                     ElementType::ListElement,
+434 ~                 ) => Ok(JsonElement::Array(vec![
+435 ~                     JsonElement::String(arr.list_id.into()),
+436 ~                     JsonElement::String(arr.element_id.into()),
+437 ~                 ])),
+438 + 
+439 ~                 _ => invalid_value(),
+440 ~             }
+    |
+
+warning: explicit call to `.into_iter()` in function argument accepting `IntoIterator`
+   --> tuta-sdk/rust/sdk/src/blobs/blob_facade.rs:140:10
+    |
+140 |                 .zip(blob_reference_tokens.into_iter())
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: this parameter accepts any `IntoIterator`, so you don't need to call `.into_iter()`
+   --> /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/iter/traits/iterator.rs:629:11
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#useless_conversion
+help: consider removing the `.into_iter()`
+    |
+140 -                 .zip(blob_reference_tokens.into_iter())
+140 +                 .zip(blob_reference_tokens)
+    |
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/lib.rs:165:45
+    |
+165 |             headers.insert("accessToken".to_owned(), access_token.to_string());
+    |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `access_token.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 23 warnings (run `cargo clippy --fix --lib -p tuta-sdk -- ` to apply 17 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.85s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

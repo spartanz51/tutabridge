@@ -1,0 +1,62 @@
+HEAD is now at aea5846b93 v359.260904.0
+Removing tuta-sdk/rust/sdk/src/login/session.rs
+Removing tuta-sdk/rust/sdk/tests/interactive_session_test.rs
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/independent/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+warning: method `parse_raw` is never used
+  --> tuta-sdk/rust/sdk/src/entity_client.rs:51:9
+   |
+29 | impl EntityClient {
+   | ----------------- method in this implementation
+...
+51 |     pub fn parse_raw(
+   |            ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tuta-sdk` (lib test) generated 2 warnings (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.25s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/target-validation/debug/deps/tutasdk-cee6532dfd4c584d)
+
+running 13 tests
+test entity_client::stests::test_load_range_generated_element_id ... ok
+test entity_client::stests::test_load_all_list_entries_desc ... ok
+test entity_client::stests::test_load_all_list_entries_asc ... ok
+test crypto_entity_client::tests::no_auth_for_encrypted_instances_except_mail ... ok
+test entity_client::stests::test_load_range_asc_generated_element_id ... ok
+test entity_client::stests::test_load_range_custom_element_id ... ok
+test entity_client::stests::test_load_range_asc_custom_element_id ... ok
+test crypto_entity_client::tests::can_load_mail ... ok
+test crypto_entity_client::tests::load_mail_authentication_succeeds ... ok
+test crypto_entity_client::tests::load_mail_authentication_fails ... ok
+test crypto_entity_client::tests::load_mail_authentication_system_sender_succeeds ... ok
+test crypto_entity_client::tests::auth_result_rsa_despite_tuta_crypt ... ok
+test crypto_entity_client::tests::no_auth_for_rsa_mail ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 287 filtered out; finished in 5.28s
+

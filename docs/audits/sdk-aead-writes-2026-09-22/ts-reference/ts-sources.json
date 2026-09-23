@@ -1,0 +1,105 @@
+{
+  "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+  "sources": [
+    {
+      "file": "src/platform-kit/crypto/encryption/symmetric/SymmetricCipherVersion.ts",
+      "local_file": "SymmetricCipherVersion.ts",
+      "sha256": "bb03f39913fb535174232b3435f65a3f7722e7bb435debd907253399d4e4e552"
+    },
+    {
+      "file": "src/platform-kit/crypto/encryption/symmetric/AesKey.ts",
+      "local_file": "AesKey.ts",
+      "sha256": "573b37355df3fb97977240a3e431355f76f4f1f856c30b6898c64d373eb3d9da"
+    },
+    {
+      "file": "src/platform-kit/crypto/encryption/symmetric/ParsedCiphertext.ts",
+      "local_file": "ParsedCiphertext.ts",
+      "sha256": "c786721beb7b7a94b70648b81115a64a5b6e3e6662dc3673a395d91c1f0f1318"
+    },
+    {
+      "file": "src/platform-kit/crypto/encryption/symmetric/SymmetricCipherUtils.ts",
+      "local_file": "SymmetricCipherUtils.ts",
+      "sha256": "4a12818ef2a0c210f30085212f807c87e6189ac97c71ee1837a2d970647a2285"
+    },
+    {
+      "file": "src/platform-kit/crypto/hashes/Blake3.ts",
+      "local_file": "Blake3.ts",
+      "sha256": "55b281b469650f1a23b3f806786aa6c67a5449bfae2409828da9e76bfc3594ee"
+    },
+    {
+      "file": "src/platform-kit/crypto/encryption/symmetric/SymmetricKeyDeriver.ts",
+      "local_file": "SymmetricKeyDeriver.ts",
+      "sha256": "19e4fd4d4ddbff92a911f85ba27ce05cf4bffab2e22c6d858f7879e91c1ec47c"
+    },
+    {
+      "file": "src/platform-kit/crypto/encryption/symmetric/AeadFacade.ts",
+      "local_file": "AeadFacade.ts",
+      "sha256": "860f9031663805ae153801beb661db72373e48683694e4dcaf0b13e1a75a2181"
+    },
+    {
+      "file": "src/platform-kit/crypto/instance-pipeline-crypto/decryption/SubKeyCache.ts",
+      "local_file": "SubKeyCache.ts",
+      "sha256": "edb34d68c1197bc22c1a289b04535e411a4f6f8ddc45d817a694b75d8eb7fe96"
+    },
+    {
+      "file": "src/platform-kit/crypto/instance-pipeline-crypto/decryption/ValueDecryptor.ts",
+      "local_file": "ValueDecryptor.ts",
+      "sha256": "0a13dc9936e96fd3f59e7c8bdfd439679abfa89b2832c6d1bfb28a0f3219f250"
+    },
+    {
+      "file": "src/platform-kit/crypto/instance-pipeline-crypto/decryption/InstanceDecryptor.ts",
+      "local_file": "InstanceDecryptor.ts",
+      "sha256": "656131ccf0404b66718205122b17f302f81980f0e614bd589610b5413e98bb87"
+    },
+    {
+      "file": "src/platform-kit/crypto/internal/sjcl.js",
+      "local_file": "sjcl.mjs",
+      "sha256": "59da78efbb94a6f431f57c5e6ee030e764b9309732af2f56cf6175d1c893eb87"
+    },
+    {
+      "file": "src/platform-kit/crypto/internal/noble-hashes-2.0.1.js",
+      "local_file": "noble-hashes-2.0.1.mjs",
+      "sha256": "6a11cf65cbdeddfdf245948b85901fc2feecd76e2d5eb9826dd4d639363dd1c9"
+    },
+    {
+      "file": "src/platform-kit/instance-pipeline/CryptoMapper.ts",
+      "local_file": "CryptoMapper.ts",
+      "sha256": "1fe4090a51c5712b377df2eac320a627c090ac01889578318591284b2d501415"
+    },
+    {
+      "file": "src/platform-kit/crypto/instance-pipeline-crypto/encryption/SubKeyProvider.ts",
+      "local_file": "SubKeyProvider.ts",
+      "sha256": "cf2b2e6471696d72bcd89c46ca8db75bcdad90fdf12f7da9d9bef7709ba0e9d4"
+    },
+    {
+      "file": "src/platform-kit/network/EntityRestClient.ts",
+      "local_file": "EntityRestClient.ts",
+      "sha256": "97be2295d47ba1d53e35431f82e973e8250db4759535892f0b022617fdfe9c10"
+    },
+    {
+      "file": "src/platform-kit/network/ServiceExecutor.ts",
+      "local_file": "ServiceExecutor.ts",
+      "sha256": "189d41931fe96d14b2fb9bbc56e680deba4ddc5642d7e141be70ad88839ba06d"
+    },
+    {
+      "file": "src/platform-kit/instance-pipeline/InstancePipeline.ts",
+      "local_file": "InstancePipeline.ts",
+      "sha256": "b430d96841283f0155c15d60cb498c1fcf51668ee4cbc8658d6df3aad9a9cfaf"
+    },
+    {
+      "file": "doc/HACKING.md",
+      "local_file": "HACKING.md",
+      "sha256": "84c84e42b9d425c22cddf7aa25d4344a93a3bef0bdad1db7c37fb5e0129c2d38"
+    },
+    {
+      "file": "rustfmt.toml",
+      "local_file": "rustfmt.toml",
+      "sha256": "cce9346bc5c98b52d01946ba957b20ccd9affd7ab370c431225a22eec3c5764c"
+    },
+    {
+      "file": ".editorconfig",
+      "local_file": ".editorconfig",
+      "sha256": "7641561f99175d806625b7168640fffa9685e365af6b100d8ed739c713e177e7"
+    }
+  ]
+}

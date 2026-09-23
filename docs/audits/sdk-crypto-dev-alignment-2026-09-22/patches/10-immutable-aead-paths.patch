@@ -1,0 +1,316 @@
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+index 7294187d9bad1ef9d99846da192c38b43a5df9ad..96d3d55324a3de199b6fcac3eae144ec6830dc2e 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+@@ -1,10 +1,12 @@
+ mod decryption;
+ mod decryption_keys;
+ mod encryption;
++mod field_path;
+ use decryption::InstanceDecryptor;
+ pub use decryption_keys::{has_kdf_nonce, EntityDecryptionKeys, EntityDecryptionRequirements};
+ pub use encryption::AeadEncryptionKey;
+ use encryption::{EncryptionContext, InstanceEncryptor};
++use field_path::InstancePath;
+ 
+ use crate::crypto::crypto_facade::ResolvedSessionKey;
+ use crate::date::DateTime;
+@@ -177,7 +179,12 @@ impl EntityFacadeImpl {
+ 		instance: &ParsedEntity,
+ 		sk: &GenericAesKey,
+ 	) -> Result<ParsedEntity, ApiCallError> {
+-		self.encrypt_and_map_with_context(type_model, instance, EncryptionContext::Cbc(sk), "")
++		self.encrypt_and_map_with_context(
++			type_model,
++			instance,
++			EncryptionContext::Cbc(sk),
++			&InstancePath::default(),
++		)
+ 	}
+ 
+ 	fn encrypt_and_map_with_context(
+@@ -185,7 +192,7 @@ impl EntityFacadeImpl {
+ 		type_model: &TypeModel,
+ 		instance: &ParsedEntity,
+ 		context: EncryptionContext<'_>,
+-		field_path_prefix: &str,
++		instance_path: &InstancePath,
+ 	) -> Result<ParsedEntity, ApiCallError> {
+ 		let mut encrypted = ParsedEntity::new();
+ 
+@@ -224,7 +231,7 @@ impl EntityFacadeImpl {
+ 						} else {
+ 							ElementValue::Bytes(encryptor.encrypt(
+ 								Self::map_value_to_binary(&value_type.value_type, instance_value),
+-								&format!("{field_path_prefix}{value_id_string}"),
++								&instance_path.value(value_id),
+ 							)?)
+ 						}
+ 					},
+@@ -268,7 +275,7 @@ impl EntityFacadeImpl {
+ 					association_type,
+ 					instance,
+ 					context,
+-					field_path_prefix,
++					instance_path,
+ 				)?,
+ 				AssociationType::ElementAssociation
+ 				| AssociationType::ListAssociation
+@@ -295,7 +302,7 @@ impl EntityFacadeImpl {
+ 		association: &ModelAssociation,
+ 		instance: &ParsedEntity,
+ 		context: EncryptionContext<'_>,
+-		field_path_prefix: &str,
++		instance_path: &InstancePath,
+ 	) -> Result<ElementValue, ApiCallError> {
+ 		let dependency_type_ref = TypeRef::new(
+ 			association.dependency.unwrap_or(type_model.app),
+@@ -333,9 +340,9 @@ impl EntityFacadeImpl {
+ 						))
+ 					},
+ 				};
+-				format!("{field_path_prefix}{association_id}/{id}/")
++				instance_path.aggregate(association.id, id)
+ 			} else {
+-				String::new()
++				InstancePath::default()
+ 			};
+ 			let parsed_entity =
+ 				self.encrypt_and_map_with_context(aggregated_type_model, &child, context, &prefix)?;
+@@ -350,7 +357,7 @@ impl EntityFacadeImpl {
+ 		type_model: &TypeModel,
+ 		mut entity: ParsedEntity,
+ 		decryptor: &InstanceDecryptor<'_>,
+-		field_path_prefix: Option<&str>,
++		instance_path: Option<&InstancePath>,
+ 	) -> Result<ParsedEntity, ApiCallError> {
+ 		let mut mapped_decrypted: ParsedEntity = Default::default();
+ 		let mut mapped_errors: Errors = Default::default();
+@@ -361,7 +368,7 @@ impl EntityFacadeImpl {
+ 			let stored_element = entity
+ 				.remove(&value_id_string)
+ 				.unwrap_or(ElementValue::Null);
+-			let field_path = field_path_prefix.map(|prefix| format!("{prefix}{value_id_string}"));
++			let field_path = instance_path.map(|path| path.value(value_id));
+ 			let MappedValue { value, error } = Self::decrypt_and_parse_value(
+ 				stored_element,
+ 				decryptor,
+@@ -386,7 +393,7 @@ impl EntityFacadeImpl {
+ 				type_model,
+ 				association_entry,
+ 				decryptor,
+-				field_path_prefix,
++				instance_path,
+ 				association_name,
+ 				association_type,
+ 			)?;
+@@ -413,7 +420,7 @@ impl EntityFacadeImpl {
+ 		type_model: &TypeModel,
+ 		association_data: ElementValue,
+ 		decryptor: &InstanceDecryptor<'_>,
+-		field_path_prefix: Option<&str>,
++		instance_path: Option<&InstancePath>,
+ 		association_name: &str,
+ 		association_model: &ModelAssociation,
+ 	) -> Result<(ElementValue, Errors), ApiCallError> {
+@@ -449,14 +456,14 @@ impl EntityFacadeImpl {
+ 								ElementValue::IdGeneratedId(id) => Some(id.0.as_str()),
+ 								_ => None,
+ 							});
+-						let prefix = field_path_prefix.zip(aggregate_id).map(|(prefix, id)| {
+-							format!("{prefix}{}/{id}/", String::from(association_model.id))
+-						});
++						let prefix = instance_path
++							.zip(aggregate_id)
++							.map(|(path, id)| path.aggregate(association_model.id, id));
+ 						let mut decrypted_aggregate = self.decrypt_and_map_inner(
+ 							&aggregate_type_model,
+ 							entity,
+ 							decryptor,
+-							prefix.as_deref(),
++							prefix.as_ref(),
+ 						)?;
+ 
+ 						// Errors should be grouped inside the top-most object, so they should be
+@@ -671,8 +678,12 @@ impl EntityFacade for EntityFacadeImpl {
+ 			self.randomizer_facade.clone(),
+ 		);
+ 		// The nonce is metadata. Own it so the parsed instance can be moved into traversal.
+-		let mut mapped_decrypted =
+-			self.decrypt_and_map_inner(type_model, entity, &decryptor, Some(""))?;
++		let mut mapped_decrypted = self.decrypt_and_map_inner(
++			type_model,
++			entity,
++			&decryptor,
++			Some(&InstancePath::default()),
++		)?;
+ 		let Some(resolved_session_key) = keys.session_key.as_ref() else {
+ 			return Ok(mapped_decrypted);
+ 		};
+@@ -725,7 +736,7 @@ impl EntityFacade for EntityFacadeImpl {
+ 			type_model,
+ 			instance,
+ 			EncryptionContext::Aead(&encryptor),
+-			"",
++			&InstancePath::default(),
+ 		)
+ 	}
+ 
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/field_path.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/field_path.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c0e656e99e1d2a77d018b6a9484542fad16ed66
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/field_path.rs
+@@ -0,0 +1,63 @@
++use crate::metamodel::AttributeId;
++
++/// Path of an instance within the root entity's authenticated context.
++/// Extending a path leaves the parent unchanged for the next sibling.
++#[derive(Default)]
++pub(super) struct InstancePath(String);
++
++impl InstancePath {
++	pub(super) fn aggregate(&self, association_id: AttributeId, aggregate_id: &str) -> Self {
++		Self(format!(
++			"{}{}/{aggregate_id}/",
++			self.0,
++			String::from(association_id)
++		))
++	}
++
++	pub(super) fn value(&self, attribute_id: AttributeId) -> String {
++		format!("{}{}", self.0, String::from(attribute_id))
++	}
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++	use serde_json::Value;
++
++	#[test]
++	fn paths_match_upstream_typescript() {
++		let vectors: Vec<Value> = serde_json::from_str(include_str!(
++			"../../../tests/fixtures/crypto_dev_paths.json"
++		))
++		.unwrap();
++		for vector in vectors {
++			let mut path = InstancePath::default();
++			for segment in vector["segments"].as_array().unwrap() {
++				path = path.aggregate(
++					segment["association"].as_u64().unwrap().into(),
++					segment["aggregate"].as_str().unwrap(),
++				);
++			}
++			assert_eq!(
++				path.value(vector["attribute"].as_u64().unwrap().into()),
++				vector["path"].as_str().unwrap()
++			);
++		}
++	}
++
++	#[test]
++	fn extending_a_nested_path_does_not_change_its_parent_or_siblings() {
++		let root = InstancePath::default();
++		let parent = root.aggregate(3.into(), "first");
++		let first = parent.aggregate(9.into(), "child1");
++		let second = parent.aggregate(9.into(), "child2");
++		assert_eq!(first.value(17.into()), "3/first/9/child1/17");
++		assert_eq!(second.value(17.into()), "3/first/9/child2/17");
++		assert_eq!(parent.value(2.into()), "3/first/2");
++		assert_eq!(root.value(1.into()), "1");
++		assert_eq!(
++			root.aggregate(3.into(), "second").value(2.into()),
++			"3/second/2"
++		);
++	}
++}
+diff --git a/tuta-sdk/rust/sdk/tests/fixtures/crypto_dev_paths.json b/tuta-sdk/rust/sdk/tests/fixtures/crypto_dev_paths.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..6015422518051ed711a970e2fc60e6a1f12c2fd0
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/tests/fixtures/crypto_dev_paths.json
+@@ -0,0 +1,83 @@
++[
++  {
++    "segments": [],
++    "attribute": 105,
++    "path": "105"
++  },
++  {
++    "segments": [
++      {
++        "association": 3,
++        "aggregate": "first"
++      }
++    ],
++    "attribute": 2,
++    "path": "3/first/2"
++  },
++  {
++    "segments": [
++      {
++        "association": 3,
++        "aggregate": "first"
++      },
++      {
++        "association": 9,
++        "aggregate": "child1"
++      }
++    ],
++    "attribute": 17,
++    "path": "3/first/9/child1/17"
++  },
++  {
++    "segments": [
++      {
++        "association": 3,
++        "aggregate": "first"
++      },
++      {
++        "association": 9,
++        "aggregate": "child2"
++      }
++    ],
++    "attribute": 17,
++    "path": "3/first/9/child2/17"
++  },
++  {
++    "segments": [
++      {
++        "association": 3,
++        "aggregate": "second"
++      }
++    ],
++    "attribute": 2,
++    "path": "3/second/2"
++  },
++  {
++    "segments": [
++      {
++        "association": 3,
++        "aggregate": "second"
++      },
++      {
++        "association": 9,
++        "aggregate": "child1"
++      }
++    ],
++    "attribute": 17,
++    "path": "3/second/9/child1/17"
++  },
++  {
++    "segments": [
++      {
++        "association": 3,
++        "aggregate": "second"
++      },
++      {
++        "association": 9,
++        "aggregate": "child2"
++      }
++    ],
++    "attribute": 17,
++    "path": "3/second/9/child2/17"
++  }
++]

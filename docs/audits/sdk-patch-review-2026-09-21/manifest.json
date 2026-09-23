@@ -1,0 +1,21 @@
+{
+  "patches": [
+    "patches/01-batch.patch",
+    "patches/02-blob-reads.patch",
+    "patches/03-interactive-session.patch",
+    "patches/04-parse-raw.patch",
+    "patches/05-optional-empty.patch"
+  ],
+  "files": {
+    "bridge.patch": "c6aa4d0b0a1696d68a288465ed6470645ec266be177c8ca4d36d68330f68d94e",
+    "prototype.py": "15d1a20709f3fd3c0948fe3a967af45acc3b5fcb67980032438ddae7063eefc1",
+    "test_prototype.py": "4d15236acab1bf8c30e2b0fce90738478936ee2d4ed9b2645b88e9254191772f",
+    "network_probe.py": "3100d4e949dd07b40fe65256cae9f51269b43e43c691232711523de39455ee99",
+    "smoke_tuta_api.py": "ed8e9b03e047083e316fac810e33b1bc021c1f87b507eae4a46a3357e12e73c4",
+    "patches/01-batch.patch": "b7825e7b7c08a5d114ae4592cfaf216aded167183ed987de8e214af1393905b1",
+    "patches/02-blob-reads.patch": "eb407990a5a1f910d3abf340b1aab3fb0b33a736346d8ca9fdc8c2a5bdbd8317",
+    "patches/03-interactive-session.patch": "823395f6cfb608cabf047cda43133057ce53b3cd8470064f0a682cb76e31780e",
+    "patches/04-parse-raw.patch": "895dbe1cd2f4bf4e5ea48478b797c06af5c8e43fe7ce771787e0314b9c3a13f9",
+    "patches/05-optional-empty.patch": "af02d638184dcf81e724ae92061364337cd786b0598515fb39b7467561b3341e"
+  }
+}

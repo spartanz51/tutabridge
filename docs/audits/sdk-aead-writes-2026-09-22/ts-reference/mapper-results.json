@@ -1,0 +1,21 @@
+{
+  "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+  "vectors": 8,
+  "results": [
+    {
+      "version": 2,
+      "sibling_path_accumulation_reproduced": true,
+      "first_path": "111/first/94",
+      "second_written_path": "111/first/second/94",
+      "second_reader_expected_path": "111/second/94"
+    },
+    {
+      "version": 3,
+      "sibling_path_accumulation_reproduced": true,
+      "first_path": "111/first/94",
+      "second_written_path": "111/first/second/94",
+      "second_reader_expected_path": "111/second/94"
+    }
+  ],
+  "scope": "Actual upstream CryptoMapper.encryptParsedInstance/encryptValue/aggregate traversal, SubKeyProvider, AEAD, InstanceDecryptor; minimal parsed-value/model adapters. No whole app."
+}

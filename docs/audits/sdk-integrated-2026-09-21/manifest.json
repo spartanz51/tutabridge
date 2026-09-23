@@ -1,0 +1,19 @@
+{
+  "patches": [
+    "patches/01-batch.patch",
+    "patches/02-blob-transport.patch",
+    "patches/03-session-2fa.patch",
+    "patches/04-parse-raw.patch"
+  ],
+  "files": {
+    "bridge.patch": "e6bb7a0a4290021909dc7c898008ef302706a0877d176f6093e60862f4c633d4",
+    "smoke_tuta_api.py": "ed8e9b03e047083e316fac810e33b1bc021c1f87b507eae4a46a3357e12e73c4",
+    "network_probe.py": "3100d4e949dd07b40fe65256cae9f51269b43e43c691232711523de39455ee99",
+    "prototype.py": "0c6649a05a87fa2909553f672405d809365f6361e004ddba863531ebdb5d0366",
+    "test_prototype.py": "4d15236acab1bf8c30e2b0fce90738478936ee2d4ed9b2645b88e9254191772f",
+    "patches/01-batch.patch": "020904b4e33e7e1e9eb29535dfec286ee7076e3df590bb59c859049af60f6d5c",
+    "patches/02-blob-transport.patch": "be1ec0f4a960a5b937ed565cb8496580a9f5047dffe043616d1adae3e87104ec",
+    "patches/03-session-2fa.patch": "2897bf902c983ec8f3751af711b82fe36015e145fbd2264b2c3fc7f7eb7915ad",
+    "patches/04-parse-raw.patch": "9ad83516eb1f08acdeccff0de799f072ad73ca4caeab0b477a47ef2a2871c391"
+  }
+}

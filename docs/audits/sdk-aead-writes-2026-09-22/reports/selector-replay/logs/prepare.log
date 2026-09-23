@@ -1,0 +1,25 @@
+Cloning into '/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead-write/selector-run/tutanota-release-359.260904.0/bridge'...
+done.
+COMMAND: git clone --shared /Users/anthony/GIT/tutabridge /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead-write/selector-run/tutanota-release-359.260904.0/bridge
+HEAD is now at b375f1c aur: bump tutabridge-bin to v0.1.0-rc.12 (#40)
+COMMAND: git checkout --detach b375f1c275b8162ee8f04008144e3dd2c72a10d6
+COMMAND: git apply /Users/anthony/GIT/tutabridge/docs/audits/sdk-aead-writes-2026-09-22/bridge.patch
+Cloning into '/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead-write/selector-run/tutanota-release-359.260904.0/bridge/tuta-repo'...
+done.
+COMMAND: git clone --shared --no-checkout /Users/anthony/GIT/tutabridge/tuta-repo /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead-write/selector-run/tutanota-release-359.260904.0/bridge/tuta-repo
+COMMAND: git sparse-checkout set tuta-sdk/rust test src/app-kit/mimimi
+From https://github.com/tutao/tutanota
+ * tag                     tutanota-release-359.260904.0 -> FETCH_HEAD
+COMMAND: git fetch --depth=1 https://github.com/tutao/tutanota.git refs/tags/tutanota-release-359.260904.0
+Warning: you are leaving 1 commit behind, not connected to
+any of your branches:
+
+  d1bae4750c sdk: raise client version to 359.260904.0
+
+If you want to keep it by creating a new branch, this may be a good time
+to do so with:
+
+ git branch <new-branch-name> d1bae4750c
+
+HEAD is now at aea5846b93 v359.260904.0
+COMMAND: git checkout --detach aea5846b93a1412451e885bf99002401c3b087e8

@@ -1,0 +1,32 @@
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-repo/tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-repo/tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/mail_extensions.rs (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/replay-targets/tutanota-release-359.260904.0/bridge/debug/deps/mail_extensions-dc7aa5946e9be868)
+
+running 1 test
+test protocol_accepts_valid_aead_v3_mail_subject ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.07s
+

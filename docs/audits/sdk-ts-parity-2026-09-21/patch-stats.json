@@ -1,0 +1,49 @@
+{
+  "01-batch.patch": {
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "files": [
+      "tuta-sdk/rust/sdk/src/entity_client.rs",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs",
+      "tuta-sdk/rust/sdk/src/entity_client/batch.rs"
+    ],
+    "numstat": "15\t0\ttuta-sdk/rust/sdk/src/crypto_entity_client.rs\n8\t0\ttuta-sdk/rust/sdk/src/entity_client.rs\n183\t0\ttuta-sdk/rust/sdk/src/entity_client/batch.rs\n"
+  },
+  "02-blob-reads.patch": {
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "files": [
+      "tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs",
+      "tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs",
+      "tuta-sdk/rust/sdk/src/blobs/blob_facade.rs",
+      "tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs",
+      "tuta-sdk/rust/sdk/tests/fixtures/blob_read_ts.json"
+    ],
+    "numstat": "7\t10\ttuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs\n183\t2\ttuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs\n2\t0\ttuta-sdk/rust/sdk/src/blobs/blob_facade.rs\n750\t0\ttuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs\n26\t0\ttuta-sdk/rust/sdk/tests/fixtures/blob_read_ts.json\n"
+  },
+  "03-interactive-session.patch": {
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "files": [
+      "tuta-sdk/rust/sdk/src/lib.rs",
+      "tuta-sdk/rust/sdk/src/login.rs",
+      "tuta-sdk/rust/sdk/src/login/login_facade.rs",
+      "tuta-sdk/rust/sdk/src/login/session.rs",
+      "tuta-sdk/rust/sdk/src/tutanota_constants.rs",
+      "tuta-sdk/rust/sdk/tests/interactive_session_test.rs"
+    ],
+    "numstat": "13\t64\ttuta-sdk/rust/sdk/src/lib.rs\n3\t0\ttuta-sdk/rust/sdk/src/login.rs\n1\t1\ttuta-sdk/rust/sdk/src/login/login_facade.rs\n202\t0\ttuta-sdk/rust/sdk/src/login/session.rs\n14\t0\ttuta-sdk/rust/sdk/src/tutanota_constants.rs\n138\t0\ttuta-sdk/rust/sdk/tests/interactive_session_test.rs\n"
+  },
+  "04-parse-raw.patch": {
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "files": [
+      "tuta-sdk/rust/sdk/src/entity_client.rs"
+    ],
+    "numstat": "14\t0\ttuta-sdk/rust/sdk/src/entity_client.rs\n"
+  },
+  "05-optional-empty.patch": {
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "files": [
+      "tuta-sdk/rust/sdk/src/json_serializer.rs",
+      "tuta-sdk/rust/sdk/src/json_serializer/optional_empty_tests.rs"
+    ],
+    "numstat": "10\t0\ttuta-sdk/rust/sdk/src/json_serializer.rs\n39\t0\ttuta-sdk/rust/sdk/src/json_serializer/optional_empty_tests.rs\n"
+  }
+}

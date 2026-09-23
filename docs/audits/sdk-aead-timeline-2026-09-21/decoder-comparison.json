@@ -1,0 +1,90 @@
+[
+  {
+    "file": "tuta-sdk/rust/sdk/src/entities/entity_facade.rs",
+    "function": "fn decrypt_and_parse_value(",
+    "versions": {
+      "production_fork": {
+        "commit": "d1bae4750cfac28fdf89c585155b5d8c44e60a6f",
+        "line": 380,
+        "sha256": "36363f131378e969068f0847ae50cf67615be4c0ad13e6c97aff064a1097346e"
+      },
+      "official_359": {
+        "commit": "aea5846b93a1412451e885bf99002401c3b087e8",
+        "line": 380,
+        "sha256": "36363f131378e969068f0847ae50cf67615be4c0ad13e6c97aff064a1097346e"
+      },
+      "official_master": {
+        "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+        "line": 380,
+        "sha256": "36363f131378e969068f0847ae50cf67615be4c0ad13e6c97aff064a1097346e"
+      }
+    },
+    "byte_identical_all_three": true
+  },
+  {
+    "file": "tuta-sdk/rust/sdk/src/entities/entity_facade.rs",
+    "function": "fn decrypt_and_map_inner(",
+    "versions": {
+      "production_fork": {
+        "commit": "d1bae4750cfac28fdf89c585155b5d8c44e60a6f",
+        "line": 255,
+        "sha256": "3b1a2d2017fdc3cb9464964233240f855837f663ff42e32da43d9e2956bdf649"
+      },
+      "official_359": {
+        "commit": "aea5846b93a1412451e885bf99002401c3b087e8",
+        "line": 255,
+        "sha256": "3b1a2d2017fdc3cb9464964233240f855837f663ff42e32da43d9e2956bdf649"
+      },
+      "official_master": {
+        "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+        "line": 255,
+        "sha256": "3b1a2d2017fdc3cb9464964233240f855837f663ff42e32da43d9e2956bdf649"
+      }
+    },
+    "byte_identical_all_three": true
+  },
+  {
+    "file": "tuta-sdk/rust/crypto-primitives/src/key.rs",
+    "function": "pub fn decrypt_data(",
+    "versions": {
+      "production_fork": {
+        "commit": "d1bae4750cfac28fdf89c585155b5d8c44e60a6f",
+        "line": 39,
+        "sha256": "4dd50b5f8f72731d3f053358cea7e6dba7e8d9584c9f99cfebac16450db588bf"
+      },
+      "official_359": {
+        "commit": "aea5846b93a1412451e885bf99002401c3b087e8",
+        "line": 39,
+        "sha256": "4dd50b5f8f72731d3f053358cea7e6dba7e8d9584c9f99cfebac16450db588bf"
+      },
+      "official_master": {
+        "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+        "line": 39,
+        "sha256": "4dd50b5f8f72731d3f053358cea7e6dba7e8d9584c9f99cfebac16450db588bf"
+      }
+    },
+    "byte_identical_all_three": true
+  },
+  {
+    "file": "tuta-sdk/rust/crypto-primitives/src/aes.rs",
+    "function": "fn has_mac(",
+    "versions": {
+      "production_fork": {
+        "commit": "d1bae4750cfac28fdf89c585155b5d8c44e60a6f",
+        "line": 541,
+        "sha256": "1344fa642392ff94f2eae46eb117fab7eb3316237bed9961ac7513acfd0e128d"
+      },
+      "official_359": {
+        "commit": "aea5846b93a1412451e885bf99002401c3b087e8",
+        "line": 542,
+        "sha256": "1344fa642392ff94f2eae46eb117fab7eb3316237bed9961ac7513acfd0e128d"
+      },
+      "official_master": {
+        "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+        "line": 542,
+        "sha256": "1344fa642392ff94f2eae46eb117fab7eb3316237bed9961ac7513acfd0e128d"
+      }
+    },
+    "byte_identical_all_three": true
+  }
+]

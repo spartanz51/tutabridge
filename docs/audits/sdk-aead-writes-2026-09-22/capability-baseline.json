@@ -1,0 +1,19 @@
+{
+  "reference": {
+    "sdk": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "bridge": "b375f1c275b8162ee8f04008144e3dd2c72a10d6",
+    "overlay": "sdk-ts-parity-2026-09-21; five patches and bridge adapter",
+    "scope": "Previous tested prototype, not production or an authenticated live account"
+  },
+  "capabilities": {
+    "optional_empty": "supported",
+    "aead_v3": "unsupported",
+    "aead_v2": "not_assessed"
+  },
+  "evidence": [
+    {
+      "file": "baseline-evidence/ts-parity-protocol.log",
+      "sha256": "a69cc83b5139bcb243927797d71eaeacaf2b6b0e80bfd9bc5e61647cbb9c3768"
+    }
+  ]
+}

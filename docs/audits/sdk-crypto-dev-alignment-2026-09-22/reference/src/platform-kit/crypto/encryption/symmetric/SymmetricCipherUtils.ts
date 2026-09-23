@@ -1,0 +1,159 @@
+import { random } from "../../random/Randomizer.js"
+import { CryptoError } from "@tutao/crypto/error"
+import { base64ToBase64Url, base64ToUint8Array, hexToUint8Array, Nullable, uint8ArrayToArrayBuffer, uint8ArrayToBase64 } from "@tutao/utils"
+import { sha256Hash } from "../../hashes/Sha256.js"
+import sjcl from "../../internal/sjcl.js"
+import { Aes128Key, Aes256Key, AesKey, AesKeyLength, BitArray, getKeyLengthInBytes } from "./AesKey.js"
+import { InitializationVectorVariant } from "./ParsedCiphertext"
+import { BrandedType, TsBrand } from "../../../utils/TsUtils"
+
+export class InitializationVector {
+	constructor(
+		public readonly bytes: Uint8Array<ArrayBuffer>,
+		public readonly variant: InitializationVectorVariant,
+	) {}
+}
+
+export const FIXED_INITIALIZATION_VECTOR = new InitializationVector(hexToUint8Array("88888888888888888888888888888888"), InitializationVectorVariant.Fixed)
+export const BLOCK_SIZE_BYTES = 16
+export const INITIALIZATION_VECTOR_LENGTH_BYTES = BLOCK_SIZE_BYTES
+export const KDF_NONCE_LENGTH_BYTES = 32
+export const SYMMETRIC_CIPHER_VERSION_PREFIX_LENGTH_BYTES = 1
+export const SYMMETRIC_AUTHENTICATION_TAG_LENGTH_BYTES = 32
+
+/**
+ * Creates the auth verifier from the password key.
+ * @param passwordKey The key.
+ * @returns The auth verifier
+ */
+export function createAuthVerifier(passwordKey: AesKey): Uint8Array<ArrayBuffer> {
+	return sha256Hash(keyToUint8Array(passwordKey))
+}
+
+export function createAuthVerifierAsBase64Url(passwordKey: AesKey): Base64Url {
+	return base64ToBase64Url(uint8ArrayToBase64(createAuthVerifier(passwordKey)))
+}
+
+/**
+ * Converts the given BitArray (SJCL) to an Uint8Array.
+ * @param bits The BitArray.
+ * @return The Uint8Array.
+ */
+export function bitArrayToUint8Array(bits: BitArray): Uint8Array<ArrayBuffer> {
+	return new Uint8Array(sjcl.codec.arrayBuffer.fromBits(bits, false))
+}
+
+/**
+ * Converts the given Uint8Array to a BitArray (SJCL).
+ * @param uint8Array The uint8Array key.
+ * @return The key.
+ */
+export function uint8ArrayToBitArray(uint8Array: Uint8Array<ArrayBuffer>): BitArray {
+	return sjcl.codec.arrayBuffer.toBits(uint8ArrayToArrayBuffer(uint8Array))
+}
+
+export function keyToBase64(key: AesKey): Base64 {
+	return uint8ArrayToBase64(keyToUint8Array(key))
+}
+
+/**
+ * Converts the given base64 coded string to a key.
+ * @param base64 The base64 coded string representation of the key.
+ * @return The key.
+ * @throws {CryptoError} If the conversion fails.
+ */
+export function base64ToKey(base64: Base64): AesKey
+/**
+ * Converts the given base64 coded string to a key.
+ * @param base64 The base64 coded string representation of the key.
+ * @param acceptedBitLength The accepted key length for the decoded key.
+ * @return The key.
+ * @throws {CryptoError} If the conversion fails.
+ */
+export function base64ToKey(base64: Base64, acceptedBitLength: typeof AesKeyLength.Aes128): Aes128Key
+/**
+ * Converts the given base64 coded string to a key.
+ * @param base64 The base64 coded string representation of the key.
+ * @param acceptedBitLength The accepted key length for the decoded key.
+ * @return The key.
+ * @throws {CryptoError} If the conversion fails.
+ */
+export function base64ToKey(base64: Base64, acceptedBitLength: typeof AesKeyLength.Aes256): Aes256Key
+export function base64ToKey(base64: Base64, acceptedBitLength?: AesKeyLength): AesKey {
+	try {
+		return uint8ArrayToKey(base64ToUint8Array(base64), acceptedBitLength)
+	} catch (e) {
+		throw new CryptoError("hex to aes key failed", e as Error)
+	}
+}
+
+export function uint8ArrayToKey(array: Uint8Array<ArrayBuffer>): AesKey
+export function uint8ArrayToKey(array: Uint8Array<ArrayBuffer>, acceptedBitLength: typeof AesKeyLength.Aes128): Aes128Key
+export function uint8ArrayToKey(array: Uint8Array<ArrayBuffer>, acceptedBitLength: typeof AesKeyLength.Aes256): Aes256Key
+export function uint8ArrayToKey(array: Uint8Array<ArrayBuffer>, acceptedBitLength?: AesKeyLength): AesKey
+export function uint8ArrayToKey(array: Uint8Array<ArrayBuffer>, acceptedBitLength?: AesKeyLength): AesKey {
+	let key = uint8ArrayToBitArray(array)
+	// AesKey is an array of 4 byte numbers. therefore converting the length to bits means 4*8
+	const keyLength: number = key.length * 4 * 8
+	if (acceptedBitLength != null && acceptedBitLength !== keyLength) {
+		throw new CryptoError(`Illegal key length: ${keyLength} (expected: ${acceptedBitLength})`)
+	}
+	switch (keyLength) {
+		case AesKeyLength.Aes128:
+			return new Aes128Key(key)
+		case AesKeyLength.Aes256:
+			return new Aes256Key(key)
+	}
+	throw new CryptoError(`Illegal key length: ${keyLength}`)
+}
+
+export function keyToUint8Array(key: AesKey): Uint8Array<ArrayBuffer> {
+	return bitArrayToUint8Array(key.bits)
+}
+
+/**
+ * Create a random 256-bit symmetric AES key.
+ *
+ * @return The key.
+ */
+export function aes256RandomKey(): Aes256Key {
+	return new Aes256Key(uint8ArrayToBitArray(random.generateRandomData(getKeyLengthInBytes(AesKeyLength.Aes256))))
+}
+
+export class KdfNonceTag extends TsBrand {
+	protected __brand: Nullable<never> = null
+}
+
+export type KdfNonce = BrandedType<Uint8Array<ArrayBuffer>, KdfNonceTag>
+
+export function generateInitializationVector(): InitializationVector {
+	return new InitializationVector(random.generateRandomData(INITIALIZATION_VECTOR_LENGTH_BYTES), InitializationVectorVariant.Random)
+}
+
+export function generateKdfNonce(): KdfNonce {
+	return random.generateRandomData(KDF_NONCE_LENGTH_BYTES) as KdfNonce
+}
+
+export function validateInitializationVectorLength(initializationVector: Uint8Array<ArrayBuffer>): InitializationVector
+export function validateInitializationVectorLength(initializationVector: Nullable<Uint8Array<ArrayBuffer>>): Nullable<InitializationVector>
+export function validateInitializationVectorLength(initializationVector: Nullable<Uint8Array<ArrayBuffer>>): Nullable<InitializationVector> {
+	if (initializationVector === null) {
+		return null
+	}
+	if (initializationVector.length !== INITIALIZATION_VECTOR_LENGTH_BYTES) {
+		throw new CryptoError(`invalid initialization vector length: ${initializationVector.length} bytes`)
+	}
+	return new InitializationVector(initializationVector, InitializationVectorVariant.Random)
+}
+
+export function validateKdfNonceLength(kdfNonce: Uint8Array<ArrayBuffer>): KdfNonce
+export function validateKdfNonceLength(kdfNonce: Nullable<Uint8Array<ArrayBuffer>>): Nullable<KdfNonce>
+export function validateKdfNonceLength(kdfNonce: Nullable<Uint8Array<ArrayBuffer>>): Nullable<KdfNonce> {
+	if (kdfNonce === null) {
+		return null
+	}
+	if (kdfNonce.length !== KDF_NONCE_LENGTH_BYTES) {
+		throw new CryptoError(`invalid KDF nonce length: ${kdfNonce.length} bytes`)
+	}
+	return kdfNonce as KdfNonce
+}

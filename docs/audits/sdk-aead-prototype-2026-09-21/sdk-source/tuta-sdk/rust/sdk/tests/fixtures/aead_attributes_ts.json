@@ -1,0 +1,50 @@
+[
+  {
+    "aad": "attributeEncSK\u001f105",
+    "ciphertext": "Ax9XnkOy/Fr0REYYdEspcH95XpiqzSbmz0wN6GBMGQwq/llvhsiMxrcwo1xvd5iplkQ4KJjBJop4alQRpxSW0kKd+G6rjdW0GgH/wNQ=",
+    "group_version": 7,
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "legacy_error": "MacError",
+    "path": "105",
+    "plaintext": "AEAD diagnostic: été ✓",
+    "type": "tutanota/97",
+    "version": 3
+  },
+  {
+    "aad": "attributeEncSK\u001f3/aggregateId/9/anotherCustomId/17",
+    "ciphertext": "A/wwsRFB4n0uhzYIjgSTARuk4MCL4g4XbbcGQnCqjsQQEnkKklZRKlhKcbJpWYMh3hDAsaZuNao/RHcRyC6DK6jiT9IZys8+DWYr9F4=",
+    "group_version": 7,
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "legacy_error": "MacError",
+    "path": "3/aggregateId/9/anotherCustomId/17",
+    "plaintext": "AEAD diagnostic: été ✓",
+    "type": "tutanota/97",
+    "version": 3
+  },
+  {
+    "aad": "attributeEncGK\u001f105",
+    "ciphertext": "AgAHOD8cIubtzCk2+NiyfiDpiEn1rzmW6KWPGvYXs4zqAzisewk0lDRwVuVSApCZuSCctUC9QmJzmsaXFbigKBXcFxAHxXjekSMew+vb4A==",
+    "group_version": 7,
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "legacy_error": "MacError",
+    "path": "105",
+    "plaintext": "AEAD diagnostic: été ✓",
+    "type": "tutanota/97",
+    "version": 2
+  },
+  {
+    "aad": "attributeEncGK\u001f3/aggregateId/9/anotherCustomId/17",
+    "ciphertext": "AgAHJ2fTExf6sFytn7JDpY4w0SAVPxBIBGsScsYOeWoBqRCiHreRcJLEbb7+T/+mGJ3dV7/xFPcoHBGe/790JEFNP7ilpvSlgZdjtF6wCw==",
+    "group_version": 7,
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "legacy_error": "MacError",
+    "path": "3/aggregateId/9/anotherCustomId/17",
+    "plaintext": "AEAD diagnostic: été ✓",
+    "type": "tutanota/97",
+    "version": 2
+  }
+]

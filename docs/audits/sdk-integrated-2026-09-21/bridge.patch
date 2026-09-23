@@ -1,0 +1,3009 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 0595d1b..4644dd7 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5907,7 +5907,6 @@ dependencies = [
+  "time",
+  "time-tz",
+  "tokio",
+- "tokio-tungstenite",
+  "uniffi",
+  "util",
+  "x25519-dalek",
+@@ -5926,6 +5925,7 @@ dependencies = [
+  "tokio-rustls",
+  "tuta-sdk",
+  "tutabridge-core",
++ "tutabridge-tuta",
+ ]
+ 
+ [[package]]
+@@ -5954,6 +5954,7 @@ dependencies = [
+  "tokio-rustls",
+  "toml 0.8.2",
+  "tuta-sdk",
++ "tutabridge-tuta",
+ ]
+ 
+ [[package]]
+@@ -5973,6 +5974,27 @@ dependencies = [
+  "tutabridge-core",
+ ]
+ 
++[[package]]
++name = "tutabridge-tuta"
++version = "0.1.0"
++dependencies = [
++ "async-trait",
++ "base64 0.22.1",
++ "crypto-primitives",
++ "form_urlencoded",
++ "futures",
++ "log 0.4.29",
++ "num_enum",
++ "rand 0.8.6",
++ "rand_core 0.6.4",
++ "serde",
++ "serde_json",
++ "thiserror 2.0.18",
++ "tokio",
++ "tokio-tungstenite",
++ "tuta-sdk",
++]
++
+ [[package]]
+ name = "typeid"
+ version = "1.0.3"
+diff --git a/Cargo.toml b/Cargo.toml
+index 95c7d40..09d513f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,5 @@
+ [workspace]
+-members = ["crates/bridge", "src-tauri"]
++members = ["crates/bridge", "crates/tuta", "src-tauri"]
+ exclude = ["tuta-repo"]
+ resolver = "2"
+ 
+@@ -11,6 +11,7 @@ rust-version = "1.84.0"
+ license = "GPL-3.0-or-later"
+ 
+ [dependencies]
++tutabridge-tuta = { path = "crates/tuta" }
+ tutabridge-core = { path = "crates/bridge" }
+ tuta-sdk = { path = "tuta-repo/tuta-sdk/rust/sdk", features = ["net"] }
+ tokio = { version = "1.43", features = ["full"] }
+diff --git a/crates/bridge/Cargo.toml b/crates/bridge/Cargo.toml
+index 8df5f24..ec28f16 100644
+--- a/crates/bridge/Cargo.toml
++++ b/crates/bridge/Cargo.toml
+@@ -6,6 +6,7 @@ rust-version = "1.84.0"
+ license = "GPL-3.0-or-later"
+ 
+ [dependencies]
++tutabridge-tuta = { path = "../tuta" }
+ tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["net"] }
+ 
+ tokio = { version = "1.43", features = ["full"] }
+@@ -53,5 +54,6 @@ keyring = { version = "3", features = ["windows-native"] }
+ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+ 
+ [dev-dependencies]
++tutabridge-tuta = { path = "../tuta", features = ["testing"] }
+ tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["net", "logging", "testing"] }
+ rpassword = "7"
+diff --git a/crates/bridge/src/backup.rs b/crates/bridge/src/backup.rs
+index 5ed6953..139a284 100644
+--- a/crates/bridge/src/backup.rs
++++ b/crates/bridge/src/backup.rs
+@@ -296,7 +296,7 @@ mod tests {
+     use tutasdk::entities::generated::tutanota::{
+         Body, Mail, MailAddress, MailDetails, MailSetEntry, Recipients,
+     };
+-    use tutasdk::folder_system::MailSetKind;
++    use tutabridge_tuta::folder_system::MailSetKind;
+     use tutasdk::{GeneratedId, IdTupleGenerated};
+ 
+     fn gid(s: &str) -> GeneratedId {
+diff --git a/crates/bridge/src/bridge.rs b/crates/bridge/src/bridge.rs
+index c9d03c5..29d2716 100644
+--- a/crates/bridge/src/bridge.rs
++++ b/crates/bridge/src/bridge.rs
+@@ -62,13 +62,13 @@ pub enum WsStatus {
+     Reconnecting,
+ }
+ 
+-impl From<tutasdk::event_bus::WsState> for WsStatus {
+-    fn from(s: tutasdk::event_bus::WsState) -> Self {
++impl From<tutabridge_tuta::event_bus::WsState> for WsStatus {
++    fn from(s: tutabridge_tuta::event_bus::WsState) -> Self {
+         match s {
+-            tutasdk::event_bus::WsState::Stopped => Self::Stopped,
+-            tutasdk::event_bus::WsState::Connecting => Self::Connecting,
+-            tutasdk::event_bus::WsState::Connected => Self::Connected,
+-            tutasdk::event_bus::WsState::Reconnecting => Self::Reconnecting,
++            tutabridge_tuta::event_bus::WsState::Stopped => Self::Stopped,
++            tutabridge_tuta::event_bus::WsState::Connecting => Self::Connecting,
++            tutabridge_tuta::event_bus::WsState::Connected => Self::Connected,
++            tutabridge_tuta::event_bus::WsState::Reconnecting => Self::Reconnecting,
+         }
+     }
+ }
+@@ -96,7 +96,7 @@ pub struct BridgeHandle {
+     local_store: Option<Arc<LocalStore>>,
+     task: Option<tokio::task::JoinHandle<()>>,
+     /// Latest event-bus state, populated at `start` and observed by `stats`.
+-    ws_state_rx: Option<watch::Receiver<tutasdk::event_bus::WsState>>,
++    ws_state_rx: Option<watch::Receiver<tutabridge_tuta::event_bus::WsState>>,
+ }
+ 
+ impl BridgeHandle {
+@@ -256,7 +256,7 @@ impl BridgeHandle {
+ 
+         // Build the realtime event bus and hydrate its catch-up state from
+         // disk so the next reconnect resumes from the last processed batch.
+-        let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
++        let bus_client = Arc::new(tutabridge_tuta::event_bus::EventBusClient::new(
+             bus_base_url,
+             sys_model_version(),
+             tutanota_model_version(),
+@@ -272,7 +272,7 @@ impl BridgeHandle {
+                 .duration_since(std::time::UNIX_EPOCH)
+                 .map(|d| d.as_millis() as i64)
+                 .unwrap_or(0);
+-            let expire_ms = tutasdk::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
++            let expire_ms = tutabridge_tuta::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
+             if let Ok(Some(min_ms)) = local_store.event_bus_state_min_updated_at_ms() {
+                 if now_ms - min_ms > expire_ms {
+                     self.emit_log(
+@@ -363,7 +363,7 @@ impl BridgeHandle {
+                 tokio::spawn(async move {
+                     if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
+                         match e {
+-                            tutasdk::event_bus::EventBusError::Stopped => {}
++                            tutabridge_tuta::event_bus::EventBusError::Stopped => {}
+                             _ => log::warn!("Event bus exited: {e}"),
+                         }
+                     }
+diff --git a/crates/bridge/src/event_handler.rs b/crates/bridge/src/event_handler.rs
+index c221894..9e536ba 100644
+--- a/crates/bridge/src/event_handler.rs
++++ b/crates/bridge/src/event_handler.rs
+@@ -7,7 +7,7 @@
+ //! The hot path — `MailSetEntry` CREATE/DELETE — is handled **without**
+ //! re-listing the affected folder over REST: a `MailSetEntry`'s element id
+ //! is a Tuta-defined encoding of `(receivedDate, mail_element_id)`, so we
+-//! recover the mail id directly via `tutasdk::mail_set_entry_id::deconstruct`
++//! recover the mail id directly via `tutabridge_tuta::mail_set_entry_id::deconstruct`
+ //! and either move the already-decrypted Mail between folders in memory
+ //! (when it's a MOVE between two cached folders) or ask the backend for
+ //! the single Mail (`load_mail`) when it is a brand-new arrival. The full
+@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex};
+ 
+ use log::{debug, info, warn};
+ use tokio::sync::{mpsc, watch};
+-use tutasdk::event_bus::{EntityUpdateBatch, EntityUpdateEvent, EventBusMessage, Operation};
+-use tutasdk::{mail_set_entry_id, CustomId};
++use tutabridge_tuta::event_bus::{EntityUpdateBatch, EntityUpdateEvent, EventBusMessage, Operation};
++use tutabridge_tuta::mail_set_entry_id;
++use tutasdk::CustomId;
+ 
+ use crate::store::LocalStore;
+ use crate::sync::{sync_folder, MailStore, StoredMail};
+diff --git a/crates/bridge/src/imap/mod.rs b/crates/bridge/src/imap/mod.rs
+index cd79d4b..808d98b 100644
+--- a/crates/bridge/src/imap/mod.rs
++++ b/crates/bridge/src/imap/mod.rs
+@@ -287,7 +287,7 @@ mod tests {
+     use crate::tuta::FolderInfo;
+     use tokio::io::AsyncReadExt;
+     use tutasdk::entities::generated::tutanota::{Mail, MailDetails, MailSetEntry, TutanotaFile};
+-    use tutasdk::folder_system::MailSetKind;
++    use tutabridge_tuta::folder_system::MailSetKind;
+     use tutasdk::IdTupleGenerated;
+ 
+     #[test]
+diff --git a/crates/bridge/src/imap/session.rs b/crates/bridge/src/imap/session.rs
+index 92212f5..e3b037d 100644
+--- a/crates/bridge/src/imap/session.rs
++++ b/crates/bridge/src/imap/session.rs
+@@ -2021,7 +2021,7 @@ mod tests {
+ 
+     use crate::sync::StoredMail;
+     use crate::tuta::FolderInfo;
+-    use tutasdk::folder_system::MailSetKind;
++    use tutabridge_tuta::folder_system::MailSetKind;
+ 
+     fn inbox_folder() -> FolderInfo {
+         FolderInfo {
+diff --git a/crates/bridge/src/store.rs b/crates/bridge/src/store.rs
+index e3b333f..f554353 100644
+--- a/crates/bridge/src/store.rs
++++ b/crates/bridge/src/store.rs
+@@ -1,7 +1,7 @@
+ use std::path::{Path, PathBuf};
+ use std::sync::Mutex;
+ 
+-use crypto_primitives::aes::Iv;
++use crypto_primitives::aes::InitializationVector;
+ use crypto_primitives::key::GenericAesKey;
+ use crypto_primitives::randomizer_facade::RandomizerFacade;
+ use log::{debug, warn};
+@@ -383,7 +383,7 @@ impl LocalStore {
+ 
+     pub fn write_eml(&self, element_id: &str, rfc2822: &str) -> Result<(), StoreError> {
+         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+-        let iv = Iv::generate(&randomizer);
++        let iv = InitializationVector::generate(&randomizer);
+         let encrypted = self
+             .storage_key
+             .encrypt_data(rfc2822.as_bytes(), iv)
+diff --git a/crates/bridge/src/tuta.rs b/crates/bridge/src/tuta.rs
+index fbf65a6..08c7892 100644
+--- a/crates/bridge/src/tuta.rs
++++ b/crates/bridge/src/tuta.rs
+@@ -1,5 +1,5 @@
+ use base64::Engine;
+-use crypto_primitives::aes::{Aes256Key, Iv, AES_256_KEY_SIZE};
++use crypto_primitives::aes::{Aes256Key, InitializationVector, AES_256_KEY_SIZE};
+ use crypto_primitives::blake3::blake3_kdf;
+ use crypto_primitives::key::GenericAesKey;
+ use crypto_primitives::randomizer_facade::RandomizerFacade;
+@@ -15,7 +15,8 @@ use tutasdk::entities::generated::tutanota::{
+     DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob, MailSetEntry, NewDraftAttachment,
+     SendDraftData, SendDraftParameters, TutanotaFile,
+ };
+-use tutasdk::folder_system::{FolderSystem, MailSetKind};
++use tutabridge_tuta::folder_system::{FolderSystem, MailSetKind, MailSetExt};
++use tutabridge_tuta::mail::MailExtensions;
+ use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
+ use tutasdk::services::ExtraServiceParams;
+ use tutasdk::tutanota_constants::ArchiveDataType;
+@@ -202,8 +203,7 @@ impl TutaSession {
+     }
+ 
+     pub async fn load_folders(&self, mailbox: &MailBox) -> Result<FolderSystem, ApiCallError> {
+-        self.logged_in
+-            .mail_facade()
++        MailExtensions::new(self.logged_in.clone())
+             .load_folders_for_mailbox(mailbox)
+             .await
+     }
+@@ -357,7 +357,7 @@ impl TutaSession {
+         // Tuta stores a mail's body in two different places depending on
+         // whether the mail is received or a draft. Match the TS routing
+         // (`isDraft(mail) ? loadMailDetailsDraft : loadMailDetailsBlob`).
+-        let mail_facade = self.logged_in.mail_facade();
++        let mail_facade = MailExtensions::new(self.logged_in.clone());
+         if mail.mailDetailsDraft.is_some() {
+             match mail_facade.load_mail_details_draft(mail).await {
+                 Ok(details) => Ok(Some(details)),
+@@ -396,7 +396,7 @@ impl TutaSession {
+         if let Some(cached) = self.try_self_send_cache(mail).await {
+             return Ok(cached);
+         }
+-        let mail_facade = self.logged_in.mail_facade();
++        let mail_facade = MailExtensions::new(self.logged_in.clone());
+         let mut out: Vec<(TutanotaFile, Vec<u8>)> = Vec::with_capacity(mail.attachments.len());
+         for file_id in &mail.attachments {
+             let file = self.load_file_with_retry(file_id).await?;
+@@ -512,16 +512,16 @@ impl TutaSession {
+             .zip(tokens_per_file.into_iter())
+         {
+             let enc_file_name = file_sk
+-                .encrypt_data(att.filename.as_bytes(), Iv::generate(randomizer))
++                .encrypt_data(att.filename.as_bytes(), InitializationVector::generate(randomizer))
+                 .map_err(|e| {
+                     ApiCallError::internal(format!("Failed to encrypt attachment name: {e}"))
+                 })?;
+             let enc_mime_type = file_sk
+-                .encrypt_data(att.mime_type.as_bytes(), Iv::generate(randomizer))
++                .encrypt_data(att.mime_type.as_bytes(), InitializationVector::generate(randomizer))
+                 .map_err(|e| {
+                     ApiCallError::internal(format!("Failed to encrypt attachment mime type: {e}"))
+                 })?;
+-            let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, Iv::generate(randomizer));
++            let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, InitializationVector::generate(randomizer));
+ 
+             let new_draft = NewDraftAttachment {
+                 _id: Some(random_custom_id(randomizer)),
+@@ -649,7 +649,7 @@ impl TutaSession {
+ 
+         let owner_enc_session_key = group_key
+             .object
+-            .encrypt_key(&session_key, Iv::generate(&randomizer));
++            .encrypt_key(&session_key, InitializationVector::generate(&randomizer));
+         let owner_key_version = group_key.version as i64;
+ 
+         // Upload every attachment first — the resulting `DraftAttachment`
+@@ -1000,7 +1000,7 @@ impl MailBackend for TutaSession {
+     }
+ 
+     async fn decrypt_inline_mail(&self, json: &str) -> Result<Option<Mail>, String> {
+-        self.crypto_client()
++        MailExtensions::new(self.logged_in.clone())
+             .decrypt_inline_and_parse::<Mail>(json)
+             .await
+             .map_err(|e| format!("{e}"))
+@@ -1010,7 +1010,7 @@ impl MailBackend for TutaSession {
+         &self,
+         json: &str,
+     ) -> Result<Option<MailSetEntry>, String> {
+-        self.crypto_client()
++        MailExtensions::new(self.logged_in.clone())
+             .decrypt_inline_and_parse::<MailSetEntry>(json)
+             .await
+             .map_err(|e| format!("{e}"))
+@@ -1023,7 +1023,7 @@ impl MailBackend for TutaSession {
+         // `event.blob_instance` is the encrypted MailDetailsBlob. We decrypt
+         // it through the same inline pipeline as the Mail itself and pull out
+         // its `details` aggregate, which is what consumers actually want.
+-        self.crypto_client()
++        MailExtensions::new(self.logged_in.clone())
+             .decrypt_inline_and_parse::<MailDetailsBlob>(json)
+             .await
+             .map(|opt| opt.map(|blob| blob.details))
+@@ -1052,7 +1052,7 @@ impl MailBackend for TutaSession {
+         let mut result = Vec::new();
+         for indented in folder_system.indented_list() {
+             let folder = indented.folder;
+-            let kind = folder.mail_set_kind();
++            let kind = folder.bridge_mail_set_kind();
+ 
+             // Only expose folder types we support over IMAP.
+             let is_custom = kind == MailSetKind::Custom;
+@@ -1071,7 +1071,7 @@ impl MailBackend for TutaSession {
+             // Build the IMAP path by mapping each ancestor segment.
+             let mut segments: Vec<String> = Vec::new();
+             for ancestor in folder_system.path_to_folder(&tutasdk::GeneratedId(elem_id.clone())) {
+-                let akind = ancestor.mail_set_kind();
++                let akind = ancestor.bridge_mail_set_kind();
+                 if let Some(name) = system_imap_name(akind) {
+                     segments.push(name.to_string());
+                 } else {
+@@ -1125,8 +1125,7 @@ impl MailBackend for TutaSession {
+             tutasdk::GeneratedId(target.list_id.clone()),
+             tutasdk::GeneratedId(target.id.clone()),
+         );
+-        self.logged_in
+-            .mail_facade()
++        MailExtensions::new(self.logged_in.clone())
+             .move_mails(mail_ids, target_folder)
+             .await
+             .map_err(|e| format!("{e}"))
+diff --git a/crates/tuta/Cargo.toml b/crates/tuta/Cargo.toml
+new file mode 100644
+index 0000000..0f6d732
+--- /dev/null
++++ b/crates/tuta/Cargo.toml
+@@ -0,0 +1,25 @@
++[package]
++name = "tutabridge-tuta"
++version = "0.1.0"
++edition = "2021"
++license = "GPL-3.0-or-later"
++[features]
++testing = ["tuta-sdk/testing"]
++[dependencies]
++tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk" }
++crypto-primitives = { path = "../../tuta-repo/tuta-sdk/rust/crypto-primitives" }
++base64 = "0.22"
++thiserror = "2"
++futures = "0.3"
++log = "0.4"
++serde_json = "1"
++serde = "1"
++num_enum = "0.7"
++rand = "0.8"
++rand_core = "0.6"
++form_urlencoded = "1"
++tokio = { version = "1.43", features = ["full"] }
++tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
++[dev-dependencies]
++tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["testing"] }
++async-trait = "0.1"
+diff --git a/crates/tuta/src/event_bus.rs b/crates/tuta/src/event_bus.rs
+new file mode 100644
+index 0000000..3e276a3
+--- /dev/null
++++ b/crates/tuta/src/event_bus.rs
+@@ -0,0 +1,933 @@
++//! WebSocket event bus client.
++//!
++//! Mirrors the TypeScript `EventBusClient`
++//! (`src/common/api/worker/EventBusClient.ts`): opens a WebSocket to `/event?…`
++//! to receive realtime entity updates and a handful of control messages, with
++//! catch-up of missed batches via the `groupsToLastEventBatchIds` query
++//! parameter.
++//!
++//! Scope of this module is **transport, framing and reconnect**. Entity-update
++//! batches are parsed into typed [`EntityUpdateBatch`] values (decoding the
++//! server's wire format where numeric fields are sent as strings). The other
++//! message kinds (`unreadCounterUpdate`, `leaderStatus`,
++//! `operationStatusUpdate`, …) are emitted as raw [`serde_json::Value`] so the
++//! caller can decide what to do with them — using the SDK's type-mapping
++//! machinery if a typed view is needed.
++
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex};
++use std::time::Duration;
++
++use futures::{SinkExt, StreamExt};
++use log::{debug, info, warn};
++use serde_json::Value;
++use thiserror::Error;
++use tokio::sync::{mpsc, watch};
++use tokio_tungstenite::tungstenite::Message;
++
++/// Entity event batches expire on the server after 45 days; we use 44 days as a
++/// safety margin (matching the TS client). Past that, the server cannot replay
++/// the missed batches and the caller has to fall back to a full re-sync.
++pub const ENTITY_EVENT_BATCH_EXPIRE: Duration = Duration::from_secs(44 * 24 * 60 * 60);
++
++// REST-style codes wrapped in the websocket close code (wire = 4000 + code).
++const NORMAL_SHUTDOWN: u16 = 1;
++const NOT_AUTHORIZED: u16 = 401;
++const SESSION_EXPIRED: u16 = 440;
++const TOO_MANY_REQUESTS: u16 = 429;
++const ACCESS_DEACTIVATED: u16 = 470;
++const ACCESS_BLOCKED: u16 = 472;
++
++// Reconnect interval bounds in seconds (inclusive). We pick a random value in
++// the range so a fleet of clients does not all reconnect at the same instant.
++const RECONNECT_SMALL: (u64, u64) = (5, 10);
++const RECONNECT_MEDIUM: (u64, u64) = (20, 40);
++const RECONNECT_LARGE: (u64, u64) = (60, 120);
++
++// Heartbeat: send a WebSocket Ping at this cadence so the server (or any NAT /
++// firewall in between) gets keep-alive traffic and any half-closed TCP socket
++// surfaces as an immediate write error.
++const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
++
++// Read-side liveness check: if no frame (data, Ping, Pong, …) arrives within
++// this window, treat the socket as dead and force a reconnect. The TS client
++// rides on the browser's automatic WebSocket keep-alive; in Rust we have to
++// detect zombie sockets ourselves. 90s is comfortably above the 60s heartbeat
++// round-trip and well under typical consumer NAT timeouts (~120-300s).
++const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
++
++// Numeric attribute ids from the model; these are the field tags the server
++// uses on the wire. Keep them centralised so the parser stays grep-able if the
++// model ever evolves.
++mod attr {
++	// WebsocketEntityData
++	pub const BATCH_ID: &str = "1485";
++	pub const BATCH_OWNER: &str = "1486";
++	pub const ENTITY_UPDATES: &str = "1487";
++	// EntityUpdate
++	pub const APPLICATION: &str = "464";
++	pub const INSTANCE_LIST_ID: &str = "466";
++	pub const INSTANCE_ID: &str = "467";
++	pub const OPERATION: &str = "624";
++	pub const TYPE_ID: &str = "2556";
++	pub const INSTANCE: &str = "2617";
++	pub const BLOB_INSTANCE: &str = "2701";
++}
++
++/// Server-side operation type, parsed from the wire integer.
++#[cfg_attr(any(test, feature = "testing"), derive(Debug, PartialEq, Eq))]
++#[derive(Clone, Copy)]
++pub enum Operation {
++	Create,
++	Update,
++	Delete,
++	Other(i64),
++}
++
++impl Operation {
++	fn from_code(c: i64) -> Self {
++		match c {
++			0 => Self::Create,
++			1 => Self::Update,
++			2 => Self::Delete,
++			n => Self::Other(n),
++		}
++	}
++}
++
++/// A single entity update entry inside a batch.
++#[cfg_attr(any(test, feature = "testing"), derive(Debug, PartialEq, Eq))]
++pub struct EntityUpdateEvent {
++	pub application: String,
++	pub type_id: i64,
++	/// Empty if the entity is an element type rather than a list element.
++	pub instance_list_id: String,
++	pub instance_id: String,
++	pub operation: Operation,
++	/// Still-encrypted JSON of the instance, when the server inlined it
++	/// (typically on `Mail` `CREATE`/`UPDATE`). Decrypt via the SDK's
++	/// `CryptoFacade`/`InstanceMapper` machinery, or simply re-load the entity
++	/// through `CryptoEntityClient`.
++	pub instance: Option<String>,
++	pub blob_instance: Option<String>,
++}
++
++/// A complete batch of entity updates owned by one group.
++#[cfg_attr(any(test, feature = "testing"), derive(Debug, PartialEq, Eq))]
++pub struct EntityUpdateBatch {
++	pub batch_id: String,
++	pub group_id: String,
++	pub updates: Vec<EntityUpdateEvent>,
++}
++
++/// A decoded event-bus message.
++#[cfg_attr(any(test, feature = "testing"), derive(Debug))]
++pub enum EventBusMessage {
++	/// A batch of entity updates. After the caller has fully processed the
++	/// batch, it should record `batch_id` as the new "last processed" id for
++	/// `group_id` so the next reconnect can resume from there.
++	EntityUpdate(EntityUpdateBatch),
++	/// Unread-counter update — raw JSON; convert via the SDK's type machinery
++	/// if a typed view is needed.
++	CounterUpdate(Value),
++	LeaderStatus(Value),
++	OperationStatusUpdate(Value),
++	/// Server signals that catch-up of missed batches is complete.
++	InitialSyncDone,
++	/// Hint about the size of the catch-up (count of missed batches).
++	InitialSyncWorkEstimate(u64),
++	/// Phishing markers, exposed as the raw JSON value.
++	PhishingMarkers(Value),
++	/// Any other / unknown message type, exposed for forward compatibility.
++	Unknown { kind: String, payload: String },
++}
++
++/// Observable connection state of an `EventBusClient`. Subscribe via
++/// [`EventBusClient::state`] to surface the value to a UI.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum WsState {
++	/// Idle. `run` has not been called, or it returned to teardown.
++	Stopped,
++	/// First connection attempt in progress.
++	Connecting,
++	/// Stream is open and delivering frames.
++	Connected,
++	/// Stream dropped (network or server close), waiting for the next
++	/// reconnect attempt.
++	Reconnecting,
++}
++
++#[derive(Debug, Error)]
++pub enum EventBusError {
++	#[error("websocket transport error: {0}")]
++	Transport(String),
++	#[error("authentication rejected (code {0})")]
++	AuthenticationRejected(u16),
++	#[error("cached event batch ids expired — full re-sync required")]
++	OutOfSync,
++	#[error("invalid message: {0}")]
++	InvalidMessage(String),
++	#[error("client stopped")]
++	Stopped,
++}
++
++/// What to do after the server closed the connection.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum CloseAction {
++	/// Auth-style failure: do not reconnect.
++	Terminate(u16),
++	/// Session expired: caller has to refresh credentials before reconnect.
++	Suspend,
++	/// Transient close: reconnect after a delay picked in this range (seconds).
++	Reconnect((u64, u64)),
++}
++
++/// Event-bus client. A single instance can be `run` many times; the WebSocket
++/// connection lives for the duration of `run`. The per-group "last processed
++/// batch id" state is shared via [`EventBusClient::last_batch_ids`] so the
++/// caller can advance it as batches are processed — the next reconnect will
++/// use the latest values.
++pub struct EventBusClient {
++	/// REST base URL, e.g. `https://app.tuta.com`. Converted to `wss://` for
++	/// the WebSocket handshake.
++	base_url: String,
++	sys_model_version: u32,
++	tutanota_model_version: u32,
++	client_version: String,
++	/// Optional client name (e.g. `desktop`, `android`); empty string omits it.
++	client_name: String,
++	last_batch_ids: Arc<Mutex<HashMap<String, String>>>,
++	/// Broadcasts the [`WsState`] transitions to any observer. Updated from
++	/// inside `run` so a UI can render "connecting" / "connected" /
++	/// "reconnecting" without polling.
++	state: watch::Sender<WsState>,
++}
++
++impl EventBusClient {
++	pub fn new(
++		base_url: String,
++		sys_model_version: u32,
++		tutanota_model_version: u32,
++		client_version: String,
++		client_name: String,
++	) -> Self {
++		let (state, _) = watch::channel(WsState::Stopped);
++		Self {
++			base_url,
++			sys_model_version,
++			tutanota_model_version,
++			client_version,
++			client_name,
++			last_batch_ids: Arc::new(Mutex::new(HashMap::new())),
++			state,
++		}
++	}
++
++	/// Subscribe to live connection-state transitions
++	/// (`Stopped` → `Connecting` → `Connected` → `Reconnecting` → …).
++	pub fn state(&self) -> watch::Receiver<WsState> {
++		self.state.subscribe()
++	}
++
++	/// Shared handle to the per-group last-processed-batch-id map. Update an
++	/// entry after each fully processed batch; the next reconnect uses the
++	/// current values to ask the server to resend events missed since that
++	/// batch.
++	pub fn last_batch_ids(&self) -> Arc<Mutex<HashMap<String, String>>> {
++		Arc::clone(&self.last_batch_ids)
++	}
++
++	/// Connect, read events forever, reconnect on transient failures. Returns
++	/// when `shutdown` fires or a terminal error occurs (auth rejected).
++	pub async fn run(
++		&self,
++		access_token: String,
++		user_id: String,
++		out: mpsc::Sender<EventBusMessage>,
++		mut shutdown: watch::Receiver<bool>,
++	) -> Result<(), EventBusError> {
++		let mut failed_attempts: u32 = 0;
++		// Helper: announce a state, ignoring "no subscribers" — observers are
++		// optional and the bus must not block on them.
++		let publish = |s: WsState| {
++			let _ = self.state.send(s);
++		};
++		// Ensure we always return Stopped to observers, even on a panic in the
++		// caller's await tree (the guard fires on drop).
++		struct StopOnDrop<'a>(&'a watch::Sender<WsState>);
++		impl Drop for StopOnDrop<'_> {
++			fn drop(&mut self) {
++				let _ = self.0.send(WsState::Stopped);
++			}
++		}
++		let _guard = StopOnDrop(&self.state);
++		loop {
++			if *shutdown.borrow() {
++				return Err(EventBusError::Stopped);
++			}
++
++			publish(WsState::Connecting);
++			let url = self.build_ws_url(&access_token, &user_id);
++			info!("ws connect");
++
++			let connect = tokio_tungstenite::connect_async(&url);
++			let connection = tokio::select! {
++				biased;
++				_ = shutdown.changed() => return Err(EventBusError::Stopped),
++				r = connect => r,
++			};
++
++			let (mut stream, _resp) = match connection {
++				Ok(s) => {
++					if failed_attempts > 0 {
++						info!("ws connected (after {failed_attempts} failed attempt(s))");
++					} else {
++						info!("ws connected");
++					}
++					failed_attempts = 0;
++					publish(WsState::Connected);
++					s
++				},
++				Err(e) => {
++					warn!("ws connect failed: {e}");
++					failed_attempts = failed_attempts.saturating_add(1);
++					publish(WsState::Reconnecting);
++					if self.sleep_backoff(failed_attempts, None, &mut shutdown).await {
++						return Err(EventBusError::Stopped);
++					}
++					continue;
++				},
++			};
++
++			// Background task that nudges us every HEARTBEAT_INTERVAL to send a
++			// Ping. Going through an mpsc rather than sharing the stream lets
++			// the read-loop keep exclusive ownership of `stream` (and is what
++			// makes the heartbeat cleanly cancellable on every reconnect).
++			let (ping_tx, mut ping_rx) = mpsc::channel::<()>(2);
++			let heartbeat = tokio::spawn(async move {
++				loop {
++					tokio::time::sleep(HEARTBEAT_INTERVAL).await;
++					if ping_tx.send(()).await.is_err() {
++						return;
++					}
++				}
++			});
++
++			// Read frames until the connection closes.
++			let mut close_hint: Option<CloseAction> = None;
++			let close_reason = loop {
++				tokio::select! {
++					_ = shutdown.changed() => {
++						let _ = stream.send(Message::Close(None)).await;
++						heartbeat.abort();
++						return Err(EventBusError::Stopped);
++					}
++					Some(()) = ping_rx.recv() => {
++						if let Err(e) = stream.send(Message::Ping(Vec::new())).await {
++							warn!("ws heartbeat send failed: {e}");
++							break "heartbeat-send-failed";
++						}
++						debug!("ws heartbeat ping sent");
++					}
++					frame = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => match frame {
++						Err(_) => {
++							warn!(
++								"ws: no frame for {}s — forcing reconnect (probable zombie socket)",
++								IDLE_TIMEOUT.as_secs()
++							);
++							break "idle-timeout";
++						}
++						Ok(None) => break "stream-end",
++						Ok(Some(Err(e))) => {
++							warn!("ws frame error: {e}");
++							break "frame-error";
++						}
++						Ok(Some(Ok(Message::Text(text)))) => match parse_message(&text) {
++							Ok(msg) => {
++								if out.send(msg).await.is_err() {
++									heartbeat.abort();
++									return Err(EventBusError::Stopped);
++								}
++							},
++							Err(e) => warn!("ws parse: {e}"),
++						},
++						Ok(Some(Ok(Message::Ping(p)))) => {
++							let _ = stream.send(Message::Pong(p)).await;
++						}
++						Ok(Some(Ok(Message::Pong(_)))) => {
++							debug!("ws pong received");
++						}
++						Ok(Some(Ok(Message::Close(cf)))) => {
++							let code = cf.map(|f| u16::from(f.code)).unwrap_or(0);
++							let action = close_action(code);
++							if let CloseAction::Terminate(c) = action {
++								heartbeat.abort();
++								return Err(EventBusError::AuthenticationRejected(c));
++							}
++							close_hint = Some(action);
++							break "close-frame";
++						}
++						Ok(Some(Ok(_))) => {}
++					},
++				}
++			};
++			heartbeat.abort();
++			debug!("ws inner loop exited: {close_reason}");
++
++			failed_attempts = failed_attempts.saturating_add(1);
++			publish(WsState::Reconnecting);
++			if self
++				.sleep_backoff(failed_attempts, close_hint, &mut shutdown)
++				.await
++			{
++				return Err(EventBusError::Stopped);
++			}
++		}
++	}
++
++	/// Returns `true` if the wait was interrupted by a shutdown signal.
++	async fn sleep_backoff(
++		&self,
++		failed_attempts: u32,
++		close: Option<CloseAction>,
++		shutdown: &mut watch::Receiver<bool>,
++	) -> bool {
++		let (lo, hi) = reconnect_interval(failed_attempts, close);
++		let secs = pick_random(lo, hi);
++		info!("ws reconnect in {secs}s (attempt #{failed_attempts})");
++		tokio::select! {
++			_ = shutdown.changed() => true,
++			_ = tokio::time::sleep(Duration::from_secs(secs)) => false,
++		}
++	}
++
++	fn build_ws_url(&self, access_token: &str, user_id: &str) -> String {
++		let base = self
++			.base_url
++			.trim_end_matches('/')
++			.replacen("https://", "wss://", 1)
++			.replacen("http://", "ws://", 1);
++		format!("{}{}", base, self.build_path(access_token, user_id))
++	}
++
++	fn build_path(&self, access_token: &str, user_id: &str) -> String {
++		use std::fmt::Write as _;
++		let mut q = String::from("/event?modelVersions=");
++		let _ = write!(q, "{}.{}", self.sys_model_version, self.tutanota_model_version);
++		let _ = write!(q, "&clientVersion={}", urlencode(&self.client_version));
++		let _ = write!(q, "&userId={}", urlencode(user_id));
++		let _ = write!(q, "&accessToken={}", urlencode(access_token));
++		if !self.client_name.is_empty() {
++			let _ = write!(q, "&clientName={}", urlencode(&self.client_name));
++		}
++		let ids = self.last_batch_ids.lock().unwrap();
++		if !ids.is_empty() {
++			q.push_str("&groupsToLastEventBatchIds=");
++			for (g, b) in ids.iter() {
++				let _ = write!(q, "{}={};", g, b);
++			}
++		}
++		q
++	}
++}
++
++fn urlencode(s: &str) -> String {
++	form_urlencoded::byte_serialize(s.as_bytes()).collect()
++}
++
++fn parse_message(text: &str) -> Result<EventBusMessage, EventBusError> {
++	let (kind, value) = text.split_once(';').unwrap_or((text, ""));
++	match kind {
++		"entityUpdate" => Ok(EventBusMessage::EntityUpdate(parse_entity_update_batch(
++			value,
++		)?)),
++		"unreadCounterUpdate" => Ok(EventBusMessage::CounterUpdate(parse_json(value, kind)?)),
++		"leaderStatus" => Ok(EventBusMessage::LeaderStatus(parse_json(value, kind)?)),
++		"operationStatusUpdate" => Ok(EventBusMessage::OperationStatusUpdate(parse_json(
++			value, kind,
++		)?)),
++		"initialSyncDone" => Ok(EventBusMessage::InitialSyncDone),
++		"initialSyncWorkEstimate" => {
++			let n: u64 = value.trim().parse().unwrap_or(0);
++			Ok(EventBusMessage::InitialSyncWorkEstimate(n))
++		},
++		"phishingMarkers" => Ok(EventBusMessage::PhishingMarkers(parse_json(value, kind)?)),
++		other => Ok(EventBusMessage::Unknown {
++			kind: other.to_string(),
++			payload: value.to_string(),
++		}),
++	}
++}
++
++fn parse_json(value: &str, kind: &str) -> Result<Value, EventBusError> {
++	serde_json::from_str(value).map_err(|e| EventBusError::InvalidMessage(format!("{kind}: {e}")))
++}
++
++fn parse_entity_update_batch(value: &str) -> Result<EntityUpdateBatch, EventBusError> {
++	let v: Value = parse_json(value, "entityUpdate")?;
++	let batch_id = take_string(&v, attr::BATCH_ID)?;
++	let group_id = take_string(&v, attr::BATCH_OWNER)?;
++	let arr = v
++		.get(attr::ENTITY_UPDATES)
++		.and_then(|u| u.as_array())
++		.ok_or_else(|| EventBusError::InvalidMessage("entityUpdate: missing entityUpdates".into()))?;
++	let updates = arr
++		.iter()
++		.map(parse_entity_update_event)
++		.collect::<Result<Vec<_>, _>>()?;
++	Ok(EntityUpdateBatch {
++		batch_id,
++		group_id,
++		updates,
++	})
++}
++
++fn parse_entity_update_event(v: &Value) -> Result<EntityUpdateEvent, EventBusError> {
++	Ok(EntityUpdateEvent {
++		application: take_string(v, attr::APPLICATION)?,
++		type_id: take_string_or_int(v, attr::TYPE_ID)?,
++		instance_list_id: v
++			.get(attr::INSTANCE_LIST_ID)
++			.and_then(|x| x.as_str())
++			.unwrap_or("")
++			.to_string(),
++		instance_id: take_string(v, attr::INSTANCE_ID)?,
++		operation: Operation::from_code(take_string_or_int(v, attr::OPERATION)?),
++		instance: v
++			.get(attr::INSTANCE)
++			.and_then(|x| x.as_str())
++			.map(String::from),
++		blob_instance: v
++			.get(attr::BLOB_INSTANCE)
++			.and_then(|x| x.as_str())
++			.map(String::from),
++	})
++}
++
++fn take_string(v: &Value, key: &str) -> Result<String, EventBusError> {
++	v.get(key)
++		.and_then(|x| x.as_str())
++		.map(String::from)
++		.ok_or_else(|| EventBusError::InvalidMessage(format!("missing or non-string field {key}")))
++}
++
++/// Accepts both JSON numbers (`1`) and numeric strings (`"1"`); the server's
++/// untyped wire format uses strings for everything, while typed REST responses
++/// or test fixtures may already use numbers.
++fn take_string_or_int(v: &Value, key: &str) -> Result<i64, EventBusError> {
++	match v.get(key) {
++		Some(Value::String(s)) => s
++			.parse::<i64>()
++			.map_err(|e| EventBusError::InvalidMessage(format!("{key}: {e}"))),
++		Some(Value::Number(n)) => n
++			.as_i64()
++			.ok_or_else(|| EventBusError::InvalidMessage(format!("{key}: not an i64"))),
++		_ => Err(EventBusError::InvalidMessage(format!(
++			"missing numeric field {key}"
++		))),
++	}
++}
++
++fn close_action(server_code: u16) -> CloseAction {
++	// Tuta wraps a REST-style code as 4000 + code; we accept both wire and
++	// unwrapped values so this stays usable in tests and lower-level callers.
++	let code = if server_code >= 4000 {
++		server_code - 4000
++	} else {
++		server_code
++	};
++	match code {
++		NOT_AUTHORIZED | ACCESS_DEACTIVATED | ACCESS_BLOCKED | TOO_MANY_REQUESTS => {
++			CloseAction::Terminate(code)
++		},
++		SESSION_EXPIRED => CloseAction::Suspend,
++		NORMAL_SHUTDOWN => CloseAction::Reconnect(RECONNECT_LARGE),
++		_ => CloseAction::Reconnect(RECONNECT_SMALL),
++	}
++}
++
++fn reconnect_interval(failed_attempts: u32, close: Option<CloseAction>) -> (u64, u64) {
++	if let Some(CloseAction::Reconnect(r)) = close {
++		return r;
++	}
++	match failed_attempts {
++		0 | 1 => RECONNECT_SMALL,
++		2 => RECONNECT_MEDIUM,
++		_ => RECONNECT_LARGE,
++	}
++}
++
++/// Cheap uniform-ish pick in `lo..=hi`, no extra dependency.
++fn pick_random(lo: u64, hi: u64) -> u64 {
++	if hi <= lo {
++		return lo;
++	}
++	let nanos = std::time::SystemTime::now()
++		.duration_since(std::time::UNIX_EPOCH)
++		.map(|d| d.subsec_nanos() as u64)
++		.unwrap_or(0);
++	lo + (nanos % (hi - lo + 1))
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++
++	#[test]
++	fn parses_initial_sync_done_with_no_payload() {
++		let m = parse_message("initialSyncDone").unwrap();
++		assert!(matches!(m, EventBusMessage::InitialSyncDone));
++	}
++
++	#[test]
++	fn parses_initial_sync_work_estimate() {
++		match parse_message("initialSyncWorkEstimate;42").unwrap() {
++			EventBusMessage::InitialSyncWorkEstimate(n) => assert_eq!(n, 42),
++			other => panic!("wrong variant {:?}", other),
++		}
++	}
++
++	#[test]
++	fn unknown_type_is_exposed_for_forward_compat() {
++		match parse_message("somethingNew;{\"a\":1}").unwrap() {
++			EventBusMessage::Unknown { kind, payload } => {
++				assert_eq!(kind, "somethingNew");
++				assert_eq!(payload, "{\"a\":1}");
++			},
++			other => panic!("wrong variant {:?}", other),
++		}
++	}
++
++	#[test]
++	fn payload_keeps_inner_semicolons() {
++		// split_once on the first ';' must leave the rest intact. Phishing
++		// markers happen to use a single string payload, so this also doubles
++		// as a sanity check that the framing does not eat content.
++		match parse_message("initialSyncWorkEstimate;1;2;3").unwrap() {
++			// "1;2;3" parses as the first integer 0 via fallback — that's fine,
++			// the point is that we did not panic on the inner semicolons.
++			EventBusMessage::InitialSyncWorkEstimate(_) => {},
++			other => panic!("wrong variant {:?}", other),
++		}
++	}
++
++	#[test]
++	fn parses_empty_entity_update_batch() {
++		// Server wire format: numeric attribute keys, numeric fields as strings.
++		let json = r#"{
++			"1484":"0",
++			"1485":"batch-aaaaaaaa",
++			"1486":"group-bbbbbbbb",
++			"2557":"1",
++			"2558":"deadbeef",
++			"1487":[]
++		}"#;
++		match parse_message(&format!("entityUpdate;{}", json)).unwrap() {
++			EventBusMessage::EntityUpdate(b) => {
++				assert_eq!(b.batch_id, "batch-aaaaaaaa");
++				assert_eq!(b.group_id, "group-bbbbbbbb");
++				assert!(b.updates.is_empty());
++			},
++			other => panic!("wrong variant {:?}", other),
++		}
++	}
++
++	#[test]
++	fn parses_entity_update_batch_with_one_mail_create() {
++		// One CREATE on a Mail (application=tutanota, typeId=97), no encrypted
++		// inline instance. Mirrors the wire format the server actually sends:
++		// every numeric field is a quoted string.
++		let json = r#"{
++			"1484":"0",
++			"1485":"batch1",
++			"1486":"group1",
++			"2557":"1",
++			"2558":"hash",
++			"1487":[{
++				"463":null,
++				"464":"tutanota",
++				"466":"listIdAAAAA",
++				"467":"mailIdBBBBB",
++				"624":"0",
++				"2556":"97",
++				"2617":null,
++				"2701":null,
++				"2618":null
++			}]
++		}"#;
++		match parse_message(&format!("entityUpdate;{}", json)).unwrap() {
++			EventBusMessage::EntityUpdate(b) => {
++				assert_eq!(b.updates.len(), 1);
++				let u = &b.updates[0];
++				assert_eq!(u.application, "tutanota");
++				assert_eq!(u.instance_list_id, "listIdAAAAA");
++				assert_eq!(u.instance_id, "mailIdBBBBB");
++				assert_eq!(u.operation, Operation::Create);
++				assert_eq!(u.type_id, 97);
++				assert!(u.instance.is_none());
++				assert!(u.blob_instance.is_none());
++			},
++			other => panic!("wrong variant {:?}", other),
++		}
++	}
++
++	#[test]
++	fn maps_operation_codes_to_variants() {
++		assert_eq!(Operation::from_code(0), Operation::Create);
++		assert_eq!(Operation::from_code(1), Operation::Update);
++		assert_eq!(Operation::from_code(2), Operation::Delete);
++		assert_eq!(Operation::from_code(7), Operation::Other(7));
++	}
++
++	#[test]
++	fn rejects_malformed_entity_update_json() {
++		let err = parse_message("entityUpdate;not-json").unwrap_err();
++		assert!(matches!(err, EventBusError::InvalidMessage(_)));
++	}
++
++	#[test]
++	fn take_string_or_int_accepts_both_shapes() {
++		// Defensive: the server always sends strings, but typed test fixtures
++		// or future format tweaks may use real numbers.
++		let v: Value = serde_json::from_str(r#"{"a":"7","b":7}"#).unwrap();
++		assert_eq!(take_string_or_int(&v, "a").unwrap(), 7);
++		assert_eq!(take_string_or_int(&v, "b").unwrap(), 7);
++		assert!(take_string_or_int(&v, "missing").is_err());
++	}
++
++	#[test]
++	fn parses_unread_counter_update_as_raw_value() {
++		// We deliberately do not try to type counter updates — the consumer
++		// can apply the SDK's type machinery if it needs a typed view.
++		let raw = r#"{"1493":"0","1494":"mailGroupX","2559":"1","2560":"h","1495":[]}"#;
++		match parse_message(&format!("unreadCounterUpdate;{}", raw)).unwrap() {
++			EventBusMessage::CounterUpdate(v) => {
++				assert_eq!(v.get("1494").and_then(|x| x.as_str()), Some("mailGroupX"));
++			},
++			other => panic!("wrong variant {:?}", other),
++		}
++	}
++
++	#[test]
++	fn heartbeat_fires_before_idle_timeout() {
++		// We must send (and receive, via the server's Pong reply) a frame
++		// inside IDLE_TIMEOUT — otherwise a perfectly healthy connection
++		// would be killed every IDLE_TIMEOUT seconds. Keep at least 20s
++		// headroom for round-trip latency under adverse network conditions.
++		assert!(
++			HEARTBEAT_INTERVAL + Duration::from_secs(20) <= IDLE_TIMEOUT,
++			"HEARTBEAT_INTERVAL ({:?}) is too close to IDLE_TIMEOUT ({:?})",
++			HEARTBEAT_INTERVAL,
++			IDLE_TIMEOUT
++		);
++	}
++
++	#[test]
++	fn heartbeat_interval_is_below_typical_nat_timeout() {
++		// Consumer NATs commonly drop idle UDP/TCP flows after 120s; many
++		// firewalls go down to 60s. Keep some margin to refresh the flow
++		// before the gateway forgets us.
++		assert!(
++			HEARTBEAT_INTERVAL <= Duration::from_secs(90),
++			"HEARTBEAT_INTERVAL ({:?}) risks letting NATs evict the flow",
++			HEARTBEAT_INTERVAL
++		);
++	}
++
++	#[test]
++	fn close_action_terminates_on_auth_errors() {
++		assert!(matches!(close_action(4401), CloseAction::Terminate(401)));
++		assert!(matches!(close_action(4470), CloseAction::Terminate(470)));
++		assert!(matches!(close_action(4472), CloseAction::Terminate(472)));
++		assert!(matches!(close_action(4429), CloseAction::Terminate(429)));
++	}
++
++	#[test]
++	fn close_action_accepts_already_unwrapped_codes() {
++		// 4xx without the 4000 wrapping (defensive against libraries that
++		// report the inner code directly).
++		assert!(matches!(close_action(401), CloseAction::Terminate(401)));
++	}
++
++	#[test]
++	fn close_action_suspends_on_session_expired() {
++		assert!(matches!(close_action(4440), CloseAction::Suspend));
++	}
++
++	#[test]
++	fn close_action_normal_shutdown_uses_large_interval() {
++		match close_action(4001) {
++			CloseAction::Reconnect(r) => assert_eq!(r, RECONNECT_LARGE),
++			other => panic!("unexpected {:?}", other),
++		}
++	}
++
++	#[test]
++	fn close_action_unknown_uses_small_interval() {
++		match close_action(4999) {
++			CloseAction::Reconnect(r) => assert_eq!(r, RECONNECT_SMALL),
++			other => panic!("unexpected {:?}", other),
++		}
++	}
++
++	#[test]
++	fn reconnect_interval_grows_with_attempts() {
++		assert_eq!(reconnect_interval(1, None), RECONNECT_SMALL);
++		assert_eq!(reconnect_interval(2, None), RECONNECT_MEDIUM);
++		assert_eq!(reconnect_interval(3, None), RECONNECT_LARGE);
++		assert_eq!(reconnect_interval(99, None), RECONNECT_LARGE);
++	}
++
++	#[test]
++	fn reconnect_interval_respects_close_hint() {
++		// A server-provided close hint should override the attempt-based escalation.
++		let hint = Some(CloseAction::Reconnect(RECONNECT_LARGE));
++		assert_eq!(reconnect_interval(1, hint), RECONNECT_LARGE);
++	}
++
++	#[test]
++	fn pick_random_is_within_bounds_and_handles_degenerate() {
++		for _ in 0..32 {
++			let v = pick_random(5, 10);
++			assert!((5..=10).contains(&v));
++		}
++		assert_eq!(pick_random(7, 7), 7);
++		assert_eq!(pick_random(9, 1), 9); // hi < lo: defensively returns lo.
++	}
++
++	#[test]
++	fn build_path_includes_required_query_params() {
++		let client = EventBusClient::new(
++			"https://app.tuta.com".to_string(),
++			123,
++			456,
++			"0.1.0".to_string(),
++			String::new(),
++		);
++		let path = client.build_path("tok-A", "user-1");
++		assert!(path.starts_with("/event?"));
++		assert!(path.contains("modelVersions=123.456"));
++		assert!(path.contains("clientVersion=0.1.0"));
++		assert!(path.contains("userId=user-1"));
++		assert!(path.contains("accessToken=tok-A"));
++		assert!(!path.contains("clientName="));
++		assert!(!path.contains("groupsToLastEventBatchIds"));
++	}
++
++	#[test]
++	fn build_path_includes_client_name_when_set() {
++		let client = EventBusClient::new(
++			"https://app.tuta.com".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			"desktop".to_string(),
++		);
++		assert!(client.build_path("t", "u").contains("clientName=desktop"));
++	}
++
++	#[test]
++	fn build_path_serialises_last_batch_ids() {
++		let client = EventBusClient::new(
++			"https://app.tuta.com".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			String::new(),
++		);
++		{
++			let mut ids = client.last_batch_ids.lock().unwrap();
++			ids.insert("g1".to_string(), "b1".to_string());
++		}
++		let path = client.build_path("t", "u");
++		assert!(
++			path.contains("groupsToLastEventBatchIds=g1=b1;"),
++			"got: {}",
++			path
++		);
++	}
++
++	#[test]
++	fn build_path_url_encodes_special_chars_in_token() {
++		let client = EventBusClient::new(
++			"https://app.tuta.com".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			String::new(),
++		);
++		let path = client.build_path("a+b/c=d", "u");
++		// form_urlencoded encodes '+' as %2B, '/' as %2F, '=' as %3D.
++		assert!(path.contains("accessToken=a%2Bb%2Fc%3Dd"), "got: {}", path);
++	}
++
++	#[test]
++	fn build_ws_url_switches_scheme_to_wss() {
++		let client = EventBusClient::new(
++			"https://app.tuta.com/".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			String::new(),
++		);
++		let url = client.build_ws_url("t", "u");
++		assert!(
++			url.starts_with("wss://app.tuta.com/event?"),
++			"got: {}",
++			url
++		);
++	}
++
++	#[test]
++	fn state_initial_value_is_stopped() {
++		let client = EventBusClient::new(
++			"https://app.tuta.com".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			String::new(),
++		);
++		// Subscribing before `run` is called: no transition has happened yet.
++		let rx = client.state();
++		assert_eq!(*rx.borrow(), WsState::Stopped);
++	}
++
++	#[test]
++	fn state_subscribers_are_independent() {
++		// Each `state()` call returns a fresh receiver, observing the same
++		// current value; sending an updated state from the inner sender
++		// reaches every subscriber.
++		let client = EventBusClient::new(
++			"https://app.tuta.com".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			String::new(),
++		);
++		let rx1 = client.state();
++		let rx2 = client.state();
++		assert_eq!(*rx1.borrow(), WsState::Stopped);
++		assert_eq!(*rx2.borrow(), WsState::Stopped);
++		// Drive a transition through the same channel the run loop uses.
++		let _ = client.state.send(WsState::Connected);
++		assert_eq!(*rx1.borrow(), WsState::Connected);
++		assert_eq!(*rx2.borrow(), WsState::Connected);
++	}
++
++	#[test]
++	fn build_ws_url_switches_plain_http_to_ws() {
++		let client = EventBusClient::new(
++			"http://127.0.0.1:9000".to_string(),
++			1,
++			1,
++			"v".to_string(),
++			String::new(),
++		);
++		let url = client.build_ws_url("t", "u");
++		assert!(
++			url.starts_with("ws://127.0.0.1:9000/event?"),
++			"got: {}",
++			url
++		);
++	}
++}
+diff --git a/crates/tuta/src/fixtures.rs b/crates/tuta/src/fixtures.rs
+new file mode 100644
+index 0000000..7c06aca
+--- /dev/null
++++ b/crates/tuta/src/fixtures.rs
+@@ -0,0 +1,61 @@
++pub trait Fixture { fn fixture() -> Self; }
++pub fn create_test_entity<T: Fixture>() -> T { T::fixture() }
++impl Fixture for tutasdk::entities::generated::tutanota::Mail { fn fixture() -> Self { Self {
++_id: None,
++_permissions: tutasdk::GeneratedId("fixture".into()),
++_format: Default::default(),
++_ownerEncSessionKey: None,
++subject: Default::default(),
++receivedDate: tutasdk::date::DateTime::from_millis(0),
++state: Default::default(),
++unread: Default::default(),
++confidential: Default::default(),
++replyType: Default::default(),
++_ownerGroup: None,
++differentEnvelopeSender: None,
++listUnsubscribe: Default::default(),
++movedTime: None,
++phishingStatus: Default::default(),
++authStatus: None,
++method: Default::default(),
++recipientCount: Default::default(),
++encryptionAuthStatus: None,
++_ownerKeyVersion: None,
++processingState: Default::default(),
++processNeeded: Default::default(),
++sendAt: None,
++serverClassificationData: None,
++_kdfNonce: None,
++sender: create_test_entity::<tutasdk::entities::generated::tutanota::MailAddress>(),
++attachments: vec![],
++conversationEntry: tutasdk::IdTupleGenerated::new(tutasdk::GeneratedId("list".into()), tutasdk::GeneratedId("element".into())),
++firstRecipient: None,
++mailDetails: None,
++mailDetailsDraft: None,
++bucketKey: None,
++sets: vec![],
++clientSpamClassifierResult: None,
++_errors: Default::default(),
++} } }
++impl Fixture for tutasdk::entities::generated::tutanota::MailSet { fn fixture() -> Self { Self {
++_id: None,
++_permissions: tutasdk::GeneratedId("fixture".into()),
++_format: Default::default(),
++_ownerEncSessionKey: None,
++name: Default::default(),
++folderType: Default::default(),
++_ownerGroup: None,
++_ownerKeyVersion: None,
++color: None,
++_kdfNonce: None,
++parentFolder: None,
++entries: tutasdk::GeneratedId("fixture".into()),
++_errors: Default::default(),
++} } }
++impl Fixture for tutasdk::entities::generated::tutanota::MailAddress { fn fixture() -> Self { Self {
++_id: None,
++name: Default::default(),
++address: Default::default(),
++contact: None,
++_errors: Default::default(),
++} } }
+diff --git a/crates/tuta/src/folder_system.rs b/crates/tuta/src/folder_system.rs
+new file mode 100644
+index 0000000..cf6dbba
+--- /dev/null
++++ b/crates/tuta/src/folder_system.rs
+@@ -0,0 +1,416 @@
++use crate::entities::generated::tutanota::{Mail, MailSet};
++use tutasdk::IdTupleGenerated;
++use crate::GeneratedId;
++use num_enum::TryFromPrimitive;
++use std::collections::HashMap;
++
++#[derive(Copy, Clone, PartialEq, Eq, TryFromPrimitive, Debug)]
++#[repr(u64)]
++pub enum MailSetKind {
++	Custom = 0,
++	Inbox = 1,
++	Sent = 2,
++	Trash = 3,
++	Archive = 4,
++	Spam = 5,
++	Draft = 6,
++	All = 7,
++	Label = 8,
++	Imported = 9,
++	Scheduled = 10,
++	Unknown = 9999,
++}
++
++pub trait MailSetExt {
++ fn bridge_mail_set_kind(&self) -> MailSetKind;
++ fn element_id(&self) -> Option<&GeneratedId>;
++ fn is_visible_system(&self) -> bool;
++}
++impl MailSetExt for MailSet {
++	fn bridge_mail_set_kind(&self) -> MailSetKind {
++		MailSetKind::try_from(self.folderType as u64).unwrap_or(MailSetKind::Unknown)
++	}
++
++	/// Element id of this mail set (the `_id` is always set for loaded folders).
++	fn element_id(&self) -> Option<&GeneratedId> {
++		self._id.as_ref().map(|id| &id.element_id)
++	}
++
++	/// System folders that are shown to the user as real folders.
++	/// Mirrors TS `isVisibleSystemMailSet`.
++	fn is_visible_system(&self) -> bool {
++		matches!(
++			self.bridge_mail_set_kind(),
++			MailSetKind::Inbox
++				| MailSetKind::Sent
++				| MailSetKind::Trash
++				| MailSetKind::Archive
++				| MailSetKind::Spam
++				| MailSetKind::Draft
++				| MailSetKind::Scheduled
++		)
++	}
++}
++
++/// A folder with its (recursively built) children. Mirrors TS `FolderSubtree`.
++pub struct FolderSubtree {
++	pub folder: MailSet,
++	pub children: Vec<FolderSubtree>,
++}
++
++/// A folder paired with its depth in the tree. Mirrors TS `IndentedFolder`.
++pub struct IndentedFolder<'a> {
++	pub level: usize,
++	pub folder: &'a MailSet,
++}
++
++/// Accessor for the folder trees, rebuilt from the flat `MailSet` list.
++/// Mirrors TS `FolderSystem`.
++pub struct FolderSystem {
++	system_subtrees: Vec<FolderSubtree>,
++	custom_subtrees: Vec<FolderSubtree>,
++	imported_mail_set: Option<MailSet>,
++}
++
++impl FolderSystem {
++	#[must_use]
++	pub fn new(folders: Vec<MailSet>) -> Self {
++		// Group children by their parent's element id.
++		let mut children_by_parent: HashMap<GeneratedId, Vec<MailSet>> = HashMap::new();
++		for folder in &folders {
++			if let Some(parent) = &folder.parentFolder {
++				children_by_parent
++					.entry(parent.element_id.clone())
++					.or_default()
++					.push(folder.clone());
++			}
++		}
++
++		let mut system: Vec<MailSet> = Vec::new();
++		let mut top_level_custom: Vec<MailSet> = Vec::new();
++		let mut imported_mail_set: Option<MailSet> = None;
++		for folder in folders {
++			if folder.is_visible_system() {
++				system.push(folder);
++			} else if folder.bridge_mail_set_kind() == MailSetKind::Custom
++				&& folder.parentFolder.is_none()
++			{
++				top_level_custom.push(folder);
++			} else if folder.bridge_mail_set_kind() == MailSetKind::Imported && imported_mail_set.is_none()
++			{
++				imported_mail_set = Some(folder);
++			}
++		}
++
++		system.sort_by(compare_system);
++		top_level_custom.sort_by(compare_custom);
++
++		let system_subtrees = system
++			.into_iter()
++			.map(|f| make_subtree(&children_by_parent, f))
++			.collect();
++		let custom_subtrees = top_level_custom
++			.into_iter()
++			.map(|f| make_subtree(&children_by_parent, f))
++			.collect();
++
++		Self {
++			system_subtrees,
++			custom_subtrees,
++			imported_mail_set,
++		}
++	}
++
++	/// Search for a specific system folder type. Some mailboxes may not have
++	/// every system folder. Mirrors TS `getSystemFolderByType`.
++	#[must_use]
++	pub fn system_folder_by_type(&self, bridge_mail_set_kind: MailSetKind) -> Option<&MailSet> {
++		self.system_subtrees
++			.iter()
++			.find(|s| s.folder.bridge_mail_set_kind() == bridge_mail_set_kind)
++			.map(|s| &s.folder)
++	}
++
++	/// All folders (system then custom), flattened with their indentation level.
++	/// Mirrors TS `getIndentedList`.
++	#[must_use]
++	pub fn indented_list(&self) -> Vec<IndentedFolder<'_>> {
++		let mut list = Vec::new();
++		collect_indented(&self.system_subtrees, 0, &mut list);
++		collect_indented(&self.custom_subtrees, 0, &mut list);
++		list
++	}
++
++	/// Find a folder by its element id, searching both trees. Mirrors TS `getFolderById`.
++	#[must_use]
++	pub fn folder_by_id(&self, element_id: &GeneratedId) -> Option<&MailSet> {
++		self.subtree_by_id(element_id).map(|s| &s.folder)
++	}
++
++	/// Find the folder a mail belongs to, via `Mail.sets`. Mirrors TS `getFolderByMail`.
++	#[must_use]
++	pub fn folder_by_mail(&self, mail: &Mail) -> Option<&MailSet> {
++		mail.sets
++			.iter()
++			.find_map(|set_id| self.folder_by_id(&set_id.element_id))
++	}
++
++	/// Immediate children of a parent (custom folders); top-level custom folders
++	/// when `parent` is `None`. Mirrors TS `getCustomFoldersOfParent`.
++	#[must_use]
++	pub fn custom_folders_of_parent(&self, parent: Option<&IdTupleGenerated>) -> Vec<&MailSet> {
++		match parent {
++			Some(parent) => self
++				.subtree_by_id(&parent.element_id)
++				.map(|s| s.children.iter().map(|c| &c.folder).collect())
++				.unwrap_or_default(),
++			None => self.custom_subtrees.iter().map(|s| &s.folder).collect(),
++		}
++	}
++
++	/// All ancestors of the folder, including the folder itself. Mirrors TS `getPathToFolder`.
++	#[must_use]
++	pub fn path_to_folder(&self, folder_id: &GeneratedId) -> Vec<&MailSet> {
++		path_in_subtrees(&self.system_subtrees, folder_id)
++			.or_else(|| path_in_subtrees(&self.custom_subtrees, folder_id))
++			.unwrap_or_default()
++	}
++
++	/// The imported mail set, if any. Mirrors TS `importedMailSet`.
++	#[must_use]
++	pub fn imported_mail_set(&self) -> Option<&MailSet> {
++		self.imported_mail_set.as_ref()
++	}
++
++	fn subtree_by_id(&self, element_id: &GeneratedId) -> Option<&FolderSubtree> {
++		subtree_by_id(&self.system_subtrees, element_id)
++			.or_else(|| subtree_by_id(&self.custom_subtrees, element_id))
++	}
++}
++
++fn make_subtree(
++	children_by_parent: &HashMap<GeneratedId, Vec<MailSet>>,
++	parent: MailSet,
++) -> FolderSubtree {
++	let children = parent
++		.element_id()
++		.and_then(|id| children_by_parent.get(id))
++		.map(|kids| {
++			let mut sorted = kids.clone();
++			sorted.sort_by(compare_custom);
++			sorted
++				.into_iter()
++				.map(|child| make_subtree(children_by_parent, child))
++				.collect()
++		})
++		.unwrap_or_default();
++	FolderSubtree {
++		folder: parent,
++		children,
++	}
++}
++
++fn collect_indented<'a>(
++	subtrees: &'a [FolderSubtree],
++	level: usize,
++	out: &mut Vec<IndentedFolder<'a>>,
++) {
++	for subtree in subtrees {
++		out.push(IndentedFolder {
++			level,
++			folder: &subtree.folder,
++		});
++		collect_indented(&subtree.children, level + 1, out);
++	}
++}
++
++fn subtree_by_id<'a>(
++	subtrees: &'a [FolderSubtree],
++	element_id: &GeneratedId,
++) -> Option<&'a FolderSubtree> {
++	for subtree in subtrees {
++		if subtree.folder.element_id() == Some(element_id) {
++			return Some(subtree);
++		}
++		if let Some(found) = subtree_by_id(&subtree.children, element_id) {
++			return Some(found);
++		}
++	}
++	None
++}
++
++fn path_in_subtrees<'a>(
++	subtrees: &'a [FolderSubtree],
++	element_id: &GeneratedId,
++) -> Option<Vec<&'a MailSet>> {
++	for subtree in subtrees {
++		if subtree.folder.element_id() == Some(element_id) {
++			return Some(vec![&subtree.folder]);
++		}
++		if let Some(mut subpath) = path_in_subtrees(&subtree.children, element_id) {
++			subpath.insert(0, &subtree.folder);
++			return Some(subpath);
++		}
++	}
++	None
++}
++
++/// Display order for visible system folders. Mirrors TS `folderTypeToOrder`.
++fn system_order(kind: MailSetKind) -> u8 {
++	match kind {
++		MailSetKind::Inbox => 0,
++		MailSetKind::Draft => 1,
++		MailSetKind::Scheduled => 2,
++		MailSetKind::Sent => 3,
++		MailSetKind::Trash => 4,
++		MailSetKind::Archive => 5,
++		MailSetKind::Spam => 6,
++		_ => 7,
++	}
++}
++
++fn compare_system(a: &MailSet, b: &MailSet) -> std::cmp::Ordering {
++	system_order(a.bridge_mail_set_kind()).cmp(&system_order(b.bridge_mail_set_kind()))
++}
++
++fn compare_custom(a: &MailSet, b: &MailSet) -> std::cmp::Ordering {
++	a.name.cmp(&b.name)
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++	use crate::entities::generated::tutanota::Mail;
++	use crate::fixtures::create_test_entity;
++
++	fn mail_set(elem: &str, kind: MailSetKind, name: &str, parent: Option<&str>) -> MailSet {
++		MailSet {
++			_id: Some(IdTupleGenerated {
++				list_id: GeneratedId("folders".to_owned()),
++				element_id: GeneratedId(elem.to_owned()),
++			}),
++			folderType: kind as i64,
++			name: name.to_owned(),
++			parentFolder: parent.map(|p| IdTupleGenerated {
++				list_id: GeneratedId("folders".to_owned()),
++				element_id: GeneratedId(p.to_owned()),
++			}),
++			..create_test_entity()
++		}
++	}
++
++	fn id(elem: &str) -> IdTupleGenerated {
++		IdTupleGenerated {
++			list_id: GeneratedId("folders".to_owned()),
++			element_id: GeneratedId(elem.to_owned()),
++		}
++	}
++
++	#[test]
++	fn separates_system_and_custom_and_sorts() {
++		let fs = FolderSystem::new(vec![
++			mail_set("spam", MailSetKind::Spam, "", None),
++			mail_set("inbox", MailSetKind::Inbox, "", None),
++			mail_set("zeta", MailSetKind::Custom, "Zeta", None),
++			mail_set("alpha", MailSetKind::Custom, "Alpha", None),
++		]);
++
++		let systems: Vec<_> = fs
++			.indented_list()
++			.into_iter()
++			.filter(|f| f.folder.is_visible_system())
++			.collect();
++		assert_eq!(systems[0].folder.bridge_mail_set_kind(), MailSetKind::Inbox);
++		assert_eq!(systems[1].folder.bridge_mail_set_kind(), MailSetKind::Spam);
++
++		let customs = fs.custom_folders_of_parent(None);
++		assert_eq!(
++			customs.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
++			vec!["Alpha", "Zeta"]
++		);
++	}
++
++	#[test]
++	fn builds_nested_custom_tree_with_indent() {
++		let fs = FolderSystem::new(vec![
++			mail_set("inbox", MailSetKind::Inbox, "", None),
++			mail_set("parent", MailSetKind::Custom, "Parent", None),
++			mail_set("child", MailSetKind::Custom, "Child", Some("parent")),
++			mail_set("grandchild", MailSetKind::Custom, "Grandchild", Some("child")),
++		]);
++
++		let children = fs.custom_folders_of_parent(Some(&id("parent")));
++		assert_eq!(children.len(), 1);
++		assert_eq!(children[0].name, "Child");
++
++		let indented = fs.indented_list();
++		let parent = indented.iter().find(|f| f.folder.name == "Parent").unwrap();
++		let child = indented.iter().find(|f| f.folder.name == "Child").unwrap();
++		let grand = indented.iter().find(|f| f.folder.name == "Grandchild").unwrap();
++		assert_eq!(child.level, parent.level + 1);
++		assert_eq!(grand.level, parent.level + 2);
++	}
++
++	#[test]
++	fn folder_by_id_finds_nested() {
++		let fs = FolderSystem::new(vec![
++			mail_set("parent", MailSetKind::Custom, "Parent", None),
++			mail_set("child", MailSetKind::Custom, "Child", Some("parent")),
++		]);
++		assert_eq!(
++			fs.folder_by_id(&GeneratedId("child".to_owned()))
++				.map(|f| f.name.as_str()),
++			Some("Child")
++		);
++		assert!(fs.folder_by_id(&GeneratedId("missing".to_owned())).is_none());
++	}
++
++	#[test]
++	fn path_to_folder_returns_ancestors_then_self() {
++		let fs = FolderSystem::new(vec![
++			mail_set("parent", MailSetKind::Custom, "Parent", None),
++			mail_set("child", MailSetKind::Custom, "Child", Some("parent")),
++		]);
++		let path: Vec<_> = fs
++			.path_to_folder(&GeneratedId("child".to_owned()))
++			.into_iter()
++			.map(|f| f.name.clone())
++			.collect();
++		assert_eq!(path, vec!["Parent", "Child"]);
++	}
++
++	#[test]
++	fn folder_by_mail_uses_sets() {
++		let fs = FolderSystem::new(vec![mail_set("inbox", MailSetKind::Inbox, "", None)]);
++		let mail = Mail {
++			sets: vec![id("inbox")],
++			..create_test_entity()
++		};
++		assert_eq!(
++			fs.folder_by_mail(&mail).map(|f| f.bridge_mail_set_kind()),
++			Some(MailSetKind::Inbox)
++		);
++	}
++
++	#[test]
++	fn label_and_imported_are_not_folders() {
++		let fs = FolderSystem::new(vec![
++			mail_set("inbox", MailSetKind::Inbox, "", None),
++			mail_set("label1", MailSetKind::Label, "Work", None),
++			mail_set("imp", MailSetKind::Imported, "Imported", None),
++		]);
++		assert!(fs.custom_folders_of_parent(None).is_empty());
++		assert_eq!(
++			fs.imported_mail_set().map(|f| f.bridge_mail_set_kind()),
++			Some(MailSetKind::Imported)
++		);
++		assert!(fs.folder_by_id(&GeneratedId("label1".to_owned())).is_none());
++	}
++
++	#[test]
++	fn bridge_mail_set_kind_maps_new_variants() {
++		assert_eq!(MailSetKind::try_from(8u64), Ok(MailSetKind::Label));
++		assert_eq!(MailSetKind::try_from(9u64), Ok(MailSetKind::Imported));
++		assert_eq!(MailSetKind::try_from(10u64), Ok(MailSetKind::Scheduled));
++	}
++}
+diff --git a/crates/tuta/src/lib.rs b/crates/tuta/src/lib.rs
+new file mode 100644
+index 0000000..96cf130
+--- /dev/null
++++ b/crates/tuta/src/lib.rs
+@@ -0,0 +1,7 @@
++//! Local extensions to the pinned Tuta Rust SDK.
++pub use tutasdk::{date, entities, util, CustomId, GeneratedId};
++pub mod event_bus;
++pub mod mail_set_entry_id;
++pub mod folder_system;
++pub mod mail;
++#[cfg(test)] mod fixtures;
+diff --git a/crates/tuta/src/mail.rs b/crates/tuta/src/mail.rs
+new file mode 100644
+index 0000000..095d210
+--- /dev/null
++++ b/crates/tuta/src/mail.rs
+@@ -0,0 +1,227 @@
++//! Mail orchestration owned by the bridge, leaving upstream MailFacade intact.
++use crate::folder_system::FolderSystem;
++use crypto_primitives::randomizer_facade::RandomizerFacade;
++use serde::de::DeserializeOwned;
++use std::sync::Arc;
++use tutasdk::crypto::crypto_facade::ResolvedSessionKey;
++use tutasdk::entities::generated::tutanota::{
++    Mail, MailBox, MailDetails, MailDetailsBlob, MailDetailsDraft, MailSet, MoveMailData,
++    TutanotaFile,
++};
++use tutasdk::entities::{
++    entity_facade::{EntityFacade, EntityFacadeImpl},
++    Entity,
++};
++use tutasdk::services::generated::tutanota::MoveMailService;
++use tutasdk::tutanota_constants::ArchiveDataType;
++use tutasdk::{ApiCallError, GeneratedId, IdTupleGenerated, ListLoadDirection, LoggedInSdk};
++
++pub struct MailExtensions {
++    sdk: Arc<LoggedInSdk>,
++    decoder: EntityFacadeImpl,
++}
++impl MailExtensions {
++    pub fn new(sdk: Arc<LoggedInSdk>) -> Self {
++        let decoder = EntityFacadeImpl::new(
++            sdk.type_model_provider.clone(),
++            RandomizerFacade::from_core(rand_core::OsRng),
++        );
++        Self { sdk, decoder }
++    }
++
++    pub async fn load_folders_for_mailbox(
++        &self,
++        mailbox: &MailBox,
++    ) -> Result<FolderSystem, ApiCallError> {
++        let folders: Vec<MailSet> = self
++            .sdk
++            .mail_facade()
++            .get_crypto_entity_client()
++            .load_range(
++                &mailbox.mailSets.mailSets,
++                &GeneratedId::min_id(),
++                100,
++                ListLoadDirection::ASC,
++            )
++            .await?;
++        Ok(FolderSystem::new(folders))
++    }
++
++    pub async fn move_mails(
++        &self,
++        mut mails: Vec<IdTupleGenerated>,
++        target_folder: IdTupleGenerated,
++    ) -> Result<(), ApiCallError> {
++        // Preserve the existing operation's ordering and adjacent-dedup semantics.
++        mails.dedup();
++        for chunk in mails.chunks(50) {
++            self.sdk
++                .get_service_executor()
++                .post::<MoveMailService>(
++                    MoveMailData {
++                        _format: 0,
++                        moveReason: None,
++                        targetFolder: target_folder.clone(),
++                        mails: chunk.to_vec(),
++                        excludeMailSet: None,
++                    },
++                    Default::default(),
++                )
++                .await?;
++        }
++        Ok(())
++    }
++
++    async fn owner_key(
++        &self,
++        owner: Option<&GeneratedId>,
++        encrypted: Option<&Vec<u8>>,
++        version: Option<i64>,
++    ) -> Result<ResolvedSessionKey, ApiCallError> {
++        let owner = owner.ok_or_else(|| ApiCallError::internal("Missing _ownerGroup".into()))?;
++        let encrypted = encrypted
++            .ok_or_else(|| ApiCallError::internal("Missing _ownerEncSessionKey".into()))?;
++        let version = version.unwrap_or(0).unsigned_abs();
++        let client = self.sdk.mail_facade().get_crypto_entity_client();
++        let group_key = client
++            .get_crypto_facade()
++            .get_key_loader_facade()
++            .load_sym_group_key(owner, version, None)
++            .await
++            .map_err(|e| ApiCallError::internal(format!("Failed to load group key: {e}")))?;
++        let session_key = group_key
++            .decrypt_aes_key(encrypted)
++            .map_err(|e| ApiCallError::internal(format!("Failed to decrypt session key: {e}")))?;
++        Ok(ResolvedSessionKey {
++            session_key,
++            owner_enc_session_key: encrypted.clone(),
++            owner_key_version: version,
++            sender_identity_pub_key: None,
++        })
++    }
++
++    pub async fn load_mail_details_blob(&self, mail: &Mail) -> Result<MailDetails, ApiCallError> {
++        if mail.mailDetailsDraft.is_some() {
++            return Err(ApiCallError::internal(
++                "Expected received mail, not draft".into(),
++            ));
++        }
++        let id = mail
++            .mailDetails
++            .as_ref()
++            .ok_or_else(|| ApiCallError::internal("Mail has no mailDetails ID".into()))?;
++        let key = self
++            .owner_key(
++                mail._ownerGroup.as_ref(),
++                mail._ownerEncSessionKey.as_ref(),
++                mail._ownerKeyVersion,
++            )
++            .await?;
++        let type_ref = MailDetailsBlob::type_ref();
++        let body = self
++            .sdk
++            .blob_facade()
++            .load_blob_element(&type_ref, &id.list_id, &id.element_id, &id.list_id)
++            .await?;
++        let raw_entities: Vec<_> = serde_json::from_slice(&body)
++            .map_err(|e| ApiCallError::internal(format!("Invalid blob response: {e}")))?;
++        let raw = raw_entities
++            .into_iter()
++            .next()
++            .ok_or_else(|| ApiCallError::internal("Empty blob response".into()))?;
++        let client = self.sdk.get_entity_client();
++        let parsed = client.parse_raw(&type_ref, raw)?;
++        let model = client.resolve_server_type_ref(&type_ref)?;
++        let decrypted = self.decoder.decrypt_and_map(&model, parsed, key)?;
++        let blob: MailDetailsBlob = self
++            .sdk
++            .instance_mapper
++            .parse_entity(decrypted)
++            .map_err(|e| ApiCallError::internal(format!("Failed to map blob: {e}")))?;
++        Ok(blob.details)
++    }
++
++    pub async fn load_mail_details_draft(&self, mail: &Mail) -> Result<MailDetails, ApiCallError> {
++        if mail.mailDetails.is_some() {
++            return Err(ApiCallError::internal(
++                "Expected draft, not received mail".into(),
++            ));
++        }
++        let id = mail
++            .mailDetailsDraft
++            .as_ref()
++            .ok_or_else(|| ApiCallError::internal("Mail has no mailDetailsDraft ID".into()))?;
++        let key = self
++            .owner_key(
++                mail._ownerGroup.as_ref(),
++                mail._ownerEncSessionKey.as_ref(),
++                mail._ownerKeyVersion,
++            )
++            .await?;
++        let type_ref = MailDetailsDraft::type_ref();
++        let client = self.sdk.get_entity_client();
++        let parsed = client.load(&type_ref, id).await?;
++        let model = client.resolve_server_type_ref(&type_ref)?;
++        let decrypted = self.decoder.decrypt_and_map(&model, parsed, key)?;
++        let draft: MailDetailsDraft = self
++            .sdk
++            .instance_mapper
++            .parse_entity(decrypted)
++            .map_err(|e| ApiCallError::internal(format!("Failed to map draft: {e}")))?;
++        Ok(draft.details)
++    }
++
++    pub async fn load_file_attachment_data(
++        &self,
++        file: &TutanotaFile,
++    ) -> Result<Vec<u8>, ApiCallError> {
++        let key = self
++            .owner_key(
++                file._ownerGroup.as_ref(),
++                file._ownerEncSessionKey.as_ref(),
++                file._ownerKeyVersion,
++            )
++            .await?;
++        self.sdk
++            .blob_facade()
++            .download_and_decrypt(ArchiveDataType::Attachments, &file.blobs, &key.session_key)
++            .await
++    }
++
++    pub async fn decrypt_inline_and_parse<T: Entity + DeserializeOwned>(
++        &self,
++        json: &str,
++    ) -> Result<Option<T>, ApiCallError> {
++        let type_ref = T::type_ref();
++        let client = self.sdk.get_entity_client();
++        let model = client.resolve_server_type_ref(&type_ref)?;
++        let raw = serde_json::from_str(json)
++            .map_err(|e| ApiCallError::internal(format!("decrypt_inline: malformed JSON: {e}")))?;
++        let parsed = client.parse_raw(&type_ref, raw)?;
++        let decrypted = if model.marked_encrypted() {
++            let crypto_client = self.sdk.mail_facade().get_crypto_entity_client();
++            let key = match crypto_client
++                .get_crypto_facade()
++                .resolve_session_key(&parsed, &model)
++                .await
++            {
++                Ok(Some(key)) => key,
++                // Preserve the existing bridge fallback to a REST reload.
++                Ok(None) => return Ok(None),
++                Err(e) => {
++                    log::debug!("Inline key resolution failed for {}: {e}", model.name);
++                    return Ok(None);
++                }
++            };
++            self.decoder.decrypt_and_map(&model, parsed, key)?
++        } else {
++            parsed
++        };
++        let entity = self
++            .sdk
++            .instance_mapper
++            .parse_entity(decrypted)
++            .map_err(|e| ApiCallError::internal(format!("decrypt_inline: map failed: {e}")))?;
++        Ok(Some(entity))
++    }
++}
+diff --git a/crates/tuta/src/mail_set_entry_id.rs b/crates/tuta/src/mail_set_entry_id.rs
+new file mode 100644
+index 0000000..0b89cf1
+--- /dev/null
++++ b/crates/tuta/src/mail_set_entry_id.rs
+@@ -0,0 +1,221 @@
++//! Encoding/decoding of `MailSetEntry._id.element_id` (CustomId).
++//!
++//! A `MailSetEntry` is the placement of one [`Mail`] in one [`MailSet`]
++//! (folder). Its element id is a 13-byte buffer encoded as base64url-no-pad:
++//!
++//! ```text
++//! ┌──────────────────────────┬───────────────────────────────────────┐
++//! │  4 bytes — timestamp     │  9 bytes — Mail.element_id (raw)      │
++//! │  receivedDate >> 10 (BE) │                                       │
++//! └──────────────────────────┴───────────────────────────────────────┘
++//! ```
++//!
++//! The timestamp is shifted right by 10 bits — i.e. quantised to ~1.024s
++//! resolution — to fit into 4 bytes (covers up to year ~2109). The 9 raw
++//! bytes of the [`Mail`] id are appended verbatim; the same bytes encoded
++//! with Tuta's `base64ext` alphabet form the [`GeneratedId`] string of the
++//! mail.
++//!
++//! This module mirrors the TypeScript helpers in
++//! `src/platform-kit/meta/EntityUtils.ts` (`constructMailSetEntryId` and
++//! `deconstructMailSetEntryId`). Knowing the encoding lets a realtime event
++//! consumer extract the `mail_id` directly from a `MailSetEntry` CREATE /
++//! DELETE event, without any extra REST round-trip.
++//!
++//! [`Mail`]: crate::entities::generated::tutanota::Mail
++//! [`MailSet`]: crate::entities::generated::tutanota::MailSet
++//! [`GeneratedId`]: crate::GeneratedId
++
++use base64::prelude::BASE64_URL_SAFE_NO_PAD;
++use base64::Engine;
++use thiserror::Error;
++
++use crate::date::DateTime;
++use crate::util::BASE64_EXT;
++use crate::{CustomId, GeneratedId};
++
++/// Size of a [`Mail`] `GeneratedId` in raw bytes (9 bytes = 12 base64ext chars).
++///
++/// [`Mail`]: crate::entities::generated::tutanota::Mail
++const MAIL_ID_BYTES: usize = 9;
++
++/// Size of the 4-byte big-endian timestamp prefix.
++const TIMESTAMP_BYTES: usize = 4;
++
++/// Total decoded length of a `MailSetEntry` element id.
++const MAIL_SET_ENTRY_ID_BYTES: usize = TIMESTAMP_BYTES + MAIL_ID_BYTES;
++
++/// The timestamp is encoded as `(millis >> SHIFT)` so 4 bytes are enough to
++/// cover roughly 2 ^ 32 × 1024 ms ≈ year 2109.
++const TIMESTAMP_SHIFT: u32 = 10;
++
++#[derive(Debug, Error, PartialEq, Eq)]
++pub enum MailSetEntryIdError {
++	#[error("invalid base64url encoding for MailSetEntry id: {0}")]
++	InvalidBase64Url(String),
++	#[error(
++		"unexpected MailSetEntry id length: got {got} bytes, expected {}",
++		MAIL_SET_ENTRY_ID_BYTES
++	)]
++	WrongLength { got: usize },
++	#[error("invalid base64ext encoding inside mail id: {0}")]
++	InvalidMailIdEncoding(String),
++}
++
++/// Build the [`CustomId`] used as the element id of a `MailSetEntry`
++/// referring to `mail_id` received at `receive_date`.
++///
++/// # Panics
++///
++/// Panics if `mail_id` does not decode to exactly `MAIL_ID_BYTES` (9) bytes
++/// when interpreted as base64ext — i.e. if it is not a well-formed Tuta
++/// `GeneratedId`. Such an id would never appear in practice; this guards
++/// against misuse in tests / new code paths.
++#[must_use]
++pub fn construct(receive_date: DateTime, mail_id: &GeneratedId) -> CustomId {
++	let mut buffer = [0u8; MAIL_SET_ENTRY_ID_BYTES];
++
++	let truncated = (receive_date.as_millis() >> TIMESTAMP_SHIFT) as u32;
++	buffer[..TIMESTAMP_BYTES].copy_from_slice(&truncated.to_be_bytes());
++
++	let mail_bytes = BASE64_EXT
++		.decode(mail_id.as_str())
++		.expect("malformed Tuta GeneratedId (must be valid base64ext)");
++	assert_eq!(
++		mail_bytes.len(),
++		MAIL_ID_BYTES,
++		"Tuta GeneratedId must decode to {MAIL_ID_BYTES} bytes, got {}",
++		mail_bytes.len(),
++	);
++	buffer[TIMESTAMP_BYTES..].copy_from_slice(&mail_bytes);
++
++	CustomId(BASE64_URL_SAFE_NO_PAD.encode(buffer))
++}
++
++/// Split a [`CustomId`] coming from a `MailSetEntry._id` back into the
++/// (received-date, mail id) pair it encodes. The returned timestamp has the
++/// ~1s quantisation baked into the wire format (`millis & !0x3FF`) — fine for
++/// sorting / display, but do not compare for strict equality with a fresh
++/// `Date.now()`.
++pub fn deconstruct(id: &CustomId) -> Result<(DateTime, GeneratedId), MailSetEntryIdError> {
++	let buffer = BASE64_URL_SAFE_NO_PAD
++		.decode(id.as_str())
++		.map_err(|e| MailSetEntryIdError::InvalidBase64Url(e.to_string()))?;
++	if buffer.len() != MAIL_SET_ENTRY_ID_BYTES {
++		return Err(MailSetEntryIdError::WrongLength { got: buffer.len() });
++	}
++
++	let mut ts_bytes = [0u8; TIMESTAMP_BYTES];
++	ts_bytes.copy_from_slice(&buffer[..TIMESTAMP_BYTES]);
++	let truncated = u32::from_be_bytes(ts_bytes) as u64;
++	let millis = truncated << TIMESTAMP_SHIFT;
++
++	let mail_id = GeneratedId(BASE64_EXT.encode(&buffer[TIMESTAMP_BYTES..]));
++
++	Ok((DateTime::from_millis(millis), mail_id))
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++
++	/// Test vector copied verbatim from the TS test suite
++	/// (`test/tests/typerefs/EntityUtilsTest.ts`) — guarantees we stay
++	/// wire-compatible with the official client.
++	#[test]
++	fn ts_test_vector() {
++		let mail_id = GeneratedId("-----------0".to_string());
++		// 2017-10-03T13:46:13Z = 1_507_038_373_000 ms.
++		let receive_date = DateTime::from_millis(1_507_038_373_000);
++		assert_eq!(
++			construct(receive_date, &mail_id).as_str(),
++			"V7ifKQAAAAAAAAAAAQ",
++		);
++	}
++
++	#[test]
++	fn deconstruct_recovers_the_mail_id() {
++		let id = CustomId("V7ifKQAAAAAAAAAAAQ".to_string());
++		let (_date, mail_id) = deconstruct(&id).expect("must decode the TS vector");
++		assert_eq!(mail_id.as_str(), "-----------0");
++	}
++
++	#[test]
++	fn deconstruct_recovers_a_quantised_timestamp() {
++		// The wire format drops the bottom 10 bits, so the recovered
++		// timestamp is rounded down to the previous 1024-ms boundary.
++		let id = CustomId("V7ifKQAAAAAAAAAAAQ".to_string());
++		let (date, _mail_id) = deconstruct(&id).unwrap();
++		let original: u64 = 1_507_038_373_000;
++		let expected: u64 = original & !((1u64 << TIMESTAMP_SHIFT) - 1);
++		assert_eq!(date.as_millis(), expected);
++		// And it stays close to the original.
++		assert!(original - date.as_millis() < 1024);
++	}
++
++	#[test]
++	fn round_trip_quantises_the_timestamp_but_keeps_the_mail_id() {
++		// `construct` then `deconstruct` produces the same mail id back, and
++		// a timestamp that matches the original modulo the quantisation.
++		let cases = [
++			(0u64, "------------"),
++			(1_507_038_373_000u64, "-----------0"),
++			(1_700_000_000_000u64, "------------"),
++		];
++		for (millis, mail_id_str) in cases {
++			let mail_id = GeneratedId(mail_id_str.to_string());
++			let custom = construct(DateTime::from_millis(millis), &mail_id);
++			let (date, recovered) = deconstruct(&custom).unwrap();
++			assert_eq!(
++				recovered.as_str(),
++				mail_id_str,
++				"mail id changed by round-trip"
++			);
++			assert_eq!(
++				date.as_millis(),
++				millis & !((1u64 << TIMESTAMP_SHIFT) - 1),
++				"timestamp does not match the expected quantisation",
++			);
++		}
++	}
++
++	#[test]
++	fn deconstruct_rejects_a_short_id() {
++		// 12 bytes of base64url payload = "AAAAAAAAAAAAAAAA" (16 chars).
++		let id = CustomId("AAAAAAAAAAAAAAAA".to_string());
++		assert_eq!(
++			deconstruct(&id).unwrap_err(),
++			MailSetEntryIdError::WrongLength { got: 12 },
++		);
++	}
++
++	#[test]
++	fn deconstruct_rejects_a_long_id() {
++		// 14 bytes of base64url payload — explicitly more than the 13-byte
++		// envelope so the parser cannot silently truncate.
++		let id = CustomId("AAAAAAAAAAAAAAAAAAA".to_string());
++		assert_eq!(
++			deconstruct(&id).unwrap_err(),
++			MailSetEntryIdError::WrongLength { got: 14 },
++		);
++	}
++
++	#[test]
++	fn deconstruct_rejects_invalid_base64url() {
++		let id = CustomId("not base64 at all!".to_string());
++		match deconstruct(&id) {
++			Err(MailSetEntryIdError::InvalidBase64Url(_)) => {},
++			other => panic!("expected InvalidBase64Url, got {other:?}"),
++		}
++	}
++
++	#[test]
++	#[should_panic(expected = "malformed Tuta GeneratedId")]
++	fn construct_panics_on_a_non_generated_id() {
++		// Passing something that does not decode to 9 bytes is a contract
++		// violation — caller bug. We assert loudly rather than silently
++		// truncate.
++		let bogus = GeneratedId("!".to_string());
++		let _ = construct(DateTime::from_millis(0), &bogus);
++	}
++}
+diff --git a/crates/tuta/tests/download_mail_test/mail.json b/crates/tuta/tests/download_mail_test/mail.json
+new file mode 100644
+index 0000000..0216cd4
+--- /dev/null
++++ b/crates/tuta/tests/download_mail_test/mail.json
+@@ -0,0 +1,51 @@
++{
++	"105": "AdAkyYPP87vaA8qQf/gtJQVVryahLHKlSoEc+BQPtK5nC/hjrd7u9fu0nYpx94VS4gAvoSnhGWuGDpKLBHrfqx31ALoFP4fcnR79apMzGC7g",
++	"1310": [],
++	"617": null,
++	"115": [],
++	"1021": "0",
++	"108": "2",
++	"99": ["O1qC705-17-0", "O1qC7an--3-0"],
++	"1346": "AY57xNL2gn0dTcbpiXcbNN5L8yl23kUzDzi+Mn935Fvec/8SsuGxVA++FIPKaByfWmWWKD0MCiw5ULX/GvhiXw0=",
++	"866": "",
++	"109": "0",
++	"1308": [["O1qC704-0Z-0", "O1qC7ap----0"]],
++	"1120": "ASQ4BOQ+MKE6t8fQGpeV+1VvU/Oo8t5UoAnUK4zsS29zzvpMYzrIBK4RcKO840ykOzPnIX3aC65BORYNbQmpFh8=",
++	"107": "1721043814832",
++	"1306": [
++		{
++			"94": "Aat9AY9djt62DKDMW6luJMffp3u2YEziTWrbmtxtsAS1TeQ4rcYqNtXeWWgtdXZ7y3myoBLaqkgm91OmeWXkZ1s=",
++			"93": "TzFyXA",
++			"95": "bed-free@tutanota.de",
++			"96": []
++		}
++	],
++	"117": [["O1qC7an--7-0", "O1qC7ao----0"]],
++	"1307": "1",
++	"100": "O1qC7ao--Z-0",
++	"1395": "0",
++	"102": "AYdKhwxtFeGh66SX+OeZAcfcfAKfrVlisn04dovQEH4tOkNK8uubAdbIAhfJ2Bl6dfilcLm/EpBm3j/xnFseuV5pXDhI8xaxYjvRcMufVTrm",
++	"1022": null,
++	"1309": [],
++	"896": "1721043814832",
++	"1465": [],
++	"101": "0",
++	"587": "O1qC704----0",
++	"426": "ARD44bZS2WTur6K6Se5tP+M5a5iVdsOriDZZlWcr7RV1gbY2yiHIIBUEhlythR2mUfnmK694z/d/Ovuuqi0Z7GA=",
++	"111": [
++		{
++			"93": "iH7VEA",
++			"94": "AbmMklsiI2yKGMdbpQBc0eX8dPc1hGNeL7NNa5Wdypurp60v0uP+/Do7fBQnalJX/4K09/znZKIUcbapkifHqJc=",
++			"95": "map-free@tutanota.de",
++			"96": []
++		}
++	],
++	"466": "",
++	"1677": null,
++	"1728": "1",
++	"1729": [],
++	"1769": "1",
++	"1784": null,
++	"1814": "0,1",
++	"1839": null
++}
+diff --git a/crates/tuta/tests/download_mail_test/session.json b/crates/tuta/tests/download_mail_test/session.json
+new file mode 100644
+index 0000000..d60a376
+--- /dev/null
++++ b/crates/tuta/tests/download_mail_test/session.json
+@@ -0,0 +1,17 @@
++{
++	"1204": [],
++	"1194": "O1qCA57----0",
++	"1198": "AT+bhJpQsbtyy6CoLsi7nVce/FqbdCQEU1OvvDsX7PJM2bpnNFaoQt6vPHCdOymGFZkOga3nSC+U5XLzrjzHzzE=",
++	"1199": "AYfDlrIBGdpXuz/AyRokgvEDqL0YcK9K8TGApDW1F90hrEiXPhO8C3JiL2lfhVcAu/BvDsTUPoEtOZcuXYjPN8M=",
++	"1201": "1721046280741",
++	"1200": null,
++	"1203": "0",
++	"1202": "gRloJy+0k5y75YFwIadaOcxCukls9iMcP5vOsHUUOXI=",
++	"1196": "O1qC702-03-0",
++	"1193": ["O1qC702-1J-0", "3u3i8Lr9_7TnDDdAVw7w3TypTD2k1L00vIUTMF0SIPY"],
++	"1195": "0",
++	"2229": "0",
++	"1205": ["O1qC700----0"],
++	"1197": "AWnFKB9jl6diPFkysxgch1ZGzMUd79Ay6mo5SHPUEnUV3CxCMRseP0xu7/ZJ1AuAyOWZrfp2Mglm81Ff922Ib5DviOAlygwH7KCbDNf3qmyn",
++	"2714": null
++}
+diff --git a/crates/tuta/tests/download_mail_test/user.json b/crates/tuta/tests/download_mail_test/user.json
+new file mode 100644
+index 0000000..aabdafc
+--- /dev/null
++++ b/crates/tuta/tests/download_mail_test/user.json
+@@ -0,0 +1,138 @@
++{
++	"99": ["O1qC700--7-0"],
++	"638": [
++		{
++			"637": ["O1qC702-1F-0"],
++			"636": "B2CoEw"
++		}
++	],
++	"92": "1",
++	"996": "O1qC702-03-0",
++	"87": "O1qC702-1--0",
++	"2132": "1",
++	"88": "0",
++	"97": [],
++	"100": ["O1qC702-13-0"],
++	"1117": "0",
++	"91": "RQzhVUlLrMs8/Ls0yAy4xr545p8Lte15/dZn3yPAOmM=",
++	"93": "1",
++	"86": "O1qC700----0",
++	"96": [
++		{
++			"2247": "0",
++			"230": [["O1qC701--V-0", "O1qC703--7-0"]],
++			"1030": "3",
++			"30": [["O1qC700--J-0", "O1qC701--k-0"]],
++			"2246": "0",
++			"27": "Aa1rPuhPHiPjJDMNiL7qk2e4QqHfiVlPEgE0o1w6d/UGI9KCOQBlC+AFwZiWHsuyHT28SWLl5zSO1vJURkfvrWZBDKKTjA0Hs9QKbcG5MND2",
++			"29": ["O1qC700--g-0"],
++			"26": "lEjHAg",
++			"28": "0",
++			"1626": null
++		},
++		{
++			"26": "44RC-w",
++			"28": "0",
++			"1030": "7",
++			"27": "AQomB0WKxgjcmDsFX+JyauwaLUF4+/mDf6hg/stfl1l/joM5tXcAUviWot5KiG2Mt0vO+HrWjC1aNYBTieqCpPMbK5piGqh4K5bL9rvZAu5q",
++			"2246": "0",
++			"1626": null,
++			"29": ["O1qC703--s-0"],
++			"30": [["O1qC700--k-0", "O1qC703-0J-0"]],
++			"230": [["O1qC703-03-0", "O1qC703-0g-0"]],
++			"2247": "0"
++		},
++		{
++			"1626": null,
++			"2246": "0",
++			"27": "AZvirH4TxflFRAz0sIk7K198YRJyc5ShoUuMA/fv55hB3kmNOC/PzPJjRRPPFuXRwJnGiwIo5hxzdlRphsAGBN93yabavx+kf/gOWvqJ6Y1b",
++			"29": ["O1qC703-0o-0"],
++			"30": [["O1qC700--k-0", "O1qC703-1F-0"]],
++			"28": "0",
++			"2247": "0",
++			"26": "X-h54Q",
++			"230": [["O1qC703-1--0", "O1qC703-1c-0"]],
++			"1030": "6"
++		},
++		{
++			"26": "Yh9Wdw",
++			"28": "0",
++			"30": [["O1qC700--k-0", "O1qC704--R-0"]],
++			"230": [["O1qC704--B-0", "O1qC704--o-0"]],
++			"1030": "5",
++			"1626": null,
++			"2246": "0",
++			"27": "AYPTkUJLWOb+4uE/T85dk40ITpqQVS+J7RiVxW8PC3S7aEaZlOYhK63diEzpT1N54IGOxF+Mb8LLxIfL5izFSOF/F9D7i+aBB+usRwQjt6B6",
++			"2247": "0",
++			"29": ["O1qC704----0"]
++		},
++		{
++			"230": [["O1qC701-0F-0", "O1qC707--F-0"]],
++			"26": "ksLK-Q",
++			"30": [["O1qC700--F-0", "O1qC701-0V-0"]],
++			"29": ["O1qC700--c-0"],
++			"2247": "0",
++			"28": "1",
++			"1030": "1",
++			"1626": null,
++			"2246": "0",
++			"27": "ARLwPctqfM7dMFWSa4PPrj9WiNe6j4EC8BQRQk4kXQ48I8cSO2frwD+03lalNGttbOhqiA0nB3oiLG2nlV1biz2DIC/UNENSNPzy0MUlM5ND"
++		},
++		{
++			"27": "AWhvkJcZvSNgOHPu6ydbh2j+8m/lAGRu3EMg+KSIEERxlWjnIggrhuh48/ll7dzeFYZ3t1mcbHid9TSx4d2e3KI=",
++			"30": [["O1qC6b6--R-0", "O1qC6bK--R-0"]],
++			"1030": "2",
++			"26": "aCe3cw",
++			"2247": "0",
++			"28": "0",
++			"1626": null,
++			"29": ["O1qC6bK----0"],
++			"2246": "0",
++			"230": [["O1qC6bK--B-0", "O1qC709--Z-0"]]
++		},
++		{
++			"1030": "9",
++			"30": [["O1qC700--k-0", "O1qCA8y--R-0"]],
++			"2247": "0",
++			"1626": null,
++			"2246": "0",
++			"28": "0",
++			"27": "Ae+GMVbuAZWQyOqxmalcKi7y5YBbCg7lXv1LF4hEPQAGkUssM6lRxbsql7zo6yDOKauZPIx//GgvBivLWnJaqJHU5yiRYSOgMW2MNY+UNCsj",
++			"29": ["O1qCA8y----0"],
++			"230": [["O1qCA8y--B-0", "O1qCA8y--o-0"]],
++			"26": "EbN_kw"
++		}
++	],
++	"102": ["O1qC702-1B-0"],
++	"98": [],
++	"90": "j+SNzu9A23zDp4UFmwzfVw==",
++	"95": [
++		{
++			"27": "Aaz83xb4qI1zFsnlHkFQ5sDSgbiqQMTFi6HH2cr+5x+2KSC2EffR9y0xAK26RtXy7i6aGK82d5mDMdn/kk39GeQTLbCF5l5RA6qQYXtze2U7",
++			"26": "Z6QVZw",
++			"230": [["O1qC702-0F-0", "O1qC702-1c-0"]],
++			"29": ["O1qC702-03-0"],
++			"28": "0",
++			"30": [["O1qC700--N-0", "O1qC702-0V-0"]],
++			"1626": null,
++			"1030": "0",
++			"2247": "0",
++			"2246": "0"
++		}
++	],
++	"1210": [
++		{
++			"1209": ["O1qC702-1N-0"],
++			"1207": "uDESxQ",
++			"1416": ["O1qC702-1V-0"],
++			"1208": ["O1qC702-1J-0"]
++		}
++	],
++	"1552": [
++		{
++			"1551": ["O1qC702-1R-0"],
++			"1550": "XEDkhA"
++		}
++	],
++	"101": ["O1qC702-17-0"]
++}
+diff --git a/crates/tuta/tests/mail_extensions.rs b/crates/tuta/tests/mail_extensions.rs
+new file mode 100644
+index 0000000..3f8f08a
+--- /dev/null
++++ b/crates/tuta/tests/mail_extensions.rs
+@@ -0,0 +1,443 @@
++//! Integration test for `CryptoEntityClient::decrypt_inline_and_parse`.
++//!
++//! The realtime event bus delivers a still-encrypted JSON of the affected
++//! entity inside `EntityUpdate.instance`. A client should be able to
++//! decrypt it locally instead of spending a REST round-trip to load the
++//! same data. This test reuses the existing `download_mail_test` fixture
++//! (a real captured server response for a Mail load) as the inline JSON
++//! payload — the wire shape is identical.
++
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use base64::prelude::BASE64_STANDARD;
++use base64::Engine;
++use tutabridge_tuta::mail::MailExtensions;
++use tutasdk::bindings::rest_client::{HttpMethod, RestClient};
++use tutasdk::bindings::test_file_client::TestFileClient;
++use tutasdk::bindings::test_rest_client::TestRestClient;
++use tutasdk::entities::generated::tutanota::Mail;
++use tutasdk::login::{CredentialType, Credentials};
++use tutasdk::{GeneratedId, Sdk};
++
++fn make_rest_client_for_login() -> Arc<dyn RestClient> {
++    let mut client = TestRestClient::new("http://localhost:9000");
++    client.insert_response(
++		"http://localhost:9000/rest/sys/Session/O1qC702-1J-0/3u3i8Lr9_7TnDDdAVw7w3TypTD2k1L00vIUTMF0SIPY",
++		HttpMethod::GET,
++		200,
++		HashMap::default(),
++		Some(include_bytes!("download_mail_test/session.json")),
++	);
++    client.insert_response(
++        "http://localhost:9000/rest/sys/User/O1qC700----0",
++        HttpMethod::GET,
++        200,
++        HashMap::default(),
++        Some(include_bytes!("download_mail_test/user.json")),
++    );
++    Arc::new(client)
++}
++
++async fn login_for_test() -> Arc<tutasdk::LoggedInSdk> {
++    let rest_client = make_rest_client_for_login();
++    let file_client = Arc::new(TestFileClient::default());
++    // Same credentials as `download_mail_test.rs` — the fixture's session is
++    // keyed against them.
++    let encrypted_passphrase_key = BASE64_STANDARD
++		.decode("AZWEA/KTrHu0bW52CsctsBTTV4U3jrU51TadSxf6Nqs3xbEs3WfoOpPtxUDCNjHNppt6LHCfgTioejjGUJ2cCsXosZAysUiau5Nvyi8mtjLz")
++		.unwrap();
++    let credentials = Credentials {
++        login: "bed-free@tutanota.de".to_string(),
++        user_id: GeneratedId("O1qC700----0".to_owned()),
++        access_token: "ZC2NIBDACUABAdJhibIwclzaPU3fEu-NzQ".to_string(),
++        encrypted_passphrase_key,
++        credential_type: CredentialType::Internal,
++    };
++    let sdk = Sdk::new(
++        "http://localhost:9000".to_string(),
++        rest_client,
++        file_client,
++    );
++    sdk.login(credentials).await.unwrap()
++}
++
++#[tokio::test]
++async fn decrypts_an_inline_mail_payload_without_rest() {
++    // The fixture is the same encrypted Mail JSON the server returned for
++    // the REST `load_mail_test` — it is the exact shape an event-bus
++    // `EntityUpdate.instance` carries on Mail CREATE/UPDATE.
++    let logged_in = login_for_test().await;
++    let mail_json = include_str!("download_mail_test/mail.json");
++
++    let mail: Option<Mail> = MailExtensions::new(logged_in)
++        .decrypt_inline_and_parse::<Mail>(mail_json)
++        .await
++        .expect("decrypt_inline must succeed on a valid fixture");
++
++    let mail = mail.expect("session key is resolvable for this fixture");
++    // Subject is the same one asserted by `download_mail_test.rs`, so
++    // passing here proves the inline pipeline yields the same Mail as a
++    // full REST load.
++    assert_eq!(mail.subject, "Html email features");
++    assert_eq!(mail.recipientCount, 1);
++}
++
++#[tokio::test]
++async fn rejects_malformed_inline_json() {
++    let logged_in = login_for_test().await;
++    let err = MailExtensions::new(logged_in)
++        .decrypt_inline_and_parse::<Mail>("{ not json at all")
++        .await
++        .expect_err("malformed JSON must surface as an error, not a silent None");
++    assert!(
++        format!("{err:?}").contains("malformed JSON"),
++        "unexpected error shape: {err:?}",
++    );
++}
++
++#[tokio::test]
++async fn empty_inline_json_object_is_a_session_key_miss() {
++    // A well-formed JSON with no encryption metadata cannot resolve a
++    // session key — the inline contract is to return `Ok(None)` so the
++    // caller can fall back (e.g. to a REST load) rather than panic.
++    let logged_in = login_for_test().await;
++    let outcome = MailExtensions::new(logged_in)
++        .decrypt_inline_and_parse::<Mail>("{}")
++        .await;
++    // Either Err on parse (no required fields) OR Ok(None) on missing key
++    // is acceptable — but never Ok(Some(mail)) and never a panic.
++    match outcome {
++        Ok(None) => {}
++        Err(_) => {}
++        Ok(Some(_)) => panic!("must not synthesise a Mail from an empty payload"),
++    }
++}
++
++use std::sync::Mutex;
++use tutasdk::bindings::rest_client::{RestClientError, RestClientOptions, RestResponse};
++use tutasdk::IdTupleGenerated;
++
++struct RecordingClient {
++    fixtures: Arc<dyn RestClient>,
++    requests: Mutex<Vec<(String, HttpMethod, RestClientOptions)>>,
++    move_status: u32,
++    extra: Mutex<HashMap<String, Vec<u8>>>,
++}
++#[async_trait::async_trait]
++impl RestClient for RecordingClient {
++    async fn request_binary(
++        &self,
++        url: String,
++        method: HttpMethod,
++        options: RestClientOptions,
++    ) -> Result<RestResponse, RestClientError> {
++        if url.ends_with("/rest/tutanota/movemailservice") {
++            self.requests.lock().unwrap().push((url, method, options));
++            return Ok(RestResponse {
++                status: self.move_status,
++                headers: HashMap::default(),
++                body: Some(br#"{"1722":"0","1723":[]}"#.to_vec()),
++            });
++        }
++        if let Some(body) = self.extra.lock().unwrap().get(&url) {
++            return Ok(RestResponse {
++                status: 200,
++                headers: HashMap::default(),
++                body: Some(body.clone()),
++            });
++        }
++        self.fixtures.request_binary(url, method, options).await
++    }
++}
++async fn recording_session(
++    status: u32,
++) -> (
++    MailExtensions,
++    Arc<RecordingClient>,
++    Arc<tutasdk::LoggedInSdk>,
++) {
++    let rest = Arc::new(RecordingClient {
++        fixtures: make_rest_client_for_login(),
++        requests: Mutex::new(vec![]),
++        move_status: status,
++        extra: Mutex::new(HashMap::new()),
++    });
++    // Public upstream test fixtures; requests are handled in memory only.
++    let credentials = Credentials {
++        login: "bed-free@tutanota.de".into(), user_id: GeneratedId("O1qC700----0".into()),
++        access_token: "ZC2NIBDACUABAdJhibIwclzaPU3fEu-NzQ".into(),
++        encrypted_passphrase_key: BASE64_STANDARD.decode("AZWEA/KTrHu0bW52CsctsBTTV4U3jrU51TadSxf6Nqs3xbEs3WfoOpPtxUDCNjHNppt6LHCfgTioejjGUJ2cCsXosZAysUiau5Nvyi8mtjLz").unwrap(),
++        credential_type: CredentialType::Internal,
++    };
++    let sdk = Sdk::new(
++        "http://localhost:9000".into(),
++        rest.clone(),
++        Arc::new(TestFileClient::default()),
++    );
++    let logged = sdk.login(credentials).await.unwrap();
++    (MailExtensions::new(logged.clone()), rest, logged)
++}
++fn mail_id(i: usize) -> IdTupleGenerated {
++    IdTupleGenerated::new(
++        GeneratedId("mail-list".into()),
++        GeneratedId(format!("mail-{i}")),
++    )
++}
++#[tokio::test]
++async fn move_posts_target_and_batches_through_real_sdk_serializer() {
++    let (ext, rest, _) = recording_session(200).await;
++    let target = IdTupleGenerated::new(GeneratedId("folders".into()), GeneratedId("target".into()));
++    let mut mails = vec![mail_id(0)];
++    mails.extend((0..101).map(mail_id)); // adjacent duplicate of id 0
++    ext.move_mails(mails, target).await.unwrap();
++    let requests = rest.requests.lock().unwrap();
++    assert_eq!(requests.len(), 3);
++    for (index, (_, method, options)) in requests.iter().enumerate() {
++        assert_eq!(*method, HttpMethod::POST);
++        assert_eq!(options.headers.get("cv").unwrap(), tutasdk::CLIENT_VERSION);
++        let json: serde_json::Value =
++            serde_json::from_slice(options.body.as_ref().unwrap()).unwrap();
++        assert_eq!(json["447"], serde_json::json!([["folders", "target"]]));
++        let batch = json["448"].as_array().unwrap();
++        assert_eq!(batch.len(), if index == 2 { 1 } else { 50 });
++        assert_eq!(
++            batch[0],
++            serde_json::json!(["mail-list", format!("mail-{}", index * 50)])
++        );
++    }
++}
++#[tokio::test]
++async fn move_empty_does_not_request_and_failure_stops_later_batches() {
++    let (ext, rest, _) = recording_session(500).await;
++    ext.move_mails(vec![], mail_id(0)).await.unwrap();
++    assert!(rest.requests.lock().unwrap().is_empty());
++    assert!(ext
++        .move_mails((0..101).map(mail_id).collect(), mail_id(0))
++        .await
++        .is_err());
++    assert_eq!(rest.requests.lock().unwrap().len(), 1);
++}
++#[tokio::test]
++async fn draft_reader_rejects_received_mail_before_fetching() {
++    let logged = login_for_test().await;
++    let ext = MailExtensions::new(logged);
++    let mail = ext
++        .decrypt_inline_and_parse::<Mail>(include_str!("download_mail_test/mail.json"))
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(mail.mailDetails.is_some());
++    let error = ext.load_mail_details_draft(&mail).await.unwrap_err();
++    assert!(error.to_string().contains("Expected draft"));
++}
++
++#[tokio::test]
++async fn draft_body_uses_parent_mail_key_even_when_draft_has_no_key() {
++    use crypto_primitives::{
++        aes::{Aes256Key, InitializationVector},
++        key::GenericAesKey,
++        randomizer_facade::RandomizerFacade,
++    };
++    use tutasdk::entities::generated::tutanota::{Body, MailDetails, MailDetailsDraft, Recipients};
++    use tutasdk::{date::DateTime, CustomId};
++    let (ext, rest, logged) = recording_session(200).await;
++    let mut mail = ext
++        .decrypt_inline_and_parse::<Mail>(include_str!("download_mail_test/mail.json"))
++        .await
++        .unwrap()
++        .unwrap();
++    let parent_version = mail._ownerKeyVersion.unwrap_or(0).unsigned_abs();
++    let client = logged.mail_facade().get_crypto_entity_client();
++    let group_key = client
++        .get_crypto_facade()
++        .get_key_loader_facade()
++        .load_sym_group_key(mail._ownerGroup.as_ref().unwrap(), parent_version, None)
++        .await
++        .unwrap();
++    let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[42; 32]).unwrap());
++    let rng = RandomizerFacade::from_core(rand_core::OsRng);
++    mail._ownerEncSessionKey =
++        Some(group_key.encrypt_key(&key, InitializationVector::generate(&rng)));
++    mail.mailDetails = None;
++    let draft_id = IdTupleGenerated::new(
++        GeneratedId("draft-list".into()),
++        GeneratedId("draft-id".into()),
++    );
++    mail.mailDetailsDraft = Some(draft_id.clone());
++    let details = MailDetails {
++        _id: Some(CustomId("details".into())),
++        sentDate: DateTime::from_millis(123456),
++        authStatus: 0,
++        replyTos: vec![],
++        headers: None,
++        recipients: Recipients {
++            _id: Some(CustomId("recipients".into())),
++            toRecipients: vec![],
++            ccRecipients: vec![],
++            bccRecipients: vec![],
++        },
++        body: Body {
++            _id: Some(CustomId("body".into())),
++            text: Some("Draft body: été ✓".into()),
++            compressedText: None,
++            _errors: Default::default(),
++        },
++    };
++    let draft = MailDetailsDraft {
++        _id: Some(draft_id),
++        _permissions: GeneratedId("permissions".into()),
++        _format: 0,
++        _ownerGroup: mail._ownerGroup.clone(),
++        _ownerEncSessionKey: None,
++        _ownerKeyVersion: None,
++        _kdfNonce: None,
++        details: details.clone(),
++        _errors: Default::default(),
++    };
++    let json = logged.serialize_instance_to_json(draft, key).unwrap();
++    let mut raw: serde_json::Value = serde_json::from_str(&json).unwrap();
++    raw["1296"] = serde_json::Value::Null;
++    raw["1407"] = serde_json::Value::Null;
++    rest.extra.lock().unwrap().insert(
++        "http://localhost:9000/rest/tutanota/MailDetailsDraft/draft-list/draft-id".into(),
++        serde_json::to_vec(&raw).unwrap(),
++    );
++    let result = ext.load_mail_details_draft(&mail).await.unwrap();
++    assert_eq!(result, details);
++    let encrypted = mail._ownerEncSessionKey.as_mut().unwrap();
++    let last = encrypted.len() - 1;
++    encrypted[last] ^= 1;
++    assert!(
++        ext.load_mail_details_draft(&mail).await.is_err(),
++        "corrupted parent key must not produce a body"
++    );
++}
++
++/// Acceptance gate, run separately with --ignored. A failure rejects promotion.
++#[tokio::test]
++#[ignore = "protocol acceptance gate; upstream 359 currently fails"]
++async fn protocol_accepts_valid_aead_v3_mail_subject() {
++    use crypto_primitives::{
++        aead_facade::{AeadFacade, AeadSubKeys},
++        key::GenericAesKey,
++        randomizer_facade::RandomizerFacade,
++    };
++    use tutasdk::entities::Entity;
++    let logged = login_for_test().await;
++    let ext = MailExtensions::new(logged.clone());
++    let original = include_str!("download_mail_test/mail.json");
++    assert!(ext
++        .decrypt_inline_and_parse::<Mail>(original)
++        .await
++        .unwrap()
++        .is_some());
++    let client = logged.get_entity_client();
++    let parsed = client
++        .parse_raw(&Mail::type_ref(), serde_json::from_str(original).unwrap())
++        .unwrap();
++    let model = client.resolve_server_type_ref(&Mail::type_ref()).unwrap();
++    let crypto = logged.mail_facade().get_crypto_entity_client();
++    let resolved = crypto
++        .get_crypto_facade()
++        .resolve_session_key(&parsed, &model)
++        .await
++        .unwrap()
++        .unwrap();
++    let GenericAesKey::Aes256(key) = resolved.session_key else {
++        panic!("expected fixture AES256 session key")
++    };
++    let aead = AeadFacade::new(RandomizerFacade::from_core(rand_core::OsRng));
++    let subkeys = AeadSubKeys::derive_from_session_key(&key, "tutanota/97");
++    let aad = b"attributeEncSK\x1f105";
++    let plaintext = b"AEAD subject acceptance".to_vec();
++    let ciphertext = aead.encrypt(&subkeys, plaintext.clone(), aad).unwrap();
++    assert_eq!(ciphertext[0], 3);
++    assert_eq!(aead.decrypt(&subkeys, &ciphertext, aad).unwrap(), plaintext);
++    let mut raw: serde_json::Value = serde_json::from_str(original).unwrap();
++    raw["105"] = serde_json::Value::String(BASE64_STANDARD.encode(ciphertext));
++    let mail = ext
++        .decrypt_inline_and_parse::<Mail>(&raw.to_string())
++        .await
++        .expect("valid AEAD ciphertext must be accepted by entity decoder")
++        .unwrap();
++    assert_eq!(mail.subject, "AEAD subject acceptance");
++}
++
++#[tokio::test]
++#[ignore = "protocol acceptance gate; upstream 359 currently fails"]
++async fn protocol_accepts_optional_empty_body_text() {
++    use crypto_primitives::{
++        aes::{Aes256Key, InitializationVector},
++        key::GenericAesKey,
++        randomizer_facade::RandomizerFacade,
++    };
++    use tutasdk::entities::generated::tutanota::{Body, MailDetails, MailDetailsDraft, Recipients};
++    use tutasdk::{date::DateTime, CustomId};
++    let (ext, rest, logged) = recording_session(200).await;
++    let mut mail = ext
++        .decrypt_inline_and_parse::<Mail>(include_str!("download_mail_test/mail.json"))
++        .await
++        .unwrap()
++        .unwrap();
++    let parent_version = mail._ownerKeyVersion.unwrap_or(0).unsigned_abs();
++    let client = logged.mail_facade().get_crypto_entity_client();
++    let group_key = client
++        .get_crypto_facade()
++        .get_key_loader_facade()
++        .load_sym_group_key(mail._ownerGroup.as_ref().unwrap(), parent_version, None)
++        .await
++        .unwrap();
++    let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[42; 32]).unwrap());
++    let rng = RandomizerFacade::from_core(rand_core::OsRng);
++    mail._ownerEncSessionKey =
++        Some(group_key.encrypt_key(&key, InitializationVector::generate(&rng)));
++    mail.mailDetails = None;
++    let draft_id = IdTupleGenerated::new(
++        GeneratedId("draft-list".into()),
++        GeneratedId("draft-id".into()),
++    );
++    mail.mailDetailsDraft = Some(draft_id.clone());
++    let mut details = MailDetails {
++        _id: Some(CustomId("details".into())),
++        sentDate: DateTime::from_millis(123456),
++        authStatus: 0,
++        replyTos: vec![],
++        headers: None,
++        recipients: Recipients {
++            _id: Some(CustomId("recipients".into())),
++            toRecipients: vec![],
++            ccRecipients: vec![],
++            bccRecipients: vec![],
++        },
++        body: Body {
++            _id: Some(CustomId("body".into())),
++            text: Some("Draft body: été ✓".into()),
++            compressedText: None,
++            _errors: Default::default(),
++        },
++    };
++    let draft = MailDetailsDraft {
++        _id: Some(draft_id),
++        _permissions: GeneratedId("permissions".into()),
++        _format: 0,
++        _ownerGroup: mail._ownerGroup.clone(),
++        _ownerEncSessionKey: None,
++        _ownerKeyVersion: None,
++        _kdfNonce: None,
++        details: details.clone(),
++        _errors: Default::default(),
++    };
++    let json = logged.serialize_instance_to_json(draft, key).unwrap();
++    let mut raw: serde_json::Value = serde_json::from_str(&json).unwrap();
++    raw["1296"] = serde_json::Value::Null;
++    raw["1407"] = serde_json::Value::Null;
++    raw["1297"][0]["1288"][0]["1275"] = serde_json::Value::String(String::new());
++    details.body.text = None;
++    rest.extra.lock().unwrap().insert(
++        "http://localhost:9000/rest/tutanota/MailDetailsDraft/draft-list/draft-id".into(),
++        serde_json::to_vec(&raw).unwrap(),
++    );
++    let result = ext.load_mail_details_draft(&mail).await.unwrap();
++    assert_eq!(result, details);
++}
+diff --git a/src/main.rs b/src/main.rs
+index a5024f3..a26b361 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
+     let bus_user_id = session
+         .user_id()
+         .ok_or_else(|| anyhow::anyhow!("Missing user id from session"))?;
+-    let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
++    let bus_client = Arc::new(tutabridge_tuta::event_bus::EventBusClient::new(
+         cfg.api_url.clone(),
+         bridge_helpers::sys_model_version(),
+         bridge_helpers::tutanota_model_version(),
+@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
+             .duration_since(std::time::UNIX_EPOCH)
+             .map(|d| d.as_millis() as i64)
+             .unwrap_or(0);
+-        let expire_ms = tutasdk::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
++        let expire_ms = tutabridge_tuta::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
+         if let Ok(Some(min_ms)) = local_store.event_bus_state_min_updated_at_ms() {
+             if now_ms - min_ms > expire_ms {
+                 info!("Cached event-bus state is older than 44 days — wiping and forcing a full re-sync");
+@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
+         let shutdown = shutdown_rx.clone();
+         tokio::spawn(async move {
+             if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
+-                use tutasdk::event_bus::EventBusError;
++                use tutabridge_tuta::event_bus::EventBusError;
+                 if !matches!(e, EventBusError::Stopped) {
+                     warn!("Event bus exited: {e}");
+                 }

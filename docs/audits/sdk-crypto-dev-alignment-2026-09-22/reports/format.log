@@ -1,0 +1,2 @@
+rustfmt --check: passed (upstream config, crate edition 2021)
+git diff --check: passed

@@ -1,0 +1,12 @@
+test_all_fail_no_candidate (test_prototype.SelectionTests.test_all_fail_no_candidate) ... ok
+test_annotated_tag_uses_peeled_commit (test_prototype.SelectionTests.test_annotated_tag_uses_peeled_commit) ... ok
+test_canonical_numeric_order_and_minimum (test_prototype.SelectionTests.test_canonical_numeric_order_and_minimum) ... ok
+test_every_gate_is_required (test_prototype.SelectionTests.test_every_gate_is_required) ... ok
+test_fallback_to_next_passing_release_and_stop (test_prototype.SelectionTests.test_fallback_to_next_passing_release_and_stop) ... ok
+test_incomplete_checks_do_not_pass (test_prototype.SelectionTests.test_incomplete_checks_do_not_pass) ... ok
+test_limit_and_tag_filter (test_prototype.SelectionTests.test_limit_and_tag_filter) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.033s
+
+OK

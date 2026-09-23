@@ -1,0 +1,8 @@
+COMMAND: git apply --check /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/01-batch.patch
+COMMAND: git apply /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/01-batch.patch
+COMMAND: git apply --check /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/02-blob-transport.patch
+COMMAND: git apply /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/02-blob-transport.patch
+COMMAND: git apply --check /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/03-session-2fa.patch
+COMMAND: git apply /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/03-session-2fa.patch
+COMMAND: git apply --check /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/04-parse-raw.patch
+COMMAND: git apply /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/patches/04-parse-raw.patch

@@ -1,0 +1,1049 @@
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs
+index dae127d190..fe79a9b55e 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs
+@@ -6,10 +6,6 @@ use std::collections::HashMap;
+ use std::future::Future;
+ use std::sync::{Arc, RwLock};
+ 
+-/// still missing ReadArchive(archive_id) and ReadBlob(archive_id, blob_id)
+-/// (see TS impl of the cache)
+-/// once we have those, it should be made even more type safe by restricting the input to
+-/// reading/writing functions on blob facade to the right kind of token.
+ #[derive(Clone, Hash, PartialEq, Eq)]
+ #[cfg_attr(test, derive(Debug))]
+ pub(crate) struct BlobWriteTokenKey(String, ArchiveDataType);
+@@ -20,20 +16,32 @@ impl BlobWriteTokenKey {
+ 	}
+ }
+ 
++#[derive(Clone, Hash, PartialEq, Eq)]
++#[cfg_attr(test, derive(Debug))]
++pub(crate) struct BlobReadArchiveTokenKey(String);
++
++impl BlobReadArchiveTokenKey {
++	pub fn new(archive_id: &GeneratedId) -> Self {
++		Self(archive_id.to_string())
++	}
++}
++
+ pub(super) struct BlobAccessTokenCache {
+-	cache: RwLock<HashMap<BlobWriteTokenKey, BlobServerAccessInfo>>,
++	write_cache: RwLock<HashMap<BlobWriteTokenKey, BlobServerAccessInfo>>,
++	read_cache: RwLock<HashMap<BlobReadArchiveTokenKey, BlobServerAccessInfo>>,
+ 	date_provider: Arc<dyn DateProvider>,
+ }
+ 
+ impl BlobAccessTokenCache {
+ 	pub fn new(date_provider: Arc<dyn DateProvider>) -> Self {
+ 		Self {
+-			cache: RwLock::default(),
++			write_cache: RwLock::default(),
++			read_cache: RwLock::default(),
+ 			date_provider,
+ 		}
+ 	}
+ 
+-	pub async fn try_get_token<F, E, Loader>(
++	pub async fn try_get_write_token<F, E, Loader>(
+ 		&self,
+ 		key: &BlobWriteTokenKey,
+ 		loader: Loader,
+@@ -43,28 +51,57 @@ impl BlobAccessTokenCache {
+ 		Loader: FnOnce() -> F + Send,
+ 	{
+ 		{
+-			let cache = self.cache.read().expect("poisoned lock");
+-			let maybe_value = cache.get(key);
+-			if let Some(value) = maybe_value {
++			let cache = self.write_cache.read().expect("poisoned lock");
++			if let Some(value) = cache.get(key) {
++				if can_be_used_for_another_request(value, self.date_provider.as_ref()) {
++					return Ok(value.clone());
++				}
++			}
++		}
++		let loaded = loader().await?;
++		self.insert_write(key.to_owned(), loaded.clone());
++		Ok(loaded)
++	}
++
++	pub async fn try_get_read_token<F, E, Loader>(
++		&self,
++		key: &BlobReadArchiveTokenKey,
++		loader: Loader,
++	) -> Result<BlobServerAccessInfo, E>
++	where
++		F: Future<Output = Result<BlobServerAccessInfo, E>> + Sized + Send,
++		Loader: FnOnce() -> F + Send,
++	{
++		{
++			let cache = self.read_cache.read().expect("poisoned lock");
++			if let Some(value) = cache.get(key) {
+ 				if can_be_used_for_another_request(value, self.date_provider.as_ref()) {
+ 					return Ok(value.clone());
+ 				}
+ 			}
+ 		}
+ 		let loaded = loader().await?;
+-		self.insert(key.to_owned(), loaded.clone());
++		self.insert_read(key.to_owned(), loaded.clone());
+ 		Ok(loaded)
+ 	}
+ 
+-	fn insert(&self, key: BlobWriteTokenKey, value: BlobServerAccessInfo) {
+-		let mut cache = self.cache.write().expect("poisoned lock");
+-		// someone else might have inserted something while we were loading.
+-		// we're just replacing + dropping that value.
++	fn insert_write(&self, key: BlobWriteTokenKey, value: BlobServerAccessInfo) {
++		let mut cache = self.write_cache.write().expect("poisoned lock");
++		let _previous = cache.insert(key, value);
++	}
++
++	fn insert_read(&self, key: BlobReadArchiveTokenKey, value: BlobServerAccessInfo) {
++		let mut cache = self.read_cache.write().expect("poisoned lock");
+ 		let _previous = cache.insert(key, value);
+ 	}
+ 
+-	pub fn evict(&self, key: &BlobWriteTokenKey) {
+-		let mut cache = self.cache.write().expect("poisoned lock");
++	pub fn evict_write(&self, key: &BlobWriteTokenKey) {
++		let mut cache = self.write_cache.write().expect("poisoned lock");
++		cache.remove(key);
++	}
++
++	pub fn evict_read(&self, key: &BlobReadArchiveTokenKey) {
++		let mut cache = self.read_cache.write().expect("poisoned lock");
+ 		cache.remove(key);
+ 	}
+ }
+@@ -81,7 +118,8 @@ fn can_be_used_for_another_request(
+ #[cfg(test)]
+ mod tests {
+ 	use crate::blobs::blob_access_token_cache::{
+-		can_be_used_for_another_request, BlobAccessTokenCache, BlobWriteTokenKey,
++		can_be_used_for_another_request, BlobAccessTokenCache, BlobReadArchiveTokenKey,
++		BlobWriteTokenKey,
+ 	};
+ 	use crate::date::date_provider::stub::DateProviderStub;
+ 	use crate::date::DateTime;
+@@ -102,8 +140,8 @@ mod tests {
+ 			expires: DateTime::from_millis(10),
+ 			..create_test_entity()
+ 		};
+-		cache.insert(key.clone(), test_token.clone());
+-		let loaded = cache.try_get_token(&key, || async {
++		cache.insert_write(key.clone(), test_token.clone());
++		let loaded = cache.try_get_write_token(&key, || async {
+ 			// helps type inference
+ 			if true {
+ 				panic!("should be in cache");
+@@ -124,7 +162,7 @@ mod tests {
+ 			..create_test_entity()
+ 		};
+ 		let test_clone = test_token.clone();
+-		let loaded = cache.try_get_token(&key, || async move {
++		let loaded = cache.try_get_write_token(&key, || async move {
+ 			Ok(test_clone) as Result<BlobServerAccessInfo, ()>
+ 		});
+ 		assert_eq!(test_token, loaded.await.unwrap())
+@@ -141,13 +179,13 @@ mod tests {
+ 			expires: DateTime::from_millis(10),
+ 			..create_test_entity()
+ 		};
+-		cache.insert(key.clone(), expired_token.clone());
++		cache.insert_write(key.clone(), expired_token.clone());
+ 		let new_token = BlobServerAccessInfo {
+ 			expires: DateTime::from_millis(30),
+ 			..create_test_entity()
+ 		};
+ 		let expected_token = new_token.clone();
+-		let loaded = cache.try_get_token(&key, || async move {
++		let loaded = cache.try_get_write_token(&key, || async move {
+ 			Ok(new_token) as Result<BlobServerAccessInfo, ()>
+ 		});
+ 		assert_eq!(expected_token, loaded.await.unwrap())
+@@ -183,9 +221,41 @@ mod tests {
+ 			expires: DateTime::from_millis(10),
+ 			..create_test_entity()
+ 		};
+-		cache.insert(key.clone(), expired_token.clone());
++		cache.insert_write(key.clone(), expired_token.clone());
++
++		cache.evict_write(&key);
++		assert!(!cache.write_cache.read().unwrap().contains_key(&key));
++	}
++
++	#[tokio::test]
++	async fn get_read_cached() {
++		let cache = BlobAccessTokenCache::new(Arc::new(DateProviderStub::new(0)));
++		let key = BlobReadArchiveTokenKey::new(&GeneratedId("archive1".to_owned()));
++		let test_token = BlobServerAccessInfo {
++			expires: DateTime::from_millis(10),
++			..create_test_entity()
++		};
++		cache.insert_read(key.clone(), test_token.clone());
++		let loaded = cache.try_get_read_token(&key, || async {
++			if true {
++				panic!("should be in cache");
++			}
++			Err(())
++		});
++		assert_eq!(test_token, loaded.await.unwrap())
++	}
++
++	#[test]
++	fn evict_read() {
++		let cache = BlobAccessTokenCache::new(Arc::new(DateProviderStub::new(20)));
++		let key = BlobReadArchiveTokenKey::new(&GeneratedId("archive1".to_owned()));
++		let token = BlobServerAccessInfo {
++			expires: DateTime::from_millis(10),
++			..create_test_entity()
++		};
++		cache.insert_read(key.clone(), token);
+ 
+-		cache.evict(&key);
+-		assert!(!cache.cache.read().unwrap().contains_key(&key));
++		cache.evict_read(&key);
++		assert!(!cache.read_cache.read().unwrap().contains_key(&key));
+ 	}
+ }
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
+index a432c6c057..9afadcb854 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
+@@ -1,7 +1,9 @@
+-use crate::blobs::blob_access_token_cache::{BlobAccessTokenCache, BlobWriteTokenKey};
++use crate::blobs::blob_access_token_cache::{
++	BlobAccessTokenCache, BlobReadArchiveTokenKey, BlobWriteTokenKey,
++};
+ use crate::date::DateProvider;
+ use crate::entities::generated::storage::{
+-	BlobAccessTokenPostIn, BlobServerAccessInfo, BlobWriteData,
++	BlobAccessTokenPostIn, BlobReadData, BlobServerAccessInfo, BlobWriteData,
+ };
+ use crate::services::generated::storage::BlobAccessTokenService;
+ #[cfg_attr(test, mockall_double::double)]
+@@ -67,17 +69,59 @@ impl BlobAccessTokenFacade {
+ 		};
+ 
+ 		self.cache
+-			.try_get_token(
++			.try_get_write_token(
+ 				&BlobWriteTokenKey::new(owner_group_id, archive_data_type),
+ 				loader,
+ 			)
+ 			.await
+ 	}
+ 
++	/// Requests an archive-level token for reading blob elements.
++	/// Mirrors TS `BlobAccessTokenFacade.requestReadTokenArchive()`.
++	pub async fn request_read_token_archive(
++		&self,
++		archive_id: &GeneratedId,
++	) -> Result<BlobServerAccessInfo, ApiCallError> {
++		let archive_id_clone = archive_id.clone();
++		let loader = move || async move {
++			let post_in = BlobAccessTokenPostIn {
++				_format: 0,
++				archiveDataType: None,
++				write: None,
++				read: Some(BlobReadData {
++					_id: Some(CustomId(
++						BASE64_URL_SAFE_NO_PAD
++							.encode(self.randomizer_facade.generate_random_array::<4>()),
++					)),
++					archiveId: archive_id_clone,
++					instanceListId: None,
++					instanceIds: vec![],
++				}),
++			};
++			self.service_executor
++				.post::<BlobAccessTokenService>(post_in, ExtraServiceParams::default())
++				.await
++				.map(|r| r.blobAccessInfo)
++		};
++
++		self.cache
++			.try_get_read_token(
++				&BlobReadArchiveTokenKey::new(archive_id),
++				loader,
++			)
++			.await
++	}
++
+ 	/// Remove a given write token from the cache.
+ 	#[allow(unused)]
+ 	pub fn evict_access_token(&self, key: &BlobWriteTokenKey) {
+-		self.cache.evict(key);
++		self.cache.evict_write(key);
++	}
++
++	/// Remove a read archive token from the cache.
++	pub fn evict_archive_token(&self, archive_id: &GeneratedId) {
++		self.cache
++			.evict_read(&BlobReadArchiveTokenKey::new(archive_id));
+ 	}
+ }
+ #[cfg(test)]
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade.rs
+index 992e87c3df..d60df5f13e 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_facade.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade.rs
+@@ -1,5 +1,5 @@
+ use crate::bindings::rest_client;
+-use crate::bindings::rest_client::HttpMethod::POST;
++use crate::bindings::rest_client::HttpMethod::{GET, POST};
+ use crate::bindings::rest_client::RestClient;
+ use crate::bindings::rest_client::{RestClientOptions, RestResponse};
+ use crate::bindings::suspendable_rest_client::SuspensionBehavior;
+@@ -10,8 +10,8 @@ use crate::blobs::binary_blob_wrapper_serializer::{
+ use crate::blobs::blob_access_token_cache::BlobWriteTokenKey;
+ #[cfg_attr(test, mockall_double::double)]
+ use crate::blobs::blob_access_token_facade::BlobAccessTokenFacade;
+-use crate::entities::generated::storage::{BlobGetIn, BlobPostOut, BlobServerAccessInfo};
+-use crate::entities::generated::sys::BlobReferenceTokenWrapper;
++use crate::entities::generated::storage::{BlobGetIn, BlobId, BlobPostOut, BlobServerAccessInfo};
++use crate::entities::generated::sys::{Blob, BlobReferenceTokenWrapper};
+ use crate::entities::Entity;
+ use crate::instance_mapper::InstanceMapper;
+ use crate::json_element::RawEntity;
+@@ -21,8 +21,10 @@ use crate::tutanota_constants::{
+ 	ArchiveDataType, MAX_BLOB_SERVICE_BYTES, MAX_UNENCRYPTED_BLOB_SIZE_BYTES,
+ };
+ use crate::type_model_provider::TypeModelProvider;
++use crate::util::BASE64_EXT;
++use crate::CustomId;
+ use crate::GeneratedId;
+-use crate::{crypto, ApiCallError, HeadersProvider};
++use crate::{crypto, ApiCallError, HeadersProvider, TypeRef};
+ use base64::Engine;
+ use crypto::sha256;
+ use crypto_primitives::aes::InitializationVector;
+@@ -71,6 +73,324 @@ impl BlobFacade {
+ 		}
+ 	}
+ 
++	/// Load a blob element from a blob server, trying each server URL in order.
++	/// On `NotAuthorizedError` (HTTP 403), the token is evicted and the request
++	/// is retried once with a fresh token.
++	/// Mirrors TS `EntityRestClient.loadMultipleBlobElements()` +
++	/// `doBlobRequestWithRetry()` + `tryServers()`.
++	pub async fn load_blob_element(
++		&self,
++		type_ref: &TypeRef,
++		archive_id: &GeneratedId,
++		element_id: &GeneratedId,
++		instance_list_id: &GeneratedId,
++	) -> Result<Vec<u8>, ApiCallError> {
++		let type_model = self
++			.type_model_provider
++			.resolve_client_type_ref(type_ref)
++			.ok_or_else(|| {
++				ApiCallError::internal(format!("type model not found for {}", type_ref))
++			})?;
++		let path = format!(
++			"/rest/{app}/{name}/{list_id}",
++			app = type_ref.app,
++			name = type_model.name.to_lowercase(),
++			list_id = instance_list_id,
++		);
++
++		let mut attempt = 0u8;
++		loop {
++			let access_info = self
++				.blob_access_token_facade
++				.request_read_token_archive(archive_id)
++				.await?;
++
++			let query_params = self.create_read_query_params(
++				&access_info.blobAccessToken,
++				element_id,
++				type_model.version,
++			);
++			let encoded_query_params = rest_client::encode_query_params(query_params);
++
++			let mut last_retriable_error: Option<ApiCallError> = None;
++			let mut got_unauthorized = false;
++
++			for server in &access_info.servers {
++				let url = format!("{}{}{}", server.url, path, encoded_query_params);
++				let maybe_response = self
++					.rest_client
++					.request_binary(
++						url,
++						GET,
++						RestClientOptions {
++							body: None,
++							headers: Default::default(),
++							suspension_behavior: None,
++						},
++					)
++					.await;
++
++				match maybe_response {
++					Ok(RestResponse {
++						status: 200 | 201,
++						body,
++						..
++					}) => {
++						return body.ok_or_else(|| {
++							ApiCallError::internal("Empty response from blob server".to_owned())
++						});
++					},
++					Ok(RestResponse { status, .. }) => {
++						match HttpError::from_http_response(status, &Default::default()) {
++							Ok(HttpError::NotAuthorizedError) => {
++								got_unauthorized = true;
++								break;
++							},
++							Ok(
++								error @ (HttpError::ConnectionError
++								| HttpError::InternalServerError
++								| HttpError::NotFoundError),
++							) => {
++								last_retriable_error = Some(error.into());
++								continue;
++							},
++							Ok(error) => return Err(error.into()),
++							Err(error) => return Err(error),
++						}
++					},
++					Err(error) => {
++						last_retriable_error = Some(error.into());
++						continue;
++					},
++				}
++			}
++
++			if got_unauthorized && attempt == 0 {
++				self.blob_access_token_facade
++					.evict_archive_token(archive_id);
++				attempt += 1;
++				continue;
++			}
++
++			return Err(last_retriable_error.unwrap_or_else(|| {
++				if got_unauthorized {
++					HttpError::NotAuthorizedError.into()
++				} else {
++					ApiCallError::InternalSdkError {
++						error_message: "no blob servers available".to_owned(),
++					}
++				}
++			}));
++		}
++	}
++
++	/// Download every blob that makes up the binary content of an entity
++	/// (typically a [`crate::entities::generated::tutanota::File`] attachment),
++	/// decrypt each blob with the supplied `session_key`, and concatenate the
++	/// pieces in the order of `blobs`. Mirrors TS
++	/// `BlobFacade.downloadAndDecrypt()` for the common case where all blobs
++	/// of one instance share a single archive — which is what file
++	/// attachments always look like in practice.
++	///
++	/// `archive_data_type` is the kind of payload these blobs represent
++	/// ([`ArchiveDataType::Attachments`] for files,
++	/// [`ArchiveDataType::MailDetails`] for mail bodies). It scopes the read
++	/// token request.
++	pub async fn download_and_decrypt(
++		&self,
++		archive_data_type: ArchiveDataType,
++		blobs: &[Blob],
++		session_key: &GenericAesKey,
++	) -> Result<Vec<u8>, ApiCallError> {
++		let _ = archive_data_type; // archive token is keyed on archive id only
++		if blobs.is_empty() {
++			return Ok(Vec::new());
++		}
++
++		// Group blobs by archive id — TS does the same because in general
++		// nothing prevents an instance's blobs from being spread across
++		// archives, even if file attachments don't do that today.
++		let mut by_archive: HashMap<&GeneratedId, Vec<&Blob>> = HashMap::new();
++		for blob in blobs {
++			by_archive.entry(&blob.archiveId).or_default().push(blob);
++		}
++
++		let mut encrypted_by_id: HashMap<GeneratedId, Vec<u8>> = HashMap::new();
++		for (archive_id, archive_blobs) in by_archive {
++			let mut attempt = 0u8;
++			let downloaded = loop {
++				match self
++					.download_blobs_of_one_archive(archive_id, &archive_blobs)
++					.await
++				{
++					Ok(map) => break map,
++					Err(ApiCallError::ServerResponseError {
++						source: HttpError::NotAuthorizedError,
++					}) if attempt == 0 => {
++						self.blob_access_token_facade
++							.evict_archive_token(archive_id);
++						attempt += 1;
++						continue;
++					},
++					Err(e) => return Err(e),
++				}
++			};
++			encrypted_by_id.extend(downloaded);
++		}
++
++		let mut out = Vec::new();
++		for blob in blobs {
++			let encrypted = encrypted_by_id.remove(&blob.blobId).ok_or_else(|| {
++				ApiCallError::internal(format!(
++					"Server did not return blob {} of archive {}",
++					blob.blobId, blob.archiveId
++				))
++			})?;
++			let decrypted = session_key.decrypt_data(&encrypted).map_err(|e| {
++				ApiCallError::internal(format!(
++					"Failed to decrypt blob {}: {e}",
++					blob.blobId
++				))
++			})?;
++			out.extend_from_slice(&decrypted);
++		}
++		Ok(out)
++	}
++
++	/// Download (encrypted) every blob of a single archive in one request,
++	/// returning a map from blob id to the still-encrypted bytes. Mirrors
++	/// TS `BlobFacade.downloadBlobsOfOneArchive()`. The caller is
++	/// responsible for the per-blob decryption.
++	async fn download_blobs_of_one_archive(
++		&self,
++		archive_id: &GeneratedId,
++		blobs: &[&Blob],
++	) -> Result<HashMap<GeneratedId, Vec<u8>>, ApiCallError> {
++		let access_info = self
++			.blob_access_token_facade
++			.request_read_token_archive(archive_id)
++			.await?;
++
++		// Aggregate types with `cardinality: One` on `_id` need a random
++		// CustomId even though the field is never read by the server — same
++		// pattern as `BlobAccessTokenFacade::request_write_token` does for
++		// `BlobWriteData._id`.
++		let random_blob_id_aggregate_id = || {
++			CustomId(
++				base64::engine::general_purpose::URL_SAFE_NO_PAD
++					.encode(self.randomizer_facade.generate_random_array::<4>()),
++			)
++		};
++		let blob_get_in = BlobGetIn {
++			_format: 0,
++			archiveId: archive_id.clone(),
++			blobId: None,
++			blobIds: blobs
++				.iter()
++				.map(|b| BlobId {
++					_id: Some(random_blob_id_aggregate_id()),
++					blobId: b.blobId.clone(),
++				})
++				.collect(),
++		};
++		let parsed = self
++			.instance_mapper
++			.serialize_entity(blob_get_in)
++			.map_err(|e| {
++				ApiCallError::internal(format!("Failed to serialize BlobGetIn: {e}"))
++			})?;
++		let raw = self
++			.json_serializer
++			.serialize(&BlobGetIn::type_ref(), parsed)?;
++		let body = serde_json::to_vec(&raw).map_err(|e| {
++			ApiCallError::internal(format!("Failed to JSON-encode BlobGetIn: {e}"))
++		})?;
++
++		let query_params = self.create_query_params_multiple_blobs(access_info.blobAccessToken);
++		let encoded = rest_client::encode_query_params(query_params);
++
++		let mut last_error: Option<ApiCallError> = None;
++		let mut got_unauthorized = false;
++		for server in &access_info.servers {
++			let url = format!("{}{}{}", server.url, BLOB_SERVICE_REST_PATH, encoded);
++			let response = self
++				.rest_client
++				.request_binary(
++					url,
++					GET,
++					RestClientOptions {
++						body: Some(body.clone()),
++						headers: Default::default(),
++						suspension_behavior: None,
++					},
++				)
++				.await;
++
++			match response {
++				Ok(RestResponse {
++					status: 200 | 201,
++					body: Some(bytes),
++					..
++				}) => return parse_multiple_blobs_response(&bytes),
++				Ok(RestResponse {
++					status: 200 | 201,
++					body: None,
++					..
++				}) => {
++					last_error = Some(ApiCallError::internal(
++						"Empty 2xx response from blob server".to_owned(),
++					));
++					continue;
++				},
++				Ok(RestResponse { status, .. }) => {
++					match HttpError::from_http_response(status, &Default::default()) {
++						Ok(HttpError::NotAuthorizedError) => {
++							got_unauthorized = true;
++							break;
++						},
++						Ok(
++							err @ (HttpError::ConnectionError
++							| HttpError::InternalServerError
++							| HttpError::NotFoundError),
++						) => {
++							last_error = Some(err.into());
++							continue;
++						},
++						Ok(other) => return Err(other.into()),
++						Err(e) => return Err(e),
++					}
++				},
++				Err(e) => {
++					last_error = Some(e.into());
++					continue;
++				},
++			}
++		}
++
++		if got_unauthorized {
++			Err(HttpError::NotAuthorizedError.into())
++		} else {
++			Err(last_error.unwrap_or_else(|| ApiCallError::InternalSdkError {
++				error_message: "no blob servers available".to_owned(),
++			}))
++		}
++	}
++
++	fn create_read_query_params(
++		&self,
++		blob_access_token: &str,
++		element_id: &GeneratedId,
++		entity_version: u64,
++	) -> Vec<(String, String)> {
++		let mut query_params: Vec<(String, String)> = vec![
++			("ids".into(), element_id.to_string()),
++			("blobAccessToken".into(), blob_access_token.to_owned()),
++		];
++		let auth_headers = self.auth_headers_provider.provide_headers(entity_version);
++		query_params.extend(auth_headers);
++		query_params
++	}
++
+ 	/// Encrypt and upload multiple file_data (i.e. files) in minimum amount of requests to
+ 	/// the BlobService. Multiple blobs are serialized into one or more binary chunk(s) using
+ 	/// {@link serialize_new_blobs_in_binary_chunks} and uploaded in less requests.
+@@ -482,6 +802,78 @@ impl BlobFacade {
+ 	}
+ }
+ 
++/// Parse the binary response of a multi-blob `GET /rest/storage/blobservice`
++/// request. Mirrors TS `parseMultipleBlobsResponse`. Wire format:
++///
++/// ```text
++///   [4 bytes: blob count (big-endian i32)]
++///   per blob:
++///     [9 bytes: blob id (raw bytes, encoded as base64ext for the GeneratedId)]
++///     [6 bytes: blob hash — ignored on read]
++///     [4 bytes: blob size (big-endian i32)]
++///     [`blob size` bytes: encrypted blob payload]
++/// ```
++pub(crate) fn parse_multiple_blobs_response(
++	data: &[u8],
++) -> Result<HashMap<GeneratedId, Vec<u8>>, ApiCallError> {
++	if data.len() < 4 {
++		return Err(ApiCallError::internal(
++			"Blob response too short to contain blob count".to_owned(),
++		));
++	}
++	let blob_count = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
++	if blob_count < 0 {
++		return Err(ApiCallError::internal(format!(
++			"Invalid blob count: {blob_count}"
++		)));
++	}
++	let blob_count = blob_count as usize;
++	if blob_count == 0 {
++		return Ok(HashMap::new());
++	}
++
++	let mut result = HashMap::with_capacity(blob_count);
++	let mut offset = 4usize;
++	while offset < data.len() {
++		if offset + 19 > data.len() {
++			return Err(ApiCallError::internal(
++				"Blob response truncated inside an entry header".to_owned(),
++			));
++		}
++		let blob_id_bytes = &data[offset..offset + 9];
++		let blob_id = GeneratedId(BASE64_EXT.encode(blob_id_bytes));
++		// 6-byte hash at offset+9..offset+15 — not used on the read path
++		let blob_size = i32::from_be_bytes([
++			data[offset + 15],
++			data[offset + 16],
++			data[offset + 17],
++			data[offset + 18],
++		]);
++		if blob_size < 0 {
++			return Err(ApiCallError::internal(format!(
++				"Invalid blob size: {blob_size}"
++			)));
++		}
++		let data_start = offset + 19;
++		let data_end = data_start + blob_size as usize;
++		if data_end > data.len() {
++			return Err(ApiCallError::internal(format!(
++				"Blob response truncated: declared size {blob_size}, remaining {}",
++				data.len() - data_start
++			)));
++		}
++		result.insert(blob_id, data[data_start..data_end].to_vec());
++		offset = data_end;
++	}
++	if result.len() != blob_count {
++		return Err(ApiCallError::internal(format!(
++			"Blob response declared {blob_count} blob(s) but parsed {}",
++			result.len()
++		)));
++	}
++	Ok(result)
++}
++
+ /// The ".chunks" function returns an empty iterator if the data length
+ /// is zero, we prefer an iterator with one empty element.
+ fn chunk_data<'slice>(
+@@ -1142,6 +1534,235 @@ mod tests {
+ 		);
+ 	}
+ 
++	fn make_read_token_mock(archive_id: GeneratedId, token: &str) -> MockBlobAccessTokenFacade {
++		let blob_access_info = BlobServerAccessInfo {
++			blobAccessToken: token.to_string(),
++			servers: vec![BlobServerUrl {
++				url: "https://w1.api.tuta.com".to_string(),
++				..create_test_entity()
++			}],
++			..create_test_entity()
++		};
++		let mut facade = MockBlobAccessTokenFacade::default();
++		facade
++			.expect_request_read_token_archive()
++			.with(predicate::eq(archive_id))
++			.return_once(move |_| Ok(blob_access_info));
++		facade
++	}
++
++	#[tokio::test]
++	async fn load_blob_element_success() {
++		let archive_id = GeneratedId("archId".to_owned());
++		let element_id = GeneratedId("elemId".to_owned());
++		let expected_body = b"decrypted blob data".to_vec();
++
++		let mut mock_token = make_read_token_mock(archive_id.clone(), "accessToken123");
++		mock_token.expect_evict_archive_token().never();
++
++		let expected_body_clone = expected_body.clone();
++		let list_id_check = archive_id.clone();
++		let element_id_check = element_id.clone();
++		let mut rest_client = MockRestClient::default();
++		rest_client
++			.expect_request_binary()
++			.times(1)
++			.withf(move |url, method, _opts| {
++				let uri = url.parse::<Uri>().unwrap();
++				assert_eq!("w1.api.tuta.com", uri.host().unwrap());
++				assert!(
++					uri.path().contains(&format!("/maildetailsblob/{list_id_check}")),
++					"path should contain list_id, got: {}",
++					uri.path()
++				);
++				let query = uri.query().unwrap_or("");
++				assert!(
++					query.contains(&format!("ids={element_id_check}")),
++					"query should contain ids param, got: {query}"
++				);
++				assert!(
++					query.contains("blobAccessToken=accessToken123"),
++					"query should contain blobAccessToken, got: {query}"
++				);
++				assert_eq!(&GET, method);
++				true
++			})
++			.return_once(move |_, _, _| {
++				Ok(RestResponse {
++					status: 200,
++					headers: HashMap::new(),
++					body: Some(expected_body_clone),
++				})
++			});
++
++		let type_model_provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"http://localhost:9000".to_string(),
++		));
++		let blob_facade = BlobFacade {
++			blob_access_token_facade: mock_token,
++			rest_client: Arc::new(rest_client),
++			randomizer_facade: RandomizerFacade::from_core(DeterministicRng(42)),
++			auth_headers_provider: Arc::new(HeadersProvider { access_token: None }),
++			instance_mapper: Arc::new(InstanceMapper::new(type_model_provider.clone())),
++			json_serializer: Arc::new(JsonSerializer::new(type_model_provider.clone())),
++			type_model_provider,
++		};
++
++		use crate::entities::generated::tutanota::MailDetailsBlob;
++		let result = blob_facade
++			.load_blob_element(&MailDetailsBlob::type_ref(), &archive_id, &element_id, &archive_id)
++			.await
++			.expect("should succeed");
++		assert_eq!(expected_body, result);
++	}
++
++	#[tokio::test]
++	async fn load_blob_element_retries_on_403() {
++		let archive_id = GeneratedId("archId".to_owned());
++		let element_id = GeneratedId("elemId".to_owned());
++		let expected_body = b"retry succeeded".to_vec();
++
++		// first token returns 403, second succeeds
++		let access_info_first = BlobServerAccessInfo {
++			blobAccessToken: "expiredToken".to_string(),
++			servers: vec![BlobServerUrl {
++				url: "https://w1.api.tuta.com".to_string(),
++				..create_test_entity()
++			}],
++			..create_test_entity()
++		};
++		let access_info_second = BlobServerAccessInfo {
++			blobAccessToken: "freshToken".to_string(),
++			servers: vec![BlobServerUrl {
++				url: "https://w1.api.tuta.com".to_string(),
++				..create_test_entity()
++			}],
++			..create_test_entity()
++		};
++
++		let mut mock_token = MockBlobAccessTokenFacade::default();
++		mock_token
++			.expect_request_read_token_archive()
++			.times(1)
++			.with(predicate::eq(archive_id.clone()))
++			.return_once(move |_| Ok(access_info_first));
++		mock_token
++			.expect_request_read_token_archive()
++			.times(1)
++			.with(predicate::eq(archive_id.clone()))
++			.return_once(move |_| Ok(access_info_second));
++		mock_token
++			.expect_evict_archive_token()
++			.times(1)
++			.with(predicate::eq(archive_id.clone()))
++			.return_const(());
++
++		let expected_body_clone = expected_body.clone();
++		let mut rest_client = MockRestClient::default();
++		// First request: 403 (NotAuthorizedError)
++		rest_client
++			.expect_request_binary()
++			.times(1)
++			.withf(|url, _, _| url.contains("expiredToken"))
++			.return_once(|_, _, _| {
++				Ok(RestResponse {
++					status: 403,
++					headers: HashMap::new(),
++					body: None,
++				})
++			});
++		// Second request (after retry): 200
++		rest_client
++			.expect_request_binary()
++			.times(1)
++			.withf(|url, _, _| url.contains("freshToken"))
++			.return_once(move |_, _, _| {
++				Ok(RestResponse {
++					status: 200,
++					headers: HashMap::new(),
++					body: Some(expected_body_clone),
++				})
++			});
++
++		let type_model_provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"http://localhost:9000".to_string(),
++		));
++		let blob_facade = BlobFacade {
++			blob_access_token_facade: mock_token,
++			rest_client: Arc::new(rest_client),
++			randomizer_facade: RandomizerFacade::from_core(DeterministicRng(42)),
++			auth_headers_provider: Arc::new(HeadersProvider { access_token: None }),
++			instance_mapper: Arc::new(InstanceMapper::new(type_model_provider.clone())),
++			json_serializer: Arc::new(JsonSerializer::new(type_model_provider.clone())),
++			type_model_provider,
++		};
++
++		use crate::entities::generated::tutanota::MailDetailsBlob;
++		let result = blob_facade
++			.load_blob_element(&MailDetailsBlob::type_ref(), &archive_id, &element_id, &archive_id)
++			.await
++			.expect("should succeed after retry");
++		assert_eq!(expected_body, result);
++	}
++
++	#[tokio::test]
++	async fn load_blob_element_returns_server_error_without_retry() {
++		// When all servers return retriable errors (Connection/InternalServer/NotFound)
++		// without a 403, the original error is returned without retrying — matching TS
++		// `tryServers` which throws the last error, and `doBlobRequestWithRetry` which
++		// only retries on `NotAuthorizedError`.
++		let archive_id = GeneratedId("archId".to_owned());
++		let element_id = GeneratedId("elemId".to_owned());
++
++		let mut mock_token = make_read_token_mock(archive_id.clone(), "token");
++		// Critical: token must NOT be evicted, retry must NOT happen.
++		mock_token.expect_evict_archive_token().never();
++
++		let mut rest_client = MockRestClient::default();
++		rest_client
++			.expect_request_binary()
++			.times(1)
++			.return_once(|_, _, _| {
++				Ok(RestResponse {
++					status: 500,
++					headers: HashMap::new(),
++					body: None,
++				})
++			});
++
++		let type_model_provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"http://localhost:9000".to_string(),
++		));
++		let blob_facade = BlobFacade {
++			blob_access_token_facade: mock_token,
++			rest_client: Arc::new(rest_client),
++			randomizer_facade: RandomizerFacade::from_core(DeterministicRng(42)),
++			auth_headers_provider: Arc::new(HeadersProvider { access_token: None }),
++			instance_mapper: Arc::new(InstanceMapper::new(type_model_provider.clone())),
++			json_serializer: Arc::new(JsonSerializer::new(type_model_provider.clone())),
++			type_model_provider,
++		};
++
++		use crate::entities::generated::tutanota::MailDetailsBlob;
++		let err = blob_facade
++			.load_blob_element(&MailDetailsBlob::type_ref(), &archive_id, &element_id, &archive_id)
++			.await
++			.expect_err("should return error");
++
++		match err {
++			ApiCallError::ServerResponseError {
++				source: HttpError::InternalServerError,
++			} => {},
++			other => panic!("expected InternalServerError, got: {other:?}"),
++		}
++	}
++
+ 	#[test]
+ 	fn encode_query_params_works() {
+ 		assert_eq!("", encode_query_params([("", ""); 0]));
+@@ -1168,6 +1789,86 @@ mod tests {
+ 		assert_eq!("", encode_query_params(HashMap::<String, &[u8]>::default()))
+ 	}
+ 
++	/// Helper for the parser tests: lays out one entry's worth of bytes in
++	/// the exact wire format we expect from the blob server.
++	fn make_blob_entry(blob_id_bytes: [u8; 9], data: &[u8]) -> Vec<u8> {
++		let mut buf = Vec::with_capacity(19 + data.len());
++		buf.extend_from_slice(&blob_id_bytes);
++		buf.extend_from_slice(&[0u8; 6]); // 6-byte hash, unused on read
++		buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
++		buf.extend_from_slice(data);
++		buf
++	}
++
++	#[test]
++	fn parse_multiple_blobs_response_empty() {
++		let mut data = Vec::new();
++		data.extend_from_slice(&0i32.to_be_bytes());
++		let result = parse_multiple_blobs_response(&data).unwrap();
++		assert!(result.is_empty());
++	}
++
++	#[test]
++	fn parse_multiple_blobs_response_single() {
++		let mut data = Vec::new();
++		data.extend_from_slice(&1i32.to_be_bytes());
++		let payload = b"hello blob world";
++		data.extend_from_slice(&make_blob_entry([1, 2, 3, 4, 5, 6, 7, 8, 9], payload));
++		let result = parse_multiple_blobs_response(&data).unwrap();
++		assert_eq!(result.len(), 1);
++		let id = GeneratedId(BASE64_EXT.encode([1u8, 2, 3, 4, 5, 6, 7, 8, 9]));
++		assert_eq!(result.get(&id).unwrap().as_slice(), payload);
++	}
++
++	#[test]
++	fn parse_multiple_blobs_response_multiple_preserves_ids() {
++		let mut data = Vec::new();
++		data.extend_from_slice(&3i32.to_be_bytes());
++		data.extend_from_slice(&make_blob_entry([0u8; 9], b"first"));
++		data.extend_from_slice(&make_blob_entry([0xFFu8; 9], b"second is bigger"));
++		data.extend_from_slice(&make_blob_entry([0x42u8; 9], &vec![0xAB; 1024]));
++		let result = parse_multiple_blobs_response(&data).unwrap();
++		assert_eq!(result.len(), 3);
++		assert_eq!(
++			result.get(&GeneratedId(BASE64_EXT.encode([0u8; 9]))).unwrap().as_slice(),
++			b"first"
++		);
++		assert_eq!(
++			result.get(&GeneratedId(BASE64_EXT.encode([0xFFu8; 9]))).unwrap().as_slice(),
++			b"second is bigger"
++		);
++		assert_eq!(
++			result.get(&GeneratedId(BASE64_EXT.encode([0x42u8; 9]))).unwrap().len(),
++			1024
++		);
++	}
++
++	#[test]
++	fn parse_multiple_blobs_response_rejects_short_buffer() {
++		let err = parse_multiple_blobs_response(&[0u8, 0, 0]).unwrap_err();
++		assert!(format!("{err}").contains("too short"));
++	}
++
++	#[test]
++	fn parse_multiple_blobs_response_rejects_truncated_entry() {
++		let mut data = Vec::new();
++		data.extend_from_slice(&1i32.to_be_bytes());
++		data.extend_from_slice(&[0u8; 9]); // blob id
++		data.extend_from_slice(&[0u8; 6]); // hash
++		data.extend_from_slice(&100i32.to_be_bytes()); // declares 100 bytes…
++		data.extend_from_slice(&[0u8; 10]); // …but only 10 are there
++		let err = parse_multiple_blobs_response(&data).unwrap_err();
++		assert!(format!("{err}").contains("truncated"));
++	}
++
++	#[test]
++	fn parse_multiple_blobs_response_rejects_negative_count() {
++		let mut data = Vec::new();
++		data.extend_from_slice(&(-5i32).to_be_bytes());
++		let err = parse_multiple_blobs_response(&data).unwrap_err();
++		assert!(format!("{err}").contains("Invalid blob count"));
++	}
++
+ 	#[test]
+ 	fn chunk_data_works() {
+ 		const CHUNK_SIZE: usize = 1024;

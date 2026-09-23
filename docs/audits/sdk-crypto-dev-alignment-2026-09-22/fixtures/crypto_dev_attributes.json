@@ -1,0 +1,98 @@
+[
+  {
+    "version": 2,
+    "instance_type": "tutanota/97",
+    "derivation_context": "tutanota/97",
+    "path": "105",
+    "plaintext": "Sujet écrit — 🦀",
+    "ciphertext": "AgAHRERERERERERERERERERERE5a6iRLNTMQB/hEGeuFg0Dtd+y2wyyMdbZLrUa5nJggJvKqaqYGn2C1teJx6Y+wi8fUbML1k4/P",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jSUsfMTA1",
+    "compatible_with_359": false
+  },
+  {
+    "version": 2,
+    "instance_type": "tutanota/97",
+    "derivation_context": "tutanota/97",
+    "path": "105",
+    "plaintext": "",
+    "ciphertext": "AgAHRERERERERERERERERERERJ0vgEHoK6BLr02iIJD/qqoSa0MfjmJ5HW2wKKyM56RwEBa1WA==",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jSUsfMTA1",
+    "compatible_with_359": false
+  },
+  {
+    "version": 2,
+    "instance_type": "tutanota/97",
+    "derivation_context": "tutanota/97",
+    "path": "111/sender-id/94",
+    "plaintext": "Alice",
+    "ciphertext": "AgAHRERERERERERERERERERERFxD6SJalfC5zMeaKljTzaHflqa+xu1OicjTQ7yoFeoPAPTx0fxvEug=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jSUsfMTExL3NlbmRlci1pZC85NA==",
+    "compatible_with_359": false
+  },
+  {
+    "version": 2,
+    "instance_type": "tutanota/1290",
+    "derivation_context": "tutanota/1298",
+    "path": "1297/details-id/1256",
+    "plaintext": "draft",
+    "ciphertext": "AgAHRERERERERERERERERERERFXMvBlemjOEbYs2mMd/h8tp+LvPXjznm6iFu70ySwdAxvuGXm+3uaI=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jSUsfMTMwNS9kZXRhaWxzLWlkLzEyNTY=",
+    "compatible_with_359": false
+  },
+  {
+    "version": 3,
+    "instance_type": "tutanota/97",
+    "derivation_context": "tutanota/97",
+    "path": "105",
+    "plaintext": "Sujet écrit — 🦀",
+    "ciphertext": "A0REREREREREREREREREREQoE6G8RIOZSQ5cUHphQId1oHnVJyAVX70zC4xBYVG7tnYS0KAEoCiN+loNqmtDo6XkzahpV9Glqg==",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jU0sfMTA1",
+    "compatible_with_359": true
+  },
+  {
+    "version": 3,
+    "instance_type": "tutanota/97",
+    "derivation_context": "tutanota/97",
+    "path": "105",
+    "plaintext": "",
+    "ciphertext": "A0RERERERERERERERERERET7ZsvZJDRIJKsh4ZFDjbkA7uedrCdFPAyVdc3ixbRsrFDq6Kg=",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jU0sfMTA1",
+    "compatible_with_359": true
+  },
+  {
+    "version": 3,
+    "instance_type": "tutanota/97",
+    "derivation_context": "tutanota/97",
+    "path": "111/sender-id/94",
+    "plaintext": "Alice",
+    "ciphertext": "A0REREREREREREREREREREQ6CqK6VSNa4D9RGJZToH6vIkXLafyuCBm3kbkrBxgj4Jv1PBH+DpGc",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jU0sfMTExL3NlbmRlci1pZC85NA==",
+    "compatible_with_359": true
+  },
+  {
+    "version": 3,
+    "instance_type": "tutanota/1290",
+    "derivation_context": "tutanota/1298",
+    "path": "1297/details-id/1256",
+    "plaintext": "draft",
+    "ciphertext": "A0RERERERERERERERERERES5QvOSmckGNGe0P/QVuvz2c+1KpYrxdjqUPD7KnBtOb2gebWpHZ3VG",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "associated_data": "YXR0cmlidXRlRW5jU0sfMTMwNS9kZXRhaWxzLWlkLzEyNTY=",
+    "compatible_with_359": false
+  }
+]

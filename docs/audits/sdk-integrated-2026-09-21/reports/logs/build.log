@@ -1,0 +1,32 @@
+   Compiling util v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/runs/official-359/tutanota-release-359.260904.0/bridge/tuta-repo/tuta-sdk/rust/util)
+   Compiling crypto-primitives v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/runs/official-359/tutanota-release-359.260904.0/bridge/tuta-repo/tuta-sdk/rust/crypto-primitives)
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/runs/official-359/tutanota-release-359.260904.0/bridge/tuta-repo/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-repo/tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-repo/tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+   Compiling tutabridge-tuta v0.1.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/runs/official-359/tutanota-release-359.260904.0/bridge/crates/tuta)
+   Compiling tutabridge-core v0.1.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/runs/official-359/tutanota-release-359.260904.0/bridge/crates/bridge)
+   Compiling tutabridge v0.1.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-sdk-integrated-pk5ws8zd/runs/official-359/tutanota-release-359.260904.0/bridge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.48s
+COMMAND: cargo build -p tutabridge

@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-09-21T18:17:51.210424+00:00",
+  "bridge_ref": "b375f1c275b8162ee8f04008144e3dd2c72a10d6",
+  "minimum": [
+    359,
+    260904,
+    0
+  ],
+  "selected": null,
+  "candidates": [
+    {
+      "tag": "tutanota-release-359.260904.0",
+      "sha": "aea5846b93a1412451e885bf99002401c3b087e8",
+      "version": [
+        359,
+        260904,
+        0
+      ],
+      "checks": {
+        "patch": "passed",
+        "build": "passed",
+        "bridge_tests": "passed",
+        "sdk_tests": "passed",
+        "network": "passed",
+        "protocol": "failed"
+      },
+      "status": "protocol_failed",
+      "error": "protocol.log: exit 101"
+    }
+  ],
+  "prototype_manifest_sha256": "f32ddd15250bb006ab5555eba321c157bddaa1299e15cf6459fbc1aad74127ca"
+}

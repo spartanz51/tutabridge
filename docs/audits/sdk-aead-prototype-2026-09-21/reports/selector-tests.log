@@ -1,0 +1,17 @@
+test_known_limitation_does_not_hide_regression (test_prototype.CapabilityTests.test_known_limitation_does_not_hide_regression) ... ok
+test_missing_and_inconclusive_checks_block_selection (test_prototype.CapabilityTests.test_missing_and_inconclusive_checks_block_selection) ... ok
+test_new_support_and_strict_requirement (test_prototype.CapabilityTests.test_new_support_and_strict_requirement) ... ok
+test_test_execution_must_be_proven (test_prototype.CapabilityTests.test_test_execution_must_be_proven) ... ok
+test_unassessed_baseline_requires_a_positive_result (test_prototype.CapabilityTests.test_unassessed_baseline_requires_a_positive_result) ... ok
+test_all_fail_no_candidate (test_prototype.SelectionTests.test_all_fail_no_candidate) ... ok
+test_annotated_tag_uses_peeled_commit (test_prototype.SelectionTests.test_annotated_tag_uses_peeled_commit) ... ok
+test_canonical_numeric_order_and_minimum (test_prototype.SelectionTests.test_canonical_numeric_order_and_minimum) ... ok
+test_every_gate_is_required (test_prototype.SelectionTests.test_every_gate_is_required) ... ok
+test_fallback_to_next_passing_release_and_stop (test_prototype.SelectionTests.test_fallback_to_next_passing_release_and_stop) ... ok
+test_incomplete_checks_do_not_pass (test_prototype.SelectionTests.test_incomplete_checks_do_not_pass) ... ok
+test_limit_and_tag_filter (test_prototype.SelectionTests.test_limit_and_tag_filter) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.000s
+
+OK

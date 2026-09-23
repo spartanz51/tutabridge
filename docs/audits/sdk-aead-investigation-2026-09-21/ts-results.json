@@ -1,0 +1,42 @@
+{
+  "commit": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+  "results": [
+    {
+      "version": 3,
+      "path": "105",
+      "rust_ciphertext_decrypted": true,
+      "wrong_field_rejected": true,
+      "wrong_type_rejected": true,
+      "wrong_key_rejected": true,
+      "corrupt_tag_rejected": true
+    },
+    {
+      "version": 3,
+      "path": "3/aggregateId/9/anotherCustomId/17",
+      "rust_ciphertext_decrypted": true,
+      "wrong_field_rejected": true,
+      "wrong_type_rejected": true,
+      "wrong_key_rejected": true,
+      "corrupt_tag_rejected": true
+    },
+    {
+      "version": 2,
+      "path": "105",
+      "rust_ciphertext_decrypted": true,
+      "wrong_field_rejected": true,
+      "wrong_type_rejected": true,
+      "wrong_key_rejected": true,
+      "corrupt_tag_rejected": true
+    },
+    {
+      "version": 2,
+      "path": "3/aggregateId/9/anotherCustomId/17",
+      "rust_ciphertext_decrypted": true,
+      "wrong_field_rejected": true,
+      "wrong_type_rejected": true,
+      "wrong_key_rejected": true,
+      "corrupt_tag_rejected": true
+    }
+  ],
+  "scope": "Actual upstream InstanceDecryptor, ValueDecryptor, key derivation, ciphertext parser and AEAD code; original vendored SJCL and BLAKE3. Utility/error/randomness shims; no whole-app execution."
+}

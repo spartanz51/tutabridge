@@ -1,0 +1,14 @@
+{
+  "passed": 343,
+  "failed": 0,
+  "ignored": 1,
+  "suites": {
+    "sdk_lib": 336,
+    "aead_writes": 4,
+    "interactive_session_test": 3
+  },
+  "new_unit_tests": 3,
+  "ts_path_vectors": 7,
+  "ts_attribute_vectors": 8,
+  "server_tested": false
+}

@@ -1,0 +1,25 @@
+[package]
+name = "tutabridge-tuta"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+[features]
+testing = ["tuta-sdk/testing"]
+[dependencies]
+tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk" }
+crypto-primitives = { path = "../../tuta-repo/tuta-sdk/rust/crypto-primitives" }
+base64 = "0.22"
+thiserror = "2"
+futures = "0.3"
+log = "0.4"
+serde_json = "1"
+serde = "1"
+num_enum = "0.7"
+rand = "0.8"
+rand_core = "0.6"
+form_urlencoded = "1"
+tokio = { version = "1.43", features = ["full"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+[dev-dependencies]
+tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["testing"] }
+async-trait = "0.1"

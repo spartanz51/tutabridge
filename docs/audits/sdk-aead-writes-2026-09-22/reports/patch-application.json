@@ -1,0 +1,26 @@
+[
+  {
+    "label": "full_series_359",
+    "base": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "passed": true,
+    "tree": "c72f2f8f6ab02df7bf69379546b9a7a734df246a"
+  },
+  {
+    "label": "full_series_master",
+    "base": "46270557c251d1a31157d72e0aaf0cc63bb33ecf",
+    "passed": true,
+    "tree": "a1211b382bf53b358b52b545a89fcb1d3f723304"
+  },
+  {
+    "label": "attributes_on_read_prototype",
+    "base": "48579032ee69fe8c497089d9fb83bf661311df8f",
+    "passed": true,
+    "tree": "96f407d9925818618180518ea4bfb55483588a8a"
+  },
+  {
+    "label": "entity_writes_on_attributes",
+    "base": "96f407d9925818618180518ea4bfb55483588a8a",
+    "passed": true,
+    "tree": "c72f2f8f6ab02df7bf69379546b9a7a734df246a"
+  }
+]

@@ -1,0 +1,344 @@
+diff --git a/tuta-sdk/rust/sdk/src/lib.rs b/tuta-sdk/rust/sdk/src/lib.rs
+index ee91fae427..0749454ca5 100644
+--- a/tuta-sdk/rust/sdk/src/lib.rs
++++ b/tuta-sdk/rust/sdk/src/lib.rs
+@@ -72,6 +72,8 @@ mod key_cache;
+ mod key_loader_facade;
+ mod logging;
+ pub mod login;
++mod session_ext;
++pub use session_ext::SessionInitResponse;
+ mod mail_facade;
+ mod metamodel;
+ 
+@@ -335,66 +337,15 @@ impl Sdk {
+ 		mail_address: &str,
+ 		passphrase: &str,
+ 	) -> Result<Arc<LoggedInSdk>, LoginError> {
+-		let headers_provider = Arc::new(HeadersProvider::new(None));
+-		let entity_facade = Arc::new(EntityFacadeImpl::new(
+-			self.type_model_provider.clone(),
+-			RandomizerFacade::from_core(rand_core::OsRng),
+-		));
+-
+-		let service_executor = ServiceExecutor::new(
+-			headers_provider.clone(),
+-			None,
+-			entity_facade,
+-			self.instance_mapper.clone(),
+-			self.json_serializer.clone(),
+-			self.rest_client.clone(),
+-			self.type_model_provider.clone(),
+-			self.base_url.to_string(),
+-		);
+-		let salt_get_input: SaltData = SaltData {
+-			_format: 0,
+-			mailAddress: mail_address.to_string(),
+-		};
+-		let salt_return = service_executor
+-			.get::<SaltService>(salt_get_input, ExtraServiceParams::default())
+-			.await?;
+-
+-		let Ok(salt) = salt_return.salt.try_into() else {
+-			return Err(LoginError::InvalidKey {
+-				error_message: "salt has wrong length".to_string(),
++		let response = self.initiate_session(mail_address, passphrase).await?;
++		if !response.challenges.is_empty() {
++			return Err(LoginError::ApiCall {
++				source: ApiCallError::internal(
++					"second factor authentication required: use initiate_session, authenticate_with_second_factor_totp, then login".to_string(),
++				),
+ 			});
+-		};
+-
+-		let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+-		let access_key = Aes256Key::generate(&randomizer);
+-		let user_passphrase_key = derive_user_passphrase_key(KdfType::Argon2id, passphrase, salt);
+-		let auth_verifier = create_auth_verifier(user_passphrase_key.clone());
+-		let session_data: CreateSessionData = CreateSessionData {
+-			_format: 0,
+-			accessKey: Some(access_key.as_bytes().to_vec()),
+-			authToken: None,
+-			authVerifier: Some(auth_verifier),
+-			clientIdentifier: "Linux Desktop".to_string(),
+-			mailAddress: Some(mail_address.to_string()),
+-			recoverCodeVerifier: None,
+-			user: None,
+-		};
+-		let encrypted_passphrase_key = GenericAesKey::Aes256(access_key).encrypt_key(
+-			&GenericAesKey::Aes256(user_passphrase_key),
+-			InitializationVector::generate(&randomizer),
+-		);
+-		let session_data_response = service_executor
+-			.post::<SessionService>(session_data, ExtraServiceParams::default())
+-			.await?;
+-
+-		self.login(Credentials {
+-			login: mail_address.to_string(),
+-			user_id: session_data_response.user.clone(),
+-			access_token: session_data_response.accessToken.clone(),
+-			encrypted_passphrase_key,
+-			credential_type: CredentialType::Internal,
+-		})
+-		.await
++		}
++		self.login(response.credentials).await
+ 	}
+ 
+ 	#[must_use]
+diff --git a/tuta-sdk/rust/sdk/src/login/login_facade.rs b/tuta-sdk/rust/sdk/src/login/login_facade.rs
+index 24375e16fa..7a4df0aa9e 100644
+--- a/tuta-sdk/rust/sdk/src/login/login_facade.rs
++++ b/tuta-sdk/rust/sdk/src/login/login_facade.rs
+@@ -187,7 +187,7 @@ impl LoginFacade {
+ }
+ 
+ /// Generate session id tuple from access token
+-fn parse_session_id(access_token: &str) -> Result<IdTupleCustom, DecodeError> {
++pub(crate) fn parse_session_id(access_token: &str) -> Result<IdTupleCustom, DecodeError> {
+ 	let bytes = BASE64_URL_SAFE_NO_PAD.decode(access_token)?;
+ 	if bytes.len() < GENERATED_ID_BYTES_LENGTH {
+ 		return Err(DecodeError::InvalidLength(bytes.len()));
+diff --git a/tuta-sdk/rust/sdk/src/session_ext.rs b/tuta-sdk/rust/sdk/src/session_ext.rs
+new file mode 100644
+index 0000000000..dba14432b0
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/session_ext.rs
+@@ -0,0 +1,212 @@
++//! Interactive session creation, kept separate from SDK construction.
++use super::*;
++use crate::entities::generated::sys::{
++	Challenge, CreateSessionReturn, SecondFactorAuthData, SecondFactorAuthDeleteData,
++	SecondFactorAuthGetData,
++};
++use crate::login::login_facade::parse_session_id;
++use crate::services::generated::sys::SecondFactorAuthService;
++use crate::tutanota_constants::SecondFactorType;
++
++/// Response returned by [`Sdk::initiate_session`]. When `challenges` is empty
++/// the caller can directly pass `credentials` to [`Sdk::login`]. Otherwise
++/// the second factor challenges must first be resolved.
++#[derive(uniffi::Record, Clone)]
++pub struct SessionInitResponse {
++	pub credentials: Credentials,
++	pub challenges: Vec<Challenge>,
++}
++
++#[uniffi::export]
++impl Sdk {
++	pub async fn initiate_session(
++		&self,
++		mail_address: &str,
++		passphrase: &str,
++	) -> Result<SessionInitResponse, LoginError> {
++		// Mirror TS `LoginFacade.createSession`, which normalizes the mail
++		// address before deriving the salt and creating the session.
++		let mail_address = mail_address.trim().to_lowercase();
++		let service_executor = self.make_unauthenticated_service_executor();
++		let salt_return = service_executor
++			.get::<SaltService>(
++				SaltData {
++					_format: 0,
++					mailAddress: mail_address.clone(),
++				},
++				ExtraServiceParams::default(),
++			)
++			.await?;
++
++		let Ok(salt) = salt_return.salt.try_into() else {
++			return Err(LoginError::InvalidKey {
++				error_message: "salt has wrong length".to_string(),
++			});
++		};
++
++		let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
++		let access_key = Aes256Key::generate(&randomizer);
++		let user_passphrase_key = derive_user_passphrase_key(KdfType::Argon2id, passphrase, salt);
++		let auth_verifier = create_auth_verifier(user_passphrase_key.clone());
++		let session_data = CreateSessionData {
++			_format: 0,
++			accessKey: Some(access_key.as_bytes().to_vec()),
++			authToken: None,
++			authVerifier: Some(auth_verifier),
++			clientIdentifier: "Linux Desktop".to_string(),
++			mailAddress: Some(mail_address.clone()),
++			recoverCodeVerifier: None,
++			user: None,
++		};
++		let encrypted_passphrase_key = GenericAesKey::Aes256(access_key).encrypt_key(
++			&GenericAesKey::Aes256(user_passphrase_key),
++			InitializationVector::generate(&randomizer),
++		);
++		let session_return: CreateSessionReturn = service_executor
++			.post::<SessionService>(session_data, ExtraServiceParams::default())
++			.await?;
++
++		Ok(SessionInitResponse {
++			credentials: Credentials {
++				login: mail_address,
++				user_id: session_return.user.clone(),
++				access_token: session_return.accessToken.clone(),
++				encrypted_passphrase_key,
++				credential_type: CredentialType::Internal,
++			},
++			challenges: session_return.challenges,
++		})
++	}
++
++	pub async fn authenticate_with_second_factor_totp(
++		&self,
++		access_token: &str,
++		totp_code: u32,
++	) -> Result<(), LoginError> {
++		let session_id =
++			parse_session_id(access_token).map_err(|e| LoginError::InvalidAccessToken {
++				error_message: format!("{e}"),
++			})?;
++
++		let service_executor = self.make_unauthenticated_service_executor();
++		let auth_data = SecondFactorAuthData {
++			_format: 0,
++			r#type: Some(SecondFactorType::Totp.into()),
++			otpCode: Some(i64::from(totp_code)),
++			session: Some(session_id),
++			u2f: None,
++			webauthn: None,
++		};
++		service_executor
++			.post::<SecondFactorAuthService>(auth_data, ExtraServiceParams::default())
++			.await?;
++		Ok(())
++	}
++
++	pub async fn is_second_factor_pending(&self, access_token: &str) -> Result<bool, LoginError> {
++		let service_executor = self.make_unauthenticated_service_executor();
++		let result = service_executor
++			.get::<SecondFactorAuthService>(
++				SecondFactorAuthGetData {
++					_format: 0,
++					accessToken: access_token.to_string(),
++				},
++				ExtraServiceParams::default(),
++			)
++			.await?;
++		Ok(result.secondFactorPending)
++	}
++
++	pub async fn cancel_create_session(&self, access_token: &str) -> Result<(), LoginError> {
++		let session_id =
++			parse_session_id(access_token).map_err(|e| LoginError::InvalidAccessToken {
++				error_message: format!("{e}"),
++			})?;
++
++		let service_executor = self.make_unauthenticated_service_executor();
++		let result = service_executor
++			.delete::<SecondFactorAuthService>(
++				SecondFactorAuthDeleteData {
++					_format: 0,
++					session: session_id,
++				},
++				ExtraServiceParams::default(),
++			)
++			.await;
++		match result {
++			Ok(())
++			// The session may already be gone (deleted by a concurrent
++			// successful authentication) or locked. Mirror TS
++			// `LoginFacade.cancelCreateSession`, which treats both as success.
++			| Err(ApiCallError::ServerResponseError {
++				source: HttpError::NotFoundError | HttpError::LockedError,
++			}) => Ok(()),
++			Err(e) => Err(e.into()),
++		}
++	}
++}
++impl Sdk {
++	fn make_unauthenticated_service_executor(&self) -> ServiceExecutor {
++		let headers_provider = Arc::new(HeadersProvider::new(None));
++		let entity_facade = Arc::new(EntityFacadeImpl::new(
++			self.type_model_provider.clone(),
++			RandomizerFacade::from_core(rand_core::OsRng),
++		));
++		ServiceExecutor::new(
++			headers_provider,
++			None,
++			entity_facade,
++			self.instance_mapper.clone(),
++			self.json_serializer.clone(),
++			self.rest_client.clone(),
++			self.type_model_provider.clone(),
++			self.base_url.clone(),
++		)
++	}
++}
++#[cfg(test)]
++mod tests {
++	use super::*;
++	use crate::bindings::{file_client::MockFileClient, rest_client::MockRestClient};
++
++	#[test]
++	fn second_factor_type_values_match_typescript() {
++		assert_eq!(i64::from(SecondFactorType::U2f), 0);
++		assert_eq!(i64::from(SecondFactorType::Totp), 1);
++		assert_eq!(i64::from(SecondFactorType::Webauthn), 2);
++	}
++
++	fn make_test_sdk() -> Sdk {
++		Sdk::new(
++			"http://localhost:9000".to_string(),
++			Arc::new(MockRestClient::default()),
++			Arc::new(MockFileClient::default()),
++		)
++	}
++
++	#[tokio::test]
++	async fn authenticate_with_second_factor_totp_rejects_invalid_access_token() {
++		let sdk = make_test_sdk();
++		let err = sdk
++			.authenticate_with_second_factor_totp("not-base64!", 123_456)
++			.await
++			.expect_err("must reject invalid access token");
++		assert!(
++			matches!(err, LoginError::InvalidAccessToken { .. }),
++			"expected InvalidAccessToken, got: {err:?}",
++		);
++	}
++
++	#[tokio::test]
++	async fn cancel_create_session_rejects_invalid_access_token() {
++		let sdk = make_test_sdk();
++		let err = sdk
++			.cancel_create_session("not-base64!")
++			.await
++			.expect_err("must reject invalid access token");
++		assert!(
++			matches!(err, LoginError::InvalidAccessToken { .. }),
++			"expected InvalidAccessToken, got: {err:?}",
++		);
++	}
++}
+diff --git a/tuta-sdk/rust/sdk/src/tutanota_constants.rs b/tuta-sdk/rust/sdk/src/tutanota_constants.rs
+index ce814385c8..3791601ab2 100644
+--- a/tuta-sdk/rust/sdk/src/tutanota_constants.rs
++++ b/tuta-sdk/rust/sdk/src/tutanota_constants.rs
+@@ -82,6 +82,20 @@ pub enum EncryptionAuthStatus {
+ 
+ pub const SYSTEM_GROUP_MAIL_ADDRESS: &str = "system@tutanota.de";
+ 
++/// Type of a second factor for two factor authentication.
++#[derive(Debug, Clone, IntoPrimitive, TryFromPrimitive, PartialEq, Eq)]
++#[repr(i64)]
++pub enum SecondFactorType {
++	/// Legacy U2F second factor.
++	U2f = 0,
++
++	/// Time-based one time password (TOTP).
++	Totp = 1,
++
++	/// WebAuthn second factor.
++	Webauthn = 2,
++}
++
+ /// Used for identifying the protocol version used for encrypting a session key.
+ #[derive(Debug, Clone, TryFromPrimitive, PartialEq, Eq)]
+ #[repr(i64)]

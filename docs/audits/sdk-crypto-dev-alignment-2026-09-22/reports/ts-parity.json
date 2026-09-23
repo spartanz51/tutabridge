@@ -1,0 +1,9 @@
+{
+  "commit": "e1ad5f9351946e3c9f96558adcbc154c384eb489",
+  "path_vectors": 7,
+  "attribute_vectors": 8,
+  "ordinary_v3_byte_identical": true,
+  "v2_incompatible": true,
+  "draft_context_changed": true,
+  "scope": "Pinned upstream TS paths, canonicalization, KDF and AEAD executed with deterministic random and utility adapters; no whole application or server."
+}

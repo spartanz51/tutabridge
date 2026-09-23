@@ -1,0 +1,102 @@
+{
+  "timestamp": "2026-09-21T21:47:46.992698+00:00",
+  "bridge_ref": "b375f1c275b8162ee8f04008144e3dd2c72a10d6",
+  "minimum": [
+    359,
+    260904,
+    0
+  ],
+  "selected": {
+    "tag": "tutanota-release-359.260904.0",
+    "sha": "aea5846b93a1412451e885bf99002401c3b087e8",
+    "version": [
+      359,
+      260904,
+      0
+    ],
+    "checks": {
+      "patch": "passed",
+      "build": "passed",
+      "bridge_tests": "passed",
+      "sdk_tests": "passed",
+      "network": "passed",
+      "protocol": "passed"
+    },
+    "status": "candidate_for_review",
+    "capabilities": {
+      "aead_v2": "supported",
+      "optional_empty": "supported",
+      "aead_v3": "supported"
+    },
+    "capability_comparison": {
+      "passed": true,
+      "errors": [],
+      "regressions": [],
+      "missing_required": [],
+      "known_limitations": [],
+      "newly_verified": [
+        "aead_v2"
+      ],
+      "improvements": [
+        "aead_v3"
+      ]
+    },
+    "baseline_reference": {
+      "sdk": "aea5846b93a1412451e885bf99002401c3b087e8",
+      "bridge": "b375f1c275b8162ee8f04008144e3dd2c72a10d6",
+      "overlay": "sdk-ts-parity-2026-09-21; five patches and bridge adapter",
+      "scope": "Previous tested prototype, not production or an authenticated live account"
+    },
+    "baseline_sha256": "daa4c5bae7045a14cc8092dac2975f3b2d14df5d4ce61e0fb5c2852f08065142",
+    "automatic_promotion_allowed": false,
+    "cargo_lock_sha256": "63fbe0132326c7687ef8d0526d9e6a4ebe0c947eb20e429df018e73e2f3a3a68"
+  },
+  "candidates": [
+    {
+      "tag": "tutanota-release-359.260904.0",
+      "sha": "aea5846b93a1412451e885bf99002401c3b087e8",
+      "version": [
+        359,
+        260904,
+        0
+      ],
+      "checks": {
+        "patch": "passed",
+        "build": "passed",
+        "bridge_tests": "passed",
+        "sdk_tests": "passed",
+        "network": "passed",
+        "protocol": "passed"
+      },
+      "status": "candidate_for_review",
+      "capabilities": {
+        "aead_v2": "supported",
+        "optional_empty": "supported",
+        "aead_v3": "supported"
+      },
+      "capability_comparison": {
+        "passed": true,
+        "errors": [],
+        "regressions": [],
+        "missing_required": [],
+        "known_limitations": [],
+        "newly_verified": [
+          "aead_v2"
+        ],
+        "improvements": [
+          "aead_v3"
+        ]
+      },
+      "baseline_reference": {
+        "sdk": "aea5846b93a1412451e885bf99002401c3b087e8",
+        "bridge": "b375f1c275b8162ee8f04008144e3dd2c72a10d6",
+        "overlay": "sdk-ts-parity-2026-09-21; five patches and bridge adapter",
+        "scope": "Previous tested prototype, not production or an authenticated live account"
+      },
+      "baseline_sha256": "daa4c5bae7045a14cc8092dac2975f3b2d14df5d4ce61e0fb5c2852f08065142",
+      "automatic_promotion_allowed": false,
+      "cargo_lock_sha256": "63fbe0132326c7687ef8d0526d9e6a4ebe0c947eb20e429df018e73e2f3a3a68"
+    }
+  ],
+  "prototype_manifest_sha256": "88f4744339cbdebc08587d21af05d5b150775d32197948216ec8ddb4f377d20b"
+}

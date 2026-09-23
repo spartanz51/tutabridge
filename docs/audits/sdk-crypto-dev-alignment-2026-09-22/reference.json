@@ -1,0 +1,111 @@
+{
+  "repository": "https://github.com/tutao/tutanota",
+  "ref": "crypto/dev",
+  "commit": "e1ad5f9351946e3c9f96558adcbc154c384eb489",
+  "files": [
+    {
+      "path": "src/platform-kit/instance-pipeline/EncryptionContextPath.ts",
+      "sha256": "95cff2c279486b326dff8963ab1283c5d1b46bd685d8fe794f7c3f4281b43b89"
+    },
+    {
+      "path": "src/platform-kit/instance-pipeline/CryptoMapper.ts",
+      "sha256": "83f0f1cf5c96bd2a1620289aa130116b7e7c7a8e49ce5655e1869774ed880c84"
+    },
+    {
+      "path": "src/platform-kit/base/base-crypto/InstanceKeyFacade.ts",
+      "sha256": "840389fc3802160abe8e97ce76fd651e68806c5a7bd781f049bee0e968b8d625"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/SymmetricCipherVersion.ts",
+      "sha256": "d6beb91dc97ca7f7478bb4ee42187de029b3f4bfedb941a6696d9c59e03f2326"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/ParsedCiphertext.ts",
+      "sha256": "ca49f6186997db31419a4ecaea10192b768e87eb09c5f292944c600583cf54a3"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/SymmetricKeyDeriver.ts",
+      "sha256": "074746917358de05cc9a34a6004aac4c9a7b6ed619391d857b0808be6771b485"
+    },
+    {
+      "path": "src/platform-kit/crypto/instance-pipeline-crypto/encryption/SubKeyProvider.ts",
+      "sha256": "046ca6390604b7af1682629ba5674e4319ae7592f0e81b8db6ac645f487a6e8c"
+    },
+    {
+      "path": "src/platform-kit/crypto/instance-pipeline-crypto/decryption/InstanceDecryptor.ts",
+      "sha256": "806d43ff8c2f4695046e22f3d26adf2d5566cb57f7bb22065c9905e58faea89d"
+    },
+    {
+      "path": "src/platform-kit/crypto/instance-pipeline-crypto/decryption/ValueDecryptor.ts",
+      "sha256": "49bc4839bdcbe9157fbd806c05ac423057e811f8b50087db17fa848c2f9bf901"
+    },
+    {
+      "path": "src/platform-kit/network/ServiceExecutor.ts",
+      "sha256": "ff7e7a14a8f8fa7de1026826af3b61696f76dca5084b19e48eabea3f63e6794b"
+    },
+    {
+      "path": "src/platform-kit/network/EntityRestClient.ts",
+      "sha256": "f978267899672f1c3d18f878908e9d0811b66890e6a9b377ae106512b55c4797"
+    },
+    {
+      "path": "test/tests/instance-pipeline/EncryptionContextPathTest.ts",
+      "sha256": "a081385a3dc30028f53304c305b5ae10fa99abf73d8c2b700f715627ddd7ec62"
+    },
+    {
+      "path": "tuta-sdk/rust/crypto-primitives/src/aead_facade.rs",
+      "sha256": "bf8f09917ea3038c0751c6476e5acd6b317164faa2743331a1a439fe36ebcc92"
+    },
+    {
+      "path": "tuta-sdk/rust/sdk/src/entities/entity_facade.rs",
+      "sha256": "f3098088b4bce8cb98872a1e53ae525b7451dc7f98598c15aa4591373200b651"
+    },
+    {
+      "path": "tuta-sdk/rust/sdk/src/metamodel.rs",
+      "sha256": "7b004a2072315aa1ee42578794a71f9dfcd267a55cd97c382078df8604d0424c"
+    },
+    {
+      "path": "LICENSE.txt",
+      "sha256": "947215ddc328843b76022d5b77e1ca3b1152301778d33e24491e5064e92fc6cf"
+    },
+    {
+      "path": "src/platform-kit/instance-pipeline/ValueAssociatedData.ts",
+      "sha256": "312c65390adb09a3bb3119d1116e4e9dde04538301be72db7cecd3a73fb9681f"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/AssociatedData.ts",
+      "sha256": "5be17e25c1a76385d84adbaa80684cdc175e1db94431f81333bee01a1dfa5ce0"
+    },
+    {
+      "path": "src/platform-kit/crypto/CryptoTypes.ts",
+      "sha256": "f6169d894b651e03a3f10a542abf6ba6a0b15dadf4226d1e08f4ec141bd6e943"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/AeadFacade.ts",
+      "sha256": "17080e888d4755f45fa805a72ceddb323a474a420031b3f51f9eaa79f35f1431"
+    },
+    {
+      "path": "src/platform-kit/instance-pipeline/InstancePipeline.ts",
+      "sha256": "37b6347781159ea99c95d8de288f31b28a6fc2a758d33f4abe86b1bd91b9e3d2"
+    },
+    {
+      "path": "src/platform-kit/instance-pipeline/CanonicalId.ts",
+      "sha256": "bd51907df7a29a310facf8df23525ede5a1ef472bf4422ffaaffc78615409d75"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/AesKey.ts",
+      "sha256": "8b1a0450106e6c93ff1c061fd6ac649df661e825aa84a330c3a0bbad72f1fc9e"
+    },
+    {
+      "path": "src/platform-kit/crypto/encryption/symmetric/SymmetricCipherUtils.ts",
+      "sha256": "b865ba7100e479490cc2b532527689ce639050b7f0fa5b9ce0b9fc7b6751d4fb"
+    },
+    {
+      "path": "src/platform-kit/crypto/hashes/Blake3.ts",
+      "sha256": "016a27082e79c24f5e5cff0f5d2aa4b38318f103b98860daf48e7becd9fd1fcf"
+    },
+    {
+      "path": "src/platform-kit/instance-pipeline/InstanceTypeContext.ts",
+      "sha256": "9d31a8fc08b944e492d01ed4bbe448a4761624829d24f62e30ed2e671c8b88f0"
+    }
+  ]
+}

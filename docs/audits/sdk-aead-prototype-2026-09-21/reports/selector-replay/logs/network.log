@@ -1,0 +1,3 @@
+Checking https://app.tuta.com/rest/base/applicationtypesservice with cv=359.260904.0, v=2
+PASS: Tuta accepts the pinned SDK version 359.260904.0 (HTTP 200).
+COMMAND: /opt/homebrew/opt/python@3.14/bin/python3.14 /Users/anthony/GIT/tutabridge/docs/audits/sdk-aead-prototype-2026-09-21/network_probe.py /private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/selector-run/tutanota-release-359.260904.0/bridge

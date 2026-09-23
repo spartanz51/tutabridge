@@ -1,0 +1,7 @@
+tutasdk.swift:2057: func initiateSession(mailAddress: String, passphrase: String, clientIdentifier: String) async throws  -> SessionInitResponse
+tutasdk.swift:2180: open func initiateSession(mailAddress: String, passphrase: String, clientIdentifier: String)async throws  -> SessionInitResponse {
+tutasdk.swift:36008: public struct SessionInitResponse {
+tutasdk.swift:36040: public struct FfiConverterTypeSessionInitResponse: FfiConverterRustBuffer {
+de/tutao/tutasdk/tutasdk.kt:4744: suspend fun `initiateSession`(`mailAddress`: kotlin.String, `passphrase`: kotlin.String, `clientIdentifier`: kotlin.String): SessionInitResponse
+de/tutao/tutasdk/tutasdk.kt:4907: override suspend fun `initiateSession`(`mailAddress`: kotlin.String, `passphrase`: kotlin.String, `clientIdentifier`: kotlin.String) : SessionInitResponse {
+de/tutao/tutasdk/tutasdk.kt:22102: data class SessionInitResponse (

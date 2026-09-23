@@ -1,0 +1,22 @@
+[
+  {
+    "patch": "01-batch.patch",
+    "applies_independently": true
+  },
+  {
+    "patch": "02-blob-reads.patch",
+    "applies_independently": true
+  },
+  {
+    "patch": "03-interactive-session.patch",
+    "applies_independently": true
+  },
+  {
+    "patch": "04-parse-raw.patch",
+    "applies_independently": true
+  },
+  {
+    "patch": "05-optional-empty.patch",
+    "applies_independently": true
+  }
+]

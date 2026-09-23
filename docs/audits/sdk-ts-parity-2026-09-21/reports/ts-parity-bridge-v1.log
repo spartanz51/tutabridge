@@ -1,0 +1,485 @@
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/bridge/tuta-repo/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-repo/tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-repo/tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+   Compiling tutabridge-tuta v0.1.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/bridge/crates/tuta)
+   Compiling tutabridge-core v0.1.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/bridge/crates/bridge)
+warning: method `add_details` is never used
+    --> crates/bridge/src/imap/session.rs:2014:12
+     |
+1991 |     impl MockBackend {
+     |     ---------------- method in this implementation
+...
+2014 |         fn add_details(&self, element_id: &str, details: MailDetails) {
+     |            ^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tutabridge-core` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.43s
+     Running unittests src/lib.rs (/Users/anthony/GIT/tutabridge/target/debug/deps/tutabridge_core-fb9ea3c4f422a215)
+
+running 362 tests
+test backup::tests::date_stamp_is_sortable_and_correct ... ok
+test backup::tests::sanitize_replaces_windows_illegal_chars ... ok
+test backup::tests::sanitize_keeps_unicode_and_safe_chars ... ok
+test backup::tests::sanitize_empty_becomes_underscore ... ok
+test backup::tests::sanitize_strips_trailing_dot_and_space ... ok
+test backup::tests::folder_dir_nests_on_imap_delimiter ... ok
+test backup::tests::folder_dir_sanitizes_each_segment ... ok
+test config::tests::test_default_config ... ok
+test bridge::tests::parse_model_version_extracts_first_entry_version ... ok
+test body_cache::tests::replacing_an_entry_updates_accounting ... ok
+test body_cache::tests::insert_and_cached_roundtrip ... ok
+test body_cache::tests::update_rfc2822_preserves_details_and_reaccounts ... ok
+test body_cache::tests::single_oversized_entry_is_kept ... ok
+test body_cache::tests::evicts_coldest_first_when_over_budget ... ok
+test body_cache::tests::get_without_local_store_is_none_on_miss ... ok
+test event_handler::tests::bucket_ignores_mail_set_entry_update_operations ... ok
+test event_handler::tests::bucket_empty_batch ... ok
+test config::tests::test_parse_config_missing_email ... ok
+test config::tests::test_parse_minimal_config ... ok
+test config::tests::test_parse_full_config ... ok
+test config::tests::test_parse_config_extra_fields_ignored ... ok
+test config::tests::test_mcp_permission_parses_and_gates_body ... ok
+test event_handler::tests::bucket_collects_mail_events_in_order ... ok
+test event_handler::tests::bucket_ignores_other_applications ... ok
+test config::tests::test_parse_config_invalid_port_type ... ok
+test config::tests::test_mcp_permission_defaults_disabled ... ok
+test event_handler::tests::bucket_ignores_unknown_type_ids_in_tutanota ... ok
+test config::tests::test_config_roundtrip ... ok
+test event_handler::tests::bucket_marks_folder_list_dirty_on_mail_set_event ... ok
+test event_handler::tests::bucket_mixed_batch ... ok
+test event_handler::tests::bucket_routes_mail_create_to_its_own_bucket ... ok
+test event_handler::tests::bucket_splits_mail_set_entry_creates_and_deletes ... ok
+test governed_client::tests::backoff_escalates_then_caps_without_header ... ok
+test governed_client::tests::backoff_escalation_resets_on_server_value ... ok
+test governed_client::tests::backoff_honors_and_clamps_server_seconds ... ok
+test governed_client::tests::throttle_delay_classifies_responses ... ok
+test fs_private::tests::write_private_creates_0600 ... ok
+test fs_private::tests::create_dir_all_private_creates_0700 ... ok
+test fs_private::tests::write_private_tightens_existing_file ... ok
+test imap::search::tests::match_body_without_index_never_matches ... ok
+test imap::search::tests::match_body_uses_fts_context ... ok
+test imap::search::tests::match_boolean_composition ... ok
+test imap::search::tests::collect_body_terms_finds_nested_terms ... ok
+test imap::search::tests::match_dates ... ok
+test imap::search::tests::match_flags_consistent_with_fetch ... ok
+test imap::search::tests::match_from_to ... ok
+test imap::search::tests::match_header ... ok
+test imap::search::tests::match_size ... ok
+test imap::search::tests::match_subject_ci ... ok
+test imap::search::tests::match_text_spans_headers_and_body ... ok
+test imap::search::tests::match_uid_and_seq ... ok
+test imap::search::tests::parse_all_when_empty ... ok
+test imap::search::tests::parse_bad_date_degrades_to_all ... ok
+test imap::search::tests::parse_charset_prefix_is_skipped ... ok
+test imap::search::tests::parse_date ... ok
+test imap::search::tests::parse_group ... ok
+test imap::search::tests::parse_header ... ok
+test imap::search::tests::parse_implicit_and ... ok
+test imap::search::tests::parse_or_and_not ... ok
+test imap::search::tests::parse_seqset_and_uid ... ok
+test imap::search::tests::parse_unknown_key_is_non_restrictive ... ok
+test imap::search::tests::seqset_membership ... ok
+test imap::search::tests::seqset_open_ended_star ... ok
+test imap::search::tests::tokenize_parens ... ok
+test imap::search::tests::tokenize_quoted_and_atoms ... ok
+test imap::session::tests::address_headers_of_an_unloaded_body_are_the_first_recipient ... ok
+test imap::session::tests::address_headers_come_from_details_while_they_are_warm ... ok
+test imap::session::tests::address_headers_are_parsed_back_from_a_body_reloaded_from_disk ... ok
+test imap::session::tests::bare_header_fetch_returns_all_headers ... ok
+test imap::session::tests::build_envelope_lists_reply_to_and_cc ... ok
+test imap::session::tests::append_targets_sent_only_for_the_sent_folder ... ok
+test imap::session::tests::build_envelope_newline_subject_uses_literal ... ok
+test imap::session::tests::build_envelope_without_reply_to_or_cc_falls_back_to_from_and_nil ... ok
+test imap::session::tests::check_new_mail_pushes_exists_on_growth ... ok
+test imap::session::tests::check_new_mail_expunges_in_descending_seqno ... ok
+test imap::session::tests::check_new_mail_pushes_expunge_on_removal ... ok
+test imap::session::tests::check_new_mail_pushes_swap_when_count_unchanged ... ok
+test imap::session::tests::envelope_mailbox_escapes_quotes_in_name ... ok
+test imap::session::tests::copy_is_rejected ... ok
+test imap::session::tests::check_new_mail_quiet_when_set_unchanged ... ok
+test imap::session::tests::envelope_mailbox_with_name ... ok
+test imap::session::tests::envelope_mailbox_without_domain ... ok
+test imap::session::tests::envelope_mailbox_without_name ... ok
+test imap::session::tests::header_fields_filters_to_requested_fields ... ok
+test imap::session::tests::header_fields_response_echoes_requested_list_verbatim ... ok
+test imap::session::tests::imap_string_empty_is_empty_quotes ... ok
+test imap::session::tests::imap_string_escapes_quote_and_backslash ... ok
+test imap::session::tests::imap_string_quotes_plain_ascii ... ok
+test imap::session::tests::imap_string_uses_literal_for_8bit ... ok
+test imap::session::tests::imap_string_uses_literal_for_newline ... ok
+test imap::session::tests::needs_body_skips_metadata_and_header_fetches ... ok
+test imap::session::tests::needs_body_triggers_for_body_content ... ok
+test imap::session::tests::parse_append_extracts_mailbox_and_size ... ok
+test imap::session::tests::on_demand_body_fetch_failure_returns_no_and_cooldowns ... ok
+test imap::session::tests::parse_header_fields_section_survives_length_changing_unicode ... ok
+test imap::session::tests::parse_header_fields_section_variants ... ok
+test imap::session::tests::test_build_envelope_subject_with_quotes ... ok
+test imap::session::tests::test_build_fetch_response_body_peek ... ok
+test imap::session::tests::test_build_fetch_response_envelope ... ok
+test imap::session::tests::test_build_fetch_response_flags_only ... ok
+test imap::session::tests::test_build_fetch_response_flags_unread ... ok
+test imap::session::tests::test_build_fetch_response_internaldate ... ok
+test imap::session::tests::test_build_fetch_response_multiple_items ... ok
+test imap::session::tests::test_build_fetch_response_rfc822_full ... ok
+test imap::session::tests::test_build_fetch_response_rfc822_size ... ok
+test imap::session::tests::test_build_fetch_response_rfc822_size_placeholder_when_cold ... ok
+test imap::session::tests::test_build_fetch_response_uid_mode ... ok
+test imap::session::tests::test_capability ... ok
+test imap::session::tests::test_close_resets_state ... ok
+test imap::session::tests::test_extract_headers_from_rfc ... ok
+test imap::session::tests::test_delete_and_expunge ... ok
+test imap::session::tests::test_expunge_sequence_numbers_shift ... ok
+test imap::session::tests::test_logout ... ok
+test imap::session::tests::test_idle_end_with_done ... ok
+test imap::session::tests::test_namespace ... ok
+test imap::session::tests::test_needs_body ... ok
+test imap::session::tests::test_full_login_select_fetch_sequence ... ok
+test imap::session::tests::test_needs_body_rfc822_variants ... ok
+test imap::session::tests::test_envelope_and_search_survive_a_body_reloaded_from_disk ... ok
+test imap::session::tests::test_no_mailbox_selected_rejects_fetch ... ok
+test imap::session::tests::test_not_authenticated_rejects_commands ... ok
+test imap::session::tests::test_parse_command_empty ... ok
+test imap::session::tests::test_parse_command_full ... ok
+test imap::session::tests::test_parse_command_no_args ... ok
+test imap::session::tests::test_parse_command_tag_only ... ok
+test imap::session::tests::test_parse_command_with_extra_spaces ... ok
+test imap::session::tests::test_parse_fetch_args_complex ... ok
+test imap::session::tests::test_parse_fetch_args_star_range ... ok
+test imap::session::tests::test_parse_fetch_args_with_parens ... ok
+test imap::session::tests::test_parse_fetch_args_without_parens ... ok
+test imap::session::tests::test_parse_seq_num_invalid ... ok
+test imap::session::tests::test_parse_seq_num_large_number ... ok
+test imap::session::tests::test_parse_seq_num_negative ... ok
+test imap::session::tests::test_parse_seq_num_number ... ok
+test imap::session::tests::test_parse_seq_num_star ... ok
+test imap::session::tests::test_parse_seq_num_zero ... ok
+test imap::session::tests::test_parse_store_args ... ok
+test imap::session::tests::test_search_header_reply_to_on_warm_body ... ok
+test imap::session::tests::test_store_seen_flag_calls_backend ... ok
+test imap::session::tests::test_search_unseen ... ok
+test imap::session::tests::with_session_id_tags_the_session_for_log_correlation ... ok
+test imap::session::tests::uid_move_moves_to_target_and_expunges ... ok
+test imap::session::tests::test_uid_search_unseen ... ok
+test imap::session::tests::test_uid_stability_across_refresh ... ok
+test imap::tests::a_real_read_error_still_ends_the_connection_as_an_error ... ok
+test imap::tests::an_append_literal_cut_short_is_still_an_error ... ok
+test imap::tests::append_to_non_sent_is_rejected_without_continuation ... ok
+test imap::tests::authenticate_challenge_response_is_redacted_whole ... ok
+test imap::session::tests::test_search_subject_and_from ... ok
+test imap::tests::authenticate_initial_response_is_redacted ... ok
+test imap::tests::append_to_sent_reads_literal_and_returns_ok ... ok
+test imap::tests::connection_loop_ends_quietly_when_client_resets_after_login ... ok
+test imap::tests::login_arguments_are_redacted ... ok
+test imap::tests::connection_loop_ends_quietly_when_client_vanishes_after_login ... ok
+test imap::tests::other_commands_are_logged_verbatim ... ok
+test imap::tests::session_counter_yields_unique_increasing_ids ... ok
+test imap::tests::the_command_log_never_carries_a_login_password ... ok
+test imap::utf7::tests::ampersand_is_escaped ... ok
+test imap::tests::the_idle_command_log_never_carries_a_login_password ... ok
+test imap::utf7::tests::ascii_is_identity ... ok
+test imap::utf7::tests::decode_rejects_unterminated_shift ... ok
+test imap::tests::while_idle_a_disconnect_ends_quietly_and_a_real_error_does_not ... ok
+test imap::utf7::tests::mixed_runs ... ok
+test imap::utf7::tests::non_ascii_is_shifted ... ok
+test mail::bodystructure::tests::build_params_picks_charset_and_name ... ok
+test mail::bodystructure::tests::build_params_returns_nil_when_no_params ... ok
+test mail::bodystructure::tests::count_lines_basic ... ok
+test mail::bodystructure::tests::multipart_mixed_with_pdf_attachment_emits_two_parts ... ok
+test mail::bodystructure::tests::no_boundary_falls_back_to_text ... ok
+test mail::bodystructure::tests::nested_multipart_alternative_inside_mixed ... ok
+test mail::bodystructure::tests::quoted_escapes_quote_and_backslash ... ok
+test mail::bodystructure::tests::simple_text_html_body ... ok
+test mail::parser::tests::absent_reply_to_is_empty_not_the_from ... ok
+test mail::parser::tests::address_headers_accept_a_bare_lf_message ... ok
+test mail::parser::tests::address_headers_of_a_message_without_any_are_empty ... ok
+test mail::parser::tests::address_headers_come_from_the_header_section_only ... ok
+test mail::parser::tests::angle_brackets_inside_a_quoted_name_do_not_break_the_mailbox ... ok
+test mail::parser::tests::bare_message_id_without_brackets_is_accepted ... ok
+test mail::parser::tests::base64_body_non_utf8_is_not_echoed_as_base64 ... ok
+test mail::parser::tests::escaped_quotes_inside_a_quoted_name_do_not_split_the_list ... ok
+test mail::parser::tests::html_alternative_clears_body_text ... ok
+test mail::parser::tests::in_reply_to_falls_back_to_last_reference ... ok
+test mail::parser::tests::is_plaintext_false_for_html_and_missing_default ... ok
+test mail::parser::tests::message_id_and_in_reply_to_are_extracted_bare ... ok
+test mail::parser::tests::multipart_plain_only_preserves_raw_body_text ... ok
+test mail::parser::tests::plain_address_list_still_splits_on_commas ... ok
+test mail::parser::tests::plaintext_body_is_preserved_verbatim ... ok
+test mail::parser::tests::plaintext_body_survives_quoted_printable ... ok
+test mail::parser::tests::qp_non_utf8_byte_is_decoded_not_echoed ... ok
+test mail::parser::tests::quoted_comma_in_display_name_is_one_recipient ... ok
+test mail::parser::tests::quoted_name_escapes_are_undone ... ok
+test mail::parser::tests::reply_to_is_an_address_list ... ok
+test mail::parser::tests::reply_to_is_extracted_with_name_and_address ... ok
+test mail::parser::tests::stray_quotes_around_a_name_are_still_trimmed ... ok
+test mail::parser::tests::test_decode_mixed_encoded_and_plain ... ok
+test mail::parser::tests::test_decode_multi_encoded_words ... ok
+test mail::parser::tests::test_decode_q_encoded_word ... ok
+test mail::parser::tests::test_decode_q_encoding ... ok
+test mail::parser::tests::test_extract_boundary_quoted ... ok
+test mail::parser::tests::test_extract_boundary_unquoted ... ok
+test mail::parser::tests::test_folded_headers ... ok
+test mail::parser::tests::test_multipart_alternative ... ok
+test mail::parser::tests::test_multipart_alternative_ignores_alternative_parts_as_attachments ... ok
+test mail::parser::tests::test_multipart_attachment_without_filename_uses_content_type_name ... ok
+test mail::parser::tests::test_multipart_base64_part ... ok
+test mail::parser::tests::test_multipart_mixed_with_nested ... ok
+test mail::parser::tests::test_multipart_plain_only ... ok
+test mail::parser::tests::test_multipart_with_attachment_extracts_both_body_and_file ... ok
+test mail::parser::tests::test_parse_address_no_name ... ok
+test mail::parser::tests::test_parse_address_with_quotes ... ok
+test mail::parser::tests::test_parse_base64_body ... ok
+test mail::parser::tests::test_parse_encoded_subject ... ok
+test mail::parser::tests::test_parse_multiple_recipients ... ok
+test mail::parser::tests::test_parse_plain_text_body ... ok
+test mail::parser::tests::test_parse_simple_message ... ok
+test mail::parser::tests::test_qp_encoded_chars ... ok
+test mail::parser::tests::test_qp_no_byte_loss ... ok
+test mail::parser::tests::test_qp_soft_break_crlf ... ok
+test mail::parser::tests::test_qp_soft_break_lf ... ok
+test mail::parser::tests::test_split_headers_body_lf ... ok
+test mail::rfc2822::tests::an_address_cannot_smuggle_a_second_mailbox ... ok
+test mail::rfc2822::tests::ascii_name_with_a_comma_is_one_quoted_mailbox ... ok
+test mail::rfc2822::tests::blank_reply_to_addresses_are_skipped ... ok
+test mail::rfc2822::tests::extract_body_text_from_multipart_stops_at_boundary ... ok
+test mail::rfc2822::tests::extract_body_text_from_single_part ... ok
+test mail::rfc2822::tests::html_to_text_converts_breaks_and_blocks_to_newlines ... ok
+test mail::rfc2822::tests::html_to_text_pre_with_inner_tags_falls_through_to_strip ... ok
+test mail::rfc2822::tests::html_to_text_preserves_whitespace ... ok
+test mail::rfc2822::tests::html_to_text_recovers_pre_wrapped_patch_exactly ... ok
+test mail::rfc2822::tests::line_breaks_in_an_address_cannot_inject_a_header ... ok
+test mail::rfc2822::tests::no_reply_tos_emits_no_header ... ok
+test mail::rfc2822::tests::non_ascii_name_with_a_special_is_an_encoded_word_not_a_quoted_string ... ok
+test mail::rfc2822::tests::padded_reply_to_address_is_trimmed ... ok
+test mail::rfc2822::tests::plain_ascii_name_stays_bare ... ok
+test mail::rfc2822::tests::quotes_and_backslashes_inside_a_quoted_name_are_escaped ... ok
+test mail::rfc2822::tests::reply_to_non_ascii_display_name_is_an_encoded_word ... ok
+test mail::rfc2822::tests::reply_to_with_a_display_name_keeps_it ... ok
+test mail::rfc2822::tests::reply_to_without_a_display_name_is_the_bare_address ... ok
+test mail::rfc2822::tests::several_reply_tos_are_joined ... ok
+test mail::rfc2822::tests::strip_html_drops_tags_and_decodes_entities ... ok
+test mail::rfc2822::tests::strip_html_skips_script_and_style ... ok
+test mail::rfc2822::tests::test_base64_encode_body_empty ... ok
+test mail::rfc2822::tests::test_base64_encode_body_long_wraps ... ok
+test mail::rfc2822::tests::test_base64_encode_body_short ... ok
+test mail::rfc2822::tests::test_days_to_ymd_epoch ... ok
+test mail::rfc2822::tests::test_days_to_ymd_known_dates ... ok
+test mail::rfc2822::tests::test_encode_header_ascii ... ok
+test mail::rfc2822::tests::test_encode_header_empty ... ok
+test mail::rfc2822::tests::test_encode_header_utf8 ... ok
+test mail::rfc2822::tests::test_encode_header_with_newline ... ok
+test mail::rfc2822::tests::test_extract_headers_no_body ... ok
+test mail::rfc2822::tests::test_extract_headers_normal ... ok
+test mail::rfc2822::tests::test_format_address_email_only ... ok
+test mail::rfc2822::tests::test_format_address_name_and_email ... ok
+test mail::rfc2822::tests::test_format_address_utf8_name ... ok
+test mail::rfc2822::tests::test_format_internal_date_epoch ... ok
+test mail::rfc2822::tests::test_format_internal_date_known ... ok
+test mail::rfc2822::tests::test_format_rfc2822_date_epoch ... ok
+test mail::rfc2822::tests::test_format_rfc2822_date_known ... ok
+test mail::rfc2822::tests::test_mail_to_rfc2822_minimal ... ok
+test mcp::tests::auth_requires_matching_bearer ... ok
+test mcp::tests::clamp_limit_bounds ... ok
+test mail::rfc2822::tests::test_mail_to_rfc2822_with_attachment_emits_multipart ... ok
+test mail::rfc2822::tests::test_mail_to_rfc2822_with_details ... ok
+test mcp::tests::initialize_advertises_tools_and_version ... ok
+test mcp::tests::origin_guard_allows_localhost_only ... ok
+test mcp::tests::tools_list_is_the_readonly_four ... ok
+test net::tests::a_peer_that_vanishes_is_a_benign_disconnect ... ok
+test net::tests::a_real_stream_error_is_not ... ok
+test net::tests::captured_records_are_scoped_to_the_thread_that_logged_them ... ok
+test smtp::tests::a_real_read_error_still_ends_the_connection_as_an_error ... ok
+test smtp::tests::auth_plain_inline_credentials_are_redacted ... ok
+test smtp::tests::every_line_of_an_auth_exchange_is_redacted ... ok
+test smtp::tests::connection_ends_quietly_when_client_vanishes_after_ehlo ... ok
+test smtp::tests::other_commands_are_logged_verbatim ... ok
+test smtp::tests::read_line_capped_rejects_overlong_line ... ok
+test smtp::tests::read_line_capped_splits_lines_then_eof ... ok
+test smtp::tests::accepts_mail_after_successful_auth ... ok
+test smtp::tests::accepts_normal_message ... ok
+test smtp::tests::size_param_exceeds_detects_oversize ... ok
+test smtp::tests::test_dot_unstuffing ... ok
+test smtp::tests::rejects_mail_without_auth_when_password_configured ... ok
+test smtp::tests::test_extract_address_angle_brackets ... ok
+test smtp::tests::rejects_oversize_via_mail_size_param ... ok
+test smtp::tests::test_extract_address_empty ... ok
+test smtp::tests::test_extract_address_malformed_brackets ... ok
+test smtp::tests::rejects_oversize_message_in_data ... ok
+test smtp::tests::test_extract_address_no_brackets ... ok
+test smtp::tests::test_extract_address_no_colon ... ok
+test smtp::tests::test_extract_address_rcpt_to ... ok
+test smtp::tests::test_extract_address_with_spaces ... ok
+test smtp::tests::test_no_dot_unstuffing_for_normal_lines ... ok
+test smtp::tests::test_single_dot_not_unstuffed ... ok
+test smtp::tests::the_command_log_never_carries_auth_credentials ... ok
+test store::tests::fts_match_expr_is_injection_safe ... ok
+test bridge::tests::sys_and_tutanota_model_versions_are_positive ... ok
+test net::tests::loop_keeps_accepting_across_connections ... ok
+test governed_client::tests::throttle_response_arms_suspension ... ok
+test store::tests::event_bus_state_roundtrip ... ok
+test store::tests::fts_unindex_removes_body ... ok
+test store::tests::delete_folder_mails_returns_ids_and_drops_rows ... ok
+test store::tests::allocate_uids_are_monotonic_and_per_folder ... ok
+test store::tests::fts_index_and_search ... ok
+test store::tests::delete_mail_removes_metadata_and_eml ... ok
+test store::tests::test_batch_upsert ... ok
+test store::tests::fts_reindex_replaces_prior_body ... ok
+test sync::tests::body_fetch_cooldown_blocks_then_expires ... ok
+test sync::tests::body_updates_wake_details_watchers_not_list_watchers ... ok
+test store::tests::event_bus_state_min_updated_at_and_clear ... ok
+test sync::tests::find_mail_anywhere_returns_first_match ... ok
+test sync::tests::is_mail_anywhere_reflects_presence ... ok
+test sync::tests::prune_unknown_folders_drops_disappeared_ones ... ok
+test sync::tests::refresh_mail_in_place_no_match_is_noop ... ok
+test sync::tests::refresh_mail_in_place_updates_metadata_in_every_folder ... ok
+test sync::tests::remove_mail_everywhere_drops_from_all_folders ... ok
+test sync::tests::remove_mail_everywhere_unknown_id_is_noop ... ok
+test sync::tests::remove_mail_from_folder_only_touches_that_folder ... ok
+test sync::tests::upsert_mail_in_folder_appends_when_new ... ok
+test sync::tests::upsert_mail_in_folder_replaces_existing_by_element_id ... ok
+test tuta::forget_session_tests::a_forgotten_session_stays_forgotten_whatever_the_keyring_says ... ok
+test tuta::resume_failure_tests::a_refused_client_version_keeps_the_session ... ok
+test tuta::resume_failure_tests::a_verdict_on_the_token_or_account_invalidates_the_session ... ok
+test tls::tests::test_tls_acceptor_builds ... ok
+test tuta::resume_failure_tests::an_outage_or_an_unexpected_error_keeps_the_session ... ok
+test tuta::self_send_cache_tests::cache_key_differs_on_subject ... ok
+test tuta::self_send_cache_tests::cache_key_is_case_insensitive_and_trim_tolerant ... ok
+test tuta::self_send_cache_tests::is_self_recipient_case_insensitive ... ok
+test tuta::self_send_cache_tests::is_self_recipient_false_when_from_differs ... ok
+test tuta::self_send_cache_tests::is_self_recipient_false_when_recipient_differs ... ok
+test tuta::self_send_cache_tests::is_self_recipient_true_when_cc_matches_from ... ok
+test tuta::self_send_cache_tests::is_self_recipient_true_when_to_matches_from ... ok
+test tuta::send_tests::bridge_local_id_parses_and_rejects ... ok
+test tuta::send_tests::draft_data_empty_sender_name_falls_back_to_address ... ok
+test tuta::send_tests::draft_data_encodes_plaintext_submissions_reversibly ... ok
+test tuta::send_tests::draft_data_keeps_non_empty_sender_name ... ok
+test tuta::send_tests::draft_data_never_sends_reply_tos ... ok
+test tuta::send_tests::draft_data_puts_body_in_both_fields ... ok
+test tuta::send_tests::draft_data_sender_is_the_resolved_address_not_the_from ... ok
+test tuta::send_tests::plaintext_encoding_round_trips_through_html_to_text ... ok
+test tuta::send_tests::recipient_empty_name_falls_back_to_address ... ok
+test tuta::send_tests::recipient_keeps_non_empty_name ... ok
+test tuta::send_tests::send_draft_data_mirrors_parameters_and_is_not_plaintext ... ok
+test store::tests::test_delete_mails_not_in ... ok
+test tuta::send_tests::send_draft_data_plaintext_flag_set_in_both_places ... ok
+test tuta::transient_tests::generic_session_key_failure_is_transient ... ok
+test store::tests::test_eml_delete ... ok
+test tuta::transient_tests::missing_owner_key_is_transient ... ok
+test tuta::transient_tests::other_internal_errors_are_not_transient ... ok
+test tuta::transient_tests::server_errors_are_not_transient ... ok
+test util::tests::recovers_from_a_poisoned_mutex ... ok
+test store::tests::test_eml_read_nonexistent ... ok
+test store::tests::test_eml_write_read_roundtrip ... ok
+test store::tests::test_open_and_verify ... ok
+test store::tests::test_mark_has_details ... ok
+test store::tests::test_upsert_and_load_metadata ... ok
+test store::tests::test_metadata_is_per_folder ... ok
+test store::tests::test_reset ... ok
+test governed_client::tests::wait_out_suspension_blocks_until_elapsed ... ok
+test governed_client::tests::concurrency_is_bounded ... ok
+test net::tests::loop_caps_concurrent_connections ... ok
+test backup::tests::resume_only_fetches_the_new_mail ... ok
+test backup::tests::export_writes_eml_tree_with_cache_and_server_paths ... ok
+
+test result: ok. 362 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running unittests src/lib.rs (/Users/anthony/GIT/tutabridge/target/debug/deps/tutabridge_tuta-7512cb747ba3d1ea)
+
+running 43 tests
+test event_bus::tests::close_action_accepts_already_unwrapped_codes ... ok
+test event_bus::tests::close_action_normal_shutdown_uses_large_interval ... ok
+test event_bus::tests::close_action_suspends_on_session_expired ... ok
+test event_bus::tests::build_path_url_encodes_special_chars_in_token ... ok
+test event_bus::tests::build_path_serialises_last_batch_ids ... ok
+test event_bus::tests::build_path_includes_client_name_when_set ... ok
+test event_bus::tests::build_path_includes_required_query_params ... ok
+test event_bus::tests::build_ws_url_switches_scheme_to_wss ... ok
+test event_bus::tests::build_ws_url_switches_plain_http_to_ws ... ok
+test event_bus::tests::close_action_unknown_uses_small_interval ... ok
+test event_bus::tests::close_action_terminates_on_auth_errors ... ok
+test event_bus::tests::heartbeat_fires_before_idle_timeout ... ok
+test event_bus::tests::heartbeat_interval_is_below_typical_nat_timeout ... ok
+test event_bus::tests::maps_operation_codes_to_variants ... ok
+test event_bus::tests::parses_initial_sync_done_with_no_payload ... ok
+test event_bus::tests::parses_empty_entity_update_batch ... ok
+test event_bus::tests::parses_entity_update_batch_with_one_mail_create ... ok
+test event_bus::tests::parses_initial_sync_work_estimate ... ok
+test event_bus::tests::parses_unread_counter_update_as_raw_value ... ok
+test event_bus::tests::payload_keeps_inner_semicolons ... ok
+test event_bus::tests::pick_random_is_within_bounds_and_handles_degenerate ... ok
+test event_bus::tests::reconnect_interval_grows_with_attempts ... ok
+test event_bus::tests::reconnect_interval_respects_close_hint ... ok
+test event_bus::tests::rejects_malformed_entity_update_json ... ok
+test event_bus::tests::state_initial_value_is_stopped ... ok
+test event_bus::tests::state_subscribers_are_independent ... ok
+test event_bus::tests::take_string_or_int_accepts_both_shapes ... ok
+test event_bus::tests::unknown_type_is_exposed_for_forward_compat ... ok
+test folder_system::tests::bridge_mail_set_kind_maps_new_variants ... ok
+test folder_system::tests::builds_nested_custom_tree_with_indent ... ok
+test folder_system::tests::folder_by_id_finds_nested ... ok
+test folder_system::tests::folder_by_mail_uses_sets ... ok
+test folder_system::tests::label_and_imported_are_not_folders ... ok
+test folder_system::tests::path_to_folder_returns_ancestors_then_self ... ok
+test folder_system::tests::separates_system_and_custom_and_sorts ... ok
+test mail_set_entry_id::tests::deconstruct_recovers_a_quantised_timestamp ... ok
+test mail_set_entry_id::tests::deconstruct_recovers_the_mail_id ... ok
+test mail_set_entry_id::tests::deconstruct_rejects_a_short_id ... ok
+test mail_set_entry_id::tests::deconstruct_rejects_a_long_id ... ok
+test mail_set_entry_id::tests::construct_panics_on_a_non_generated_id - should panic ... ok
+test mail_set_entry_id::tests::deconstruct_rejects_invalid_base64url ... ok
+test mail_set_entry_id::tests::round_trip_quantises_the_timestamp_but_keeps_the_mail_id ... ok
+test mail_set_entry_id::tests::ts_test_vector ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mail_extensions.rs (/Users/anthony/GIT/tutabridge/target/debug/deps/mail_extensions-614ff51770aa5de8)
+
+running 10 tests
+test protocol_accepts_optional_empty_body_text ... ignored, protocol acceptance gate; upstream 359 currently fails
+test protocol_accepts_valid_aead_v3_mail_subject ... ignored, protocol acceptance gate; upstream 359 currently fails
+test rejects_malformed_inline_json ... ok
+test empty_inline_json_object_is_a_session_key_miss ... ok
+test draft_reader_rejects_received_mail_before_fetching ... ok
+test decrypts_an_inline_mail_payload_without_rest ... ok
+test move_empty_does_not_request_and_failure_stops_later_batches ... ok
+test move_posts_target_and_batches_through_real_sdk_serializer ... ok
+test draft_body_uses_parent_mail_key_even_when_draft_has_no_key ... ok
+test attachments_decrypt_and_reassemble_across_archives_and_reject_corruption ... ok
+
+test result: ok. 8 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+   Doc-tests tutabridge_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests tutabridge_tuta
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,66 @@
+[
+  {
+    "version": 2,
+    "path": "105",
+    "plaintext": "Sujet écrit — 🦀",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "AgAHRERERERERERERERERERERExBlOEDNU1n3i+XmZI2U+65n/SbRjmKMEyfJCCmQp83A3ALFXO7WrBfdpM1h9tNocrtLX2VOxIT"
+  },
+  {
+    "version": 2,
+    "path": "111/sender-id/94",
+    "plaintext": "Alice",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "AgAHRERERERERERERERERERERF5Yl+cSlY7OvIzXCGW6eLSzgHR8fohb7W1ZE64T3qkkjsmG9Gzax/E="
+  },
+  {
+    "version": 2,
+    "path": "105",
+    "plaintext": "",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "AgAHRERERERERERERERERERERJ80/oRPN8Im38D7rZ5aNV31BwxlvywOYFMyGdxL6A5m+KFmuw=="
+  },
+  {
+    "version": 2,
+    "path": "111/sender-id/94",
+    "plaintext": "Alice",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "AgAHRERERERERERERERERERERF5Yl+cSlY7OvIzXCGW6eLSzgHR8fohb7W1ZE64T3qkkjsmG9Gzax/E="
+  },
+  {
+    "version": 3,
+    "path": "105",
+    "plaintext": "Sujet écrit — 🦀",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "A0REREREREREREREREREREQoE6G8RIOZSQ5cUHphQId1oHnVJyAVX70zC4xBYVG7tnYS0KAEoCiN+loNqmtDo6XkzahpV9Glqg=="
+  },
+  {
+    "version": 3,
+    "path": "111/sender-id/94",
+    "plaintext": "Alice",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "A0REREREREREREREREREREQ6CqK6VSNa4D9RGJZToH6vIkXLafyuCBm3kbkrBxgj4Jv1PBH+DpGc"
+  },
+  {
+    "version": 3,
+    "path": "105",
+    "plaintext": "",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "A0RERERERERERERERERERET7ZsvZJDRIJKsh4ZFDjbkA7uedrCdFPAyVdc3ixbRsrFDq6Kg="
+  },
+  {
+    "version": 3,
+    "path": "111/sender-id/94",
+    "plaintext": "Alice",
+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "ciphertext": "A0REREREREREREREREREREQ6CqK6VSNa4D9RGJZToH6vIkXLafyuCBm3kbkrBxgj4Jv1PBH+DpGc"
+  }
+]

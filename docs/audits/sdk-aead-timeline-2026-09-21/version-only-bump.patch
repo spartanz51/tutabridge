@@ -1,0 +1,24 @@
+commit d1bae4750cfac28fdf89c585155b5d8c44e60a6f
+Author: Paul Scarrone <paul@scarrone.co>
+Date:   Wed Sep 16 16:58:23 2026 -0400
+
+    sdk: raise client version to 359.260904.0
+    
+    Tuta answers 474 InvalidSoftwareVersionError to any client whose cv
+    header reports a major below 357, so login dies in fetch_server_model
+    before a credential is sent. CLIENT_VERSION is env!("CARGO_PKG_VERSION"),
+    so the workspace version is the only thing to change.
+    
+    Took the current release rather than the 357 floor, for headroom.
+
+diff --git a/Cargo.toml b/Cargo.toml
+index e684d979ea..b5a095c38b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,5 @@
+ [workspace.package]
+-version = "348.260528.0"
++version = "359.260904.0"
+ rust-version = "1.84.0"
+ edition = "2021"
+ homepage = "https://tutao.de"

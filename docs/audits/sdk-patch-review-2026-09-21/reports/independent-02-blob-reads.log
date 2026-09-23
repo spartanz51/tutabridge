@@ -1,0 +1,67 @@
+HEAD is now at aea5846b93 v359.260904.0
+Removing tuta-sdk/rust/sdk/src/entity_client/
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/independent/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+warning: `tuta-sdk` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.46s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/target-validation/debug/deps/tutasdk-cee6532dfd4c584d)
+
+running 30 tests
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_new_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_deserialize_new_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_deserialize_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_new_blobs_with_invalid_number_of_blobs_larger ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_blobs_with_invalid_number_of_blobs_larger ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_blobs_with_invalid_number_of_blobs_fewer ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_new_blobs_with_invalid_number_of_blobs_fewer ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_new_blobs_in_chunks ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_new_blobs_in_chunks_do_not_exceed_max_number_of_blobs_in_binary ... ok
+test blobs::blob_facade::tests::chunk_data_works ... ok
+test blobs::blob_facade::read::tests::binary_parser_checks_framing_before_allocation ... ok
+test blobs::blob_facade::tests::encode_query_params_works ... ok
+test blobs::blob_access_token_cache::tests::evict ... ok
+test blobs::blob_access_token_cache::tests::get_uncached ... ok
+test blobs::blob_access_token_cache::tests::get_cached ... ok
+test blobs::blob_access_token_cache::tests::can_be_used_for_another_request_expired_token ... ok
+test blobs::blob_access_token_cache::tests::get_expired ... ok
+test blobs::blob_access_token_facade::tests::request_write_token_with_uncached_and_cached ... ok
+test blobs::blob_facade::read::tests::blob_element_retries_transient_server_then_returns_body ... ok
+test blobs::blob_access_token_facade::tests::archive_read_token_is_refetched_after_eviction ... ok
+test blobs::blob_access_token_facade::tests::read_token_cache_preserves_instance_scope ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_single_blob_legacy ... ok
+test blobs::blob_facade::read::tests::binary_download_rejects_missing_or_unrequested_blobs ... ok
+test blobs::blob_facade::read::tests::blob_element_failover_and_token_refresh_are_bounded ... ok
+test blobs::blob_facade::read::tests::binary_download_uses_instance_scope_and_chunks_at_100 ... ok
+test blobs::blob_facade::read::tests::permanent_errors_and_empty_bodies_do_not_retry ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_multiple_attachments ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_multiple_attachments_including_one_large ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_multiple_attachments_worst_case ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 278 filtered out; finished in 10.30s
+

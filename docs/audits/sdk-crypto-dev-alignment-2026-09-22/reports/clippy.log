@@ -1,0 +1,839 @@
+    Blocking waiting for file lock on build directory
+    Checking util v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-crypto-dev/sdk/tuta-sdk/rust/util)
+    Checking crypto-primitives v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-crypto-dev/sdk/tuta-sdk/rust/crypto-primitives)
+    Checking tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-crypto-dev/sdk/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: called `unwrap` on `symmetric_permission` after checking its variant with `is_some`
+   --> tuta-sdk/rust/sdk/src/crypto/crypto_facade.rs:215:23
+    |
+214 |         if symmetric_permission.is_some() {
+    |         --------------------------------- help: try: `if let Some(<item>) = symmetric_permission`
+215 |             let s_permission = symmetric_permission.unwrap().clone();
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#unnecessary_unwrap
+    = note: `#[warn(clippy::unnecessary_unwrap)]` on by default
+
+warning: useless conversion to the same type: `ApiCallError`
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:169:57
+    |
+169 |                    .encrypt_and_map(type_model, &parsed_instance, &key)
+    |   _____________________________________________________________________^
+    |  |_____________________________________________________________________|
+170 | ||                 .map_err(Into::into)
+    | ||____________________________________^
+171 | |          } else {
+    | |_________- help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#useless_conversion
+    = note: `#[warn(clippy::useless_conversion)]` on by default
+
+warning: useless conversion to the same type: `std::string::String`
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:281:51
+    |
+281 |                        .get_attribute_id_by_attribute_name(ID_FIELD)
+    |   __________________________________________________________________^
+    |  |__________________________________________________________________|
+282 | ||                     .map(String::from)
+    | ||______________________________________^
+283 | |                  else {
+    | |_________________- help: consider removing
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#useless_conversion
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:347:10
+    |
+347 |             .get(&bucket_key_id.to_string())
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_key_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+    = note: requested on the command line with `-W clippy::implicit-clone`
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:366:12
+    |
+366 |                     .get(&bucket_key_group_id.to_string())
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_key_group_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:376:14
+    |
+376 | ...                   .get(&bucket_sender_kv_id.to_string())
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_sender_kv_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: `format!` in `error!` args
+   --> tuta-sdk/rust/sdk/src/date/event_facade.rs:698:7
+    |
+698 | /                         log::error!(
+699 | |                             "{}",
+700 | |                             format!(
+701 | |                                 "Failed to add {} days to date {}",
+...   |
+705 | |                         );
+    | |_________________________^
+    |
+    = help: combine the `format!(..)` arguments with the outer `error!(..)` call
+    = help: or consider changing `format!` to `format_args!`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#format_in_format_args
+    = note: `#[warn(clippy::format_in_format_args)]` on by default
+
+warning: `format!` in `error!` args
+   --> tuta-sdk/rust/sdk/src/date/event_facade.rs:752:8
+    |
+752 | / ...                   log::error!(
+753 | | ...                       "{}",
+754 | | ...                       format!(
+755 | | ...                           "Failed to sub {} days to end of {}",
+...   |
+759 | | ...                   );
+    | |_______________________^
+    |
+    = help: combine the `format!(..)` arguments with the outer `error!(..)` call
+    = help: or consider changing `format!` to `format_args!`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#format_in_format_args
+
+warning: `format!` in `error!` args
+   --> tuta-sdk/rust/sdk/src/date/event_facade.rs:773:8
+    |
+773 | / ...                   log::error!(
+774 | | ...                       "{}",
+775 | | ...                       format!(
+776 | | ...                           "Failed to add {} days to start of {}",
+...   |
+780 | | ...                   );
+    | |_______________________^
+    |
+    = help: combine the `format!(..)` arguments with the outer `error!(..)` call
+    = help: or consider changing `format!` to `format_args!`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#format_in_format_args
+
+warning: called `unwrap` on `target_week_day` after checking its variant with `is_none`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1005:46
+     |
+ 968 |             if target_week_day.is_none() {
+     |             ---------------------------- help: try: `if let Some(<item>) = target_week_day`
+...
+1005 |                 let parsed_weekday = Weekday::from_short(target_week_day.unwrap().as_str());
+     |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#unnecessary_unwrap
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1132:5
+     |
+1132 |                 return Ok(());
+     |                 ^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+     = note: `#[warn(clippy::needless_return)]` on by default
+help: remove `return`
+     |
+1132 -                 return Ok(());
+1132 +                 Ok(())
+     |
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1136:5
+     |
+1136 | /                 return match interval_start.checked_add(Duration::days(7)) {
+1137 | |                     Some(new_date) => Self::safe_expand_dates(new_dates, new_date),
+1138 | |                     None => Err(ApiCallError::internal(format!(
+1139 | |                         "Failed to add {} days to {}",
+...    |
+1142 | |                     ))),
+1143 | |                 };
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+     |
+1136 ~                 match interval_start.checked_add(Duration::days(7)) {
+1137 ~                     Some(new_date) => Self::safe_expand_dates(new_dates, new_date),
+1138 ~                     None => Err(ApiCallError::internal(format!(
+1139 ~                         "Failed to add {} days to {}",
+1140 ~                         7,
+1141 ~                         interval_start.assume_utc().unix_timestamp()
+1142 ~                     ))),
+1143 ~                 }
+     |
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1145:5
+     |
+1145 |                 return Self::safe_expand_dates(new_dates, new_date);
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+     |
+1145 -                 return Self::safe_expand_dates(new_dates, new_date);
+1145 +                 Self::safe_expand_dates(new_dates, new_date)
+     |
+
+warning: manual implementation of `ok`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1568:3
+     |
+1568 | /         match new_date.replace_day(target_day) {
+1569 | |             Ok(new_date) => Some(new_date),
+1570 | |             _ => None,
+1571 | |         }
+     | |_________^ help: replace with: `new_date.replace_day(target_day).ok()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_ok_err
+     = note: `#[warn(clippy::manual_ok_err)]` on by default
+
+warning: manual implementation of `ok`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:1737:3
+     |
+1737 | /         match result {
+1738 | |             Ok(rt) => Some(rt),
+1739 | |             _ => None,
+1740 | |         }
+     | |_________^ help: replace with: `result.ok()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_ok_err
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/entities/entity_facade.rs:240:21
+    |
+240 |             encrypted.insert(value_id_string.to_string(), encrypted_value);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `value_id_string.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/entities/entity_facade.rs:292:21
+    |
+292 |             encrypted.insert(association_id_string.to_string(), encrypted_association);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `association_id_string.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: unneeded `return` statement
+   --> tuta-sdk/rust/sdk/src/instance_mapper.rs:630:6
+    |
+630 | /                     return Err(DeError(
+631 | |                         "None value for association with Cardinality One".to_string(),
+632 | |                     ))
+    | |______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+    |
+630 ~                     Err(DeError(
+631 ~                         "None value for association with Cardinality One".to_string(),
+632 ~                     ))
+    |
+
+warning: unneeded `return` statement
+   --> tuta-sdk/rust/sdk/src/json_serializer.rs:402:4
+    |
+402 | /             return match (
+403 | |                 &model_value.value_type,
+404 | |                 element_value,
+405 | |                 &type_model.element_type,
+...   |
+439 | |                 _ => invalid_value(),
+440 | |             };
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+    |
+402 ~             match (
+403 ~                 &model_value.value_type,
+404 ~                 element_value,
+405 ~                 &type_model.element_type,
+406 ~             ) {
+407 ~                 (
+408 ~                     ValueType::GeneratedId | ValueType::CustomId,
+409 ~                     ElementValue::String(v),
+410 ~                     ElementType::Element | ElementType::Aggregated,
+411 ~                 ) => Ok(JsonElement::String(v)),
+412 ~                 (
+413 ~                     ValueType::GeneratedId,
+414 ~                     ElementValue::IdGeneratedId(v),
+415 ~                     ElementType::Element | ElementType::Aggregated,
+416 ~                 ) => Ok(JsonElement::String(v.to_string())),
+417 ~                 (
+418 ~                     ValueType::CustomId,
+419 ~                     ElementValue::IdCustomId(v),
+420 ~                     ElementType::Element | ElementType::Aggregated,
+421 ~                 ) => Ok(JsonElement::String(v.to_string())),
+422 ~                 (
+423 ~                     ValueType::GeneratedId,
+424 ~                     ElementValue::IdTupleGeneratedElementId(arr),
+425 ~                     ElementType::ListElement,
+426 ~                 ) => Ok(JsonElement::Array(vec![
+427 ~                     JsonElement::String(arr.list_id.into()),
+428 ~                     JsonElement::String(arr.element_id.into()),
+429 ~                 ])),
+430 ~                 (
+431 ~                     ValueType::CustomId,
+432 ~                     ElementValue::IdTupleCustomElementId(arr),
+433 ~                     ElementType::ListElement,
+434 ~                 ) => Ok(JsonElement::Array(vec![
+435 ~                     JsonElement::String(arr.list_id.into()),
+436 ~                     JsonElement::String(arr.element_id.into()),
+437 ~                 ])),
+438 + 
+439 ~                 _ => invalid_value(),
+440 ~             }
+    |
+
+warning: explicit call to `.into_iter()` in function argument accepting `IntoIterator`
+   --> tuta-sdk/rust/sdk/src/blobs/blob_facade.rs:140:10
+    |
+140 |                 .zip(blob_reference_tokens.into_iter())
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: this parameter accepts any `IntoIterator`, so you don't need to call `.into_iter()`
+   --> /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/iter/traits/iterator.rs:629:11
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#useless_conversion
+help: consider removing the `.into_iter()`
+    |
+140 -                 .zip(blob_reference_tokens.into_iter())
+140 +                 .zip(blob_reference_tokens)
+    |
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/lib.rs:165:45
+    |
+165 |             headers.insert("accessToken".to_owned(), access_token.to_string());
+    |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `access_token.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 23 warnings (run `cargo clippy --fix --lib -p tuta-sdk -- --no-deps` to apply 17 suggestions)
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2603:66
+     |
+2603 |             let event_start = Date::from_calendar_date(2026, Month::July, 01)
+     |                                                                           ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+     = note: `#[warn(clippy::zero_prefixed_literal)]` on by default
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2603 -             let event_start = Date::from_calendar_date(2026, Month::July, 01)
+2603 +             let event_start = Date::from_calendar_date(2026, Month::July, 1)
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2603 |             let event_start = Date::from_calendar_date(2026, Month::July, 0o1)
+     |                                                                            +
+
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2608:64
+     |
+2608 |             let event_end = Date::from_calendar_date(2026, Month::July, 02)
+     |                                                                         ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2608 -             let event_end = Date::from_calendar_date(2026, Month::July, 02)
+2608 +             let event_end = Date::from_calendar_date(2026, Month::July, 2)
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2608 |             let event_end = Date::from_calendar_date(2026, Month::July, 0o2)
+     |                                                                          +
+
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2643:50
+     |
+2643 |                     Date::from_calendar_date(2026, Month::July, 01 * (index + 1) as u8)
+     |                                                                 ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2643 -                     Date::from_calendar_date(2026, Month::July, 01 * (index + 1) as u8)
+2643 +                     Date::from_calendar_date(2026, Month::July, 1 * (index + 1) as u8)
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2643 |                     Date::from_calendar_date(2026, Month::July, 0o1 * (index + 1) as u8)
+     |                                                                  +
+
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2656:67
+     |
+2656 |             let event_start = Date::from_calendar_date(2026, Month::March, 01)
+     |                                                                            ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2656 -             let event_start = Date::from_calendar_date(2026, Month::March, 01)
+2656 +             let event_start = Date::from_calendar_date(2026, Month::March, 1)
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2656 |             let event_start = Date::from_calendar_date(2026, Month::March, 0o1)
+     |                                                                             +
+
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2661:65
+     |
+2661 |             let event_end = Date::from_calendar_date(2026, Month::March, 02)
+     |                                                                          ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2661 -             let event_end = Date::from_calendar_date(2026, Month::March, 02)
+2661 +             let event_end = Date::from_calendar_date(2026, Month::March, 2)
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2661 |             let event_end = Date::from_calendar_date(2026, Month::March, 0o2)
+     |                                                                           +
+
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2696:51
+     |
+2696 |                     Date::from_calendar_date(2026, Month::March, 01 * (index + 1) as u8)
+     |                                                                  ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2696 -                     Date::from_calendar_date(2026, Month::March, 01 * (index + 1) as u8)
+2696 +                     Date::from_calendar_date(2026, Month::March, 1 * (index + 1) as u8)
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2696 |                     Date::from_calendar_date(2026, Month::March, 0o1 * (index + 1) as u8)
+     |                                                                   +
+
+warning: this is a decimal constant
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2731:22
+     |
+2731 |                 &DateParts(None, 05, 12),
+     |                                  ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zero_prefixed_literal
+help: if you mean to use a decimal constant, remove the `0` to avoid confusion
+     |
+2731 -                 &DateParts(None, 05, 12),
+2731 +                 &DateParts(None, 5, 12),
+     |
+help: if you mean to use an octal constant, use `0o`
+     |
+2731 |                 &DateParts(None, 0o5, 12),
+     |                                   +
+
+warning: method `parse_raw` is never used
+  --> tuta-sdk/rust/sdk/src/entity_client.rs:53:9
+   |
+31 | impl EntityClient {
+   | ----------------- method in this implementation
+...
+53 |     pub fn parse_raw(
+   |            ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tuta-sdk/rust/sdk/src/crypto/asymmetric_crypto_facade.rs:465:62
+    |
+465 |             let sender_identity_pub_key = X25519PublicKey::from_bytes(&pub_key.as_slice()).unwrap();
+    |                                                                       ^^^^^^^^^^^^^^^^^^^ help: change this to: `pub_key.as_slice()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrow
+    = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tuta-sdk/rust/sdk/src/crypto/asymmetric_crypto_facade.rs:480:9
+    |
+480 | ...                   &kyber_public_key.as_slice(),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `kyber_public_key.as_slice()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tuta-sdk/rust/sdk/src/crypto/asymmetric_crypto_facade.rs:578:53
+    |
+578 | ...                   kyber_public_key: KyberPublicKey::from_bytes(&kyber_pub_key.as_slice())
+    |                                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `kyber_pub_key.as_slice()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrow
+
+warning: called `.nth(0)` on a `std::iter::Iterator`, when `.next()` is equivalent
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:177:24
+    |
+177 |           let pub_x25519_key = test_data
+    |  ______________________________^
+178 | |             .x25519_tests
+179 | |             .into_iter()
+180 | |             .nth(0)
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#iter_nth_zero
+    = note: `#[warn(clippy::iter_nth_zero)]` on by default
+help: try calling `.next()` instead of `.nth(0)`
+    |
+177 ~         let pub_x25519_key = test_data
+178 ~             .x25519_tests
+179 ~             .into_iter().next()
+    |
+
+warning: called `.nth(0)` on a `std::iter::Iterator`, when `.next()` is equivalent
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:183:23
+    |
+183 |           let pub_kyber_key = test_data
+    |  _____________________________^
+184 | |             .kyber_encryption_tests
+185 | |             .into_iter()
+186 | |             .nth(0)
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#iter_nth_zero
+help: try calling `.next()` instead of `.nth(0)`
+    |
+183 ~         let pub_kyber_key = test_data
+184 ~             .kyber_encryption_tests
+185 ~             .into_iter().next()
+    |
+
+warning: called `.nth(0)` on a `std::iter::Iterator`, when `.next()` is equivalent
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:189:21
+    |
+189 |           let pub_rsa_key = test_data
+    |  ___________________________^
+190 | |             .rsa_encryption_tests
+191 | |             .into_iter()
+192 | |             .nth(0)
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#iter_nth_zero
+help: try calling `.next()` instead of `.nth(0)`
+    |
+189 ~         let pub_rsa_key = test_data
+190 ~             .rsa_encryption_tests
+191 ~             .into_iter().next()
+    |
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:239:23
+    |
+239 |                         pubEccKey: Some(pub_x25519_key.to_vec()),
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_x25519_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+    = note: requested on the command line with `-W clippy::implicit-clone`
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:241:25
+    |
+241 |                         pubKyberKey: Some(pub_kyber_key.to_vec()),
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_kyber_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:283:23
+    |
+283 |                         pubRsaKey: Some(pub_rsa_key.to_vec()),
+    |                                         ^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_rsa_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:334:23
+    |
+334 |                         pubEccKey: Some(pub_x25519_key.to_vec()),
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_x25519_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:336:25
+    |
+336 |                         pubKyberKey: Some(pub_kyber_key.to_vec()),
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_kyber_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:377:23
+    |
+377 |                         pubEccKey: Some(pub_x25519_key.to_vec()),
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_x25519_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:379:25
+    |
+379 |                         pubKyberKey: Some(pub_kyber_key.to_vec()),
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_kyber_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: implicitly cloning a `Vec` by calling `to_vec` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto/public_key_provider.rs:418:23
+    |
+418 |                         pubRsaKey: Some(pub_rsa_key.to_vec()),
+    |                                         ^^^^^^^^^^^^^^^^^^^^ help: consider using: `pub_rsa_key.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: called `unwrap` on `permission` after checking its variant with `is_some`
+   --> tuta-sdk/rust/sdk/src/crypto/crypto_facade.rs:861:27
+    |
+858 |         if permission.is_some() {
+    |         ----------------------- help: try: `if let Some(<item>) = permission`
+...
+861 |                 .return_const(Ok(vec![permission.unwrap()]));
+    |                                       ^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#unnecessary_unwrap
+
+warning: implicitly cloning a `String` by calling `to_string` on its dereferenced type
+   --> tuta-sdk/rust/sdk/src/crypto_entity_client.rs:347:10
+    |
+347 |             .get(&bucket_key_id.to_string())
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `bucket_key_id.clone()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#implicit_clone
+
+warning: you are using an explicit closure for cloning elements
+    --> tuta-sdk/rust/sdk/src/date/calendar_facade.rs:1074:41
+     |
+1074 |             let all_events: Vec<CalendarEvent> = events.into_iter().map(|e| e.clone()).collect();
+     |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider calling the dedicated `cloned` method: `events.into_iter().cloned()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#map_clone
+     = note: `#[warn(clippy::map_clone)]` on by default
+
+warning: you are using an explicit closure for cloning elements
+    --> tuta-sdk/rust/sdk/src/date/calendar_facade.rs:1297:5
+     |
+1297 |                 events.clone().into_iter().map(|e| e.clone()).collect();
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider calling the dedicated `cloned` method: `events.clone().into_iter().cloned()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#map_clone
+
+warning: called `.iter().count()` on a `Vec`
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2640:15
+     |
+2640 |             assert_eq!(events.iter().count(), 30);
+     |                        ^^^^^^^^^^^^^^^^^^^^^ help: try: `events.len()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#iter_count
+     = note: `#[warn(clippy::iter_count)]` on by default
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2648:5
+     |
+2648 |                 return event_start_time.as_seconds() == expected_date as u64;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+     |
+2648 -                 return event_start_time.as_seconds() == expected_date as u64;
+2648 +                 event_start_time.as_seconds() == expected_date as u64
+     |
+
+warning: this operation has no effect
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2643:50
+     |
+2643 |                     Date::from_calendar_date(2026, Month::July, 01 * (index + 1) as u8)
+     |                                                                 ^^^^^^^^^^^^^^^^^^^^^^ help: consider reducing it to: `((index + 1) as u8)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#identity_op
+     = note: `#[warn(clippy::identity_op)]` on by default
+
+warning: unneeded `return` statement
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2701:5
+     |
+2701 |                 return event_start_time.as_seconds() == expected_date as u64;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_return
+help: remove `return`
+     |
+2701 -                 return event_start_time.as_seconds() == expected_date as u64;
+2701 +                 event_start_time.as_seconds() == expected_date as u64
+     |
+
+warning: this operation has no effect
+    --> tuta-sdk/rust/sdk/src/date/event_facade.rs:2696:51
+     |
+2696 |                     Date::from_calendar_date(2026, Month::March, 01 * (index + 1) as u8)
+     |                                                                  ^^^^^^^^^^^^^^^^^^^^^^ help: consider reducing it to: `((index + 1) as u8)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#identity_op
+
+warning: using `clone` on type `Option<&[GroupKey; 2]>` which implements the `Copy` trait
+   --> tuta-sdk/rust/sdk/src/key_loader_facade.rs:449:23
+    |
+449 |                 let former_keys = former_keys.clone().unwrap();
+    |                                   ^^^^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `former_keys`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#clone_on_copy
+    = note: `#[warn(clippy::clone_on_copy)]` on by default
+
+warning: the loop variable `i` is used to index `former_keys_decrypted`
+    --> tuta-sdk/rust/sdk/src/key_loader_facade.rs:1069:13
+     |
+1069 |             for i in 0..FORMER_KEYS {
+     |                      ^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_range_loop
+     = note: `#[warn(clippy::needless_range_loop)]` on by default
+help: consider using an iterator and enumerate()
+     |
+1069 -             for i in 0..FORMER_KEYS {
+1069 +             for (i, <item>) in former_keys_decrypted.iter().enumerate().take(FORMER_KEYS) {
+     |
+
+warning: this `repeat().take()` can be written more concisely
+   --> tuta-sdk/rust/sdk/src/mail_facade.rs:300:39
+    |
+300 |               let mails: Vec<IdTupleGenerated> = std::iter::repeat(IdTupleGenerated::new(
+    |  ________________________________________________^
+301 | |                 GeneratedId::test_random(),
+302 | |                 GeneratedId::test_random(),
+303 | |             ))
+304 | |             .take(100)
+    | |______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_repeat_n
+    = note: `#[warn(clippy::manual_repeat_n)]` on by default
+help: consider using `repeat_n()` instead
+    |
+300 ~             let mails: Vec<IdTupleGenerated> = std::iter::repeat_n(IdTupleGenerated::new(
+301 ~                 GeneratedId::test_random(),
+302 ~                 GeneratedId::test_random(),
+303 ~             ), 100)
+    |
+
+warning: this `repeat().take()` can be written more concisely
+   --> tuta-sdk/rust/sdk/src/mail_facade.rs:406:38
+    |
+406 |           let mails: Vec<IdTupleGenerated> = std::iter::repeat(IdTupleGenerated::new(
+    |  ____________________________________________^
+407 | |             GeneratedId::test_random(),
+408 | |             GeneratedId::test_random(),
+409 | |         ))
+410 | |         .take(100)
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_repeat_n
+help: consider using `repeat_n()` instead
+    |
+406 ~         let mails: Vec<IdTupleGenerated> = std::iter::repeat_n(IdTupleGenerated::new(
+407 ~             GeneratedId::test_random(),
+408 ~             GeneratedId::test_random(),
+409 ~         ), 100)
+    |
+
+warning: this `repeat().take()` can be written more concisely
+   --> tuta-sdk/rust/sdk/src/mail_facade.rs:506:38
+    |
+506 |           let mails: Vec<IdTupleGenerated> = std::iter::repeat(IdTupleGenerated::new(
+    |  ____________________________________________^
+507 | |             GeneratedId::test_random(),
+508 | |             GeneratedId::test_random(),
+509 | |         ))
+510 | |         .take(100)
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#manual_repeat_n
+help: consider using `repeat_n()` instead
+    |
+506 ~         let mails: Vec<IdTupleGenerated> = std::iter::repeat_n(IdTupleGenerated::new(
+507 ~             GeneratedId::test_random(),
+508 ~             GeneratedId::test_random(),
+509 ~         ), 100)
+    |
+
+warning: this function could have a `#[must_use]` attribute
+  --> tuta-sdk/rust/sdk/src/util/test_utils.rs:36:8
+   |
+36 | pub fn get_x25519_pub_key_bytes() -> [u8; 32] {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#must_use_candidate
+   = note: requested on the command line with `-W clippy::must-use-candidate`
+help: add the attribute
+   |
+36 + #[must_use] 
+37 | pub fn get_x25519_pub_key_bytes() -> [u8; 32] {
+   |
+
+warning: this function could have a `#[must_use]` attribute
+  --> tuta-sdk/rust/sdk/src/util/test_utils.rs:42:8
+   |
+42 | pub fn get_rsa_pub_key_bytes() -> [u8; 258] {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#must_use_candidate
+help: add the attribute
+   |
+42 + #[must_use] 
+43 | pub fn get_rsa_pub_key_bytes() -> [u8; 258] {
+   |
+
+warning: this function could have a `#[must_use]` attribute
+  --> tuta-sdk/rust/sdk/src/util/test_utils.rs:50:8
+   |
+50 | pub fn get_kyber_pub_key_bytes() -> [u8; 1568] {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#must_use_candidate
+help: add the attribute
+   |
+50 + #[must_use] 
+51 | pub fn get_kyber_pub_key_bytes() -> [u8; 1568] {
+   |
+
+warning: this function could have a `#[must_use]` attribute
+   --> tuta-sdk/rust/sdk/src/util/test_utils.rs:225:8
+    |
+225 | pub fn generate_group_with_keys(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#must_use_candidate
+help: add the attribute
+    |
+225 + #[must_use] 
+226 | pub fn generate_group_with_keys(
+    |
+
+warning: `tuta-sdk` (lib test) generated 61 warnings (21 duplicates) (run `cargo clippy --fix --lib -p tuta-sdk --tests -- --no-deps` to apply 30 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 06s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

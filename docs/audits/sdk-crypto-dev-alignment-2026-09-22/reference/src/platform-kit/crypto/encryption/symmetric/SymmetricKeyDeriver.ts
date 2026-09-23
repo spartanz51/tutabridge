@@ -1,0 +1,177 @@
+import { Aes128Key, Aes256Key, AesKey, AesKeyLength, AesKeyOrSubKeys, getKeyLengthInBytes } from "./AesKey.js"
+import { SymmetricCipherVersion } from "./SymmetricCipherVersion.js"
+import { KdfNonce, keyToUint8Array, uint8ArrayToKey } from "./SymmetricCipherUtils.js"
+import { sha256Hash } from "../../hashes/Sha256.js"
+import { sha512Hash } from "../../hashes/Sha512.js"
+import { blake3Kdf } from "../../hashes/Blake3.js"
+import { concat, KeyVersion } from "@tutao/utils"
+import {
+	AEAD_FROM_GROUP_KEY_AND_NONCE_DERIVATION_OF_INSTANCE_KEY,
+	AEAD_FROM_INSTANCE_KEY_DERIVATION,
+	AEAD_FROM_SESSION_KEY_DERIVATION,
+	VersionedAes256Key,
+	VersionedKey,
+} from "../../CryptoTypes"
+import { ProgrammingError } from "@tutao/app-env"
+import { CryptoError } from "@tutao/crypto/error"
+import { KeyDerivationContext } from "./AssociatedData"
+
+export abstract class SymmetricSubKeys extends AesKeyOrSubKeys {
+	public abstract readonly cipherVersion: SymmetricCipherVersion
+
+	protected constructor(
+		public readonly encryptionKey: AesKey,
+		public readonly authenticationKey: AesKey | null = null,
+	) {
+		super()
+	}
+}
+
+export abstract class AesCbcSubKeys extends SymmetricSubKeys {
+	protected constructor(encryptionKey: AesKey, authenticationKey: AesKey | null = null) {
+		super(encryptionKey, authenticationKey)
+	}
+}
+
+export class UnusedReservedUnauthenticatedSubKeys extends AesCbcSubKeys {
+	public override readonly cipherVersion = SymmetricCipherVersion.UnusedReservedUnauthenticated
+
+	constructor(encryptionKey: AesKey) {
+		super(encryptionKey)
+	}
+}
+
+export class AesCbcThenHmacSubKeys extends AesCbcSubKeys {
+	public override readonly cipherVersion = SymmetricCipherVersion.AesCbcThenHmac
+
+	constructor(
+		encryptionKey: AesKey,
+		public override readonly authenticationKey: AesKey,
+	) {
+		super(encryptionKey, authenticationKey)
+	}
+}
+
+export abstract class AeadSubKeys extends SymmetricSubKeys {
+	protected constructor(
+		public override readonly encryptionKey: Aes256Key,
+		public override readonly authenticationKey: Aes256Key,
+	) {
+		super(encryptionKey, authenticationKey)
+	}
+}
+
+export class AeadWithInstanceKeySubKeys extends AeadSubKeys {
+	public override readonly cipherVersion = SymmetricCipherVersion.AeadWithInstanceKey
+
+	constructor(
+		public readonly groupKeyVersion: KeyVersion,
+		encryptionKey: Aes256Key,
+		authenticationKey: Aes256Key,
+	) {
+		super(encryptionKey, authenticationKey)
+	}
+}
+
+export class AeadWithSessionKeySubKeys extends AeadSubKeys {
+	public override readonly cipherVersion = SymmetricCipherVersion.AeadWithSessionKey
+
+	constructor(encryptionKey: Aes256Key, authenticationKey: Aes256Key) {
+		super(encryptionKey, authenticationKey)
+	}
+}
+
+const DEFAULT_LENGTH_PER_KEY_BYTES = getKeyLengthInBytes(AesKeyLength.Aes256)
+const DEFAULT_TOTAL_KEY_LENGTH_BYTES = 2 * DEFAULT_LENGTH_PER_KEY_BYTES
+
+/**
+ * Derives keys for symmetric encryption schemes.
+ */
+export class SymmetricKeyDeriver {
+	/**
+	 * Derives encryption and authentication keys as needed for the symmetric cipher implementations
+	 */
+	deriveSubKeysAesCbc(key: AesKey, cipherVersion: SymmetricCipherVersion): AesCbcSubKeys {
+		switch (cipherVersion) {
+			case SymmetricCipherVersion.UnusedReservedUnauthenticated:
+				return new UnusedReservedUnauthenticatedSubKeys(key)
+			case SymmetricCipherVersion.AesCbcThenHmac: {
+				let hashedKey: Uint8Array<ArrayBuffer>
+				if (key instanceof Aes128Key) {
+					hashedKey = sha256Hash(keyToUint8Array(key))
+				} else if (key instanceof Aes256Key) {
+					hashedKey = sha512Hash(keyToUint8Array(key))
+				} else {
+					throw new ProgrammingError("invalid key type")
+				}
+				const keyLengthInBytes: number = getKeyLengthInBytes(key.keyLength)
+				return new AesCbcThenHmacSubKeys(
+					uint8ArrayToKey(hashedKey.subarray(0, keyLengthInBytes)),
+					uint8ArrayToKey(hashedKey.subarray(keyLengthInBytes, hashedKey.length)),
+				)
+			}
+			default:
+				throw new CryptoError(`unexpected cipher version ${cipherVersion}`)
+		}
+	}
+
+	/**
+	 * Derive instance key for AEAD from groupKey and Kdf nonce.
+	 */
+	deriveInstanceKey(groupKey: VersionedKey, kdfNonce: KdfNonce): VersionedAes256Key {
+		return deriveInstanceKey(groupKey, kdfNonce)
+	}
+
+	/**
+	 * Derive encryption and authentication keys for AEAD from instanceKey in the correct groupKey version for the instance type.
+	 */
+	deriveSubKeysAeadWithInstanceKeyFromInstanceKey(instanceKey: VersionedAes256Key, keyDerivationContext: KeyDerivationContext): AeadWithInstanceKeySubKeys {
+		const context = `${AEAD_FROM_INSTANCE_KEY_DERIVATION}${keyDerivationContext}`
+		const inputKeyMaterial = keyToUint8Array(instanceKey.object)
+		return this.deriveAeadGroupKeySubKeys(inputKeyMaterial, context, instanceKey.version)
+	}
+
+	/**
+	 * Derive encryption and authentication keys for AEAD with instanceKey from kdf nonce and groupKey in the correct groupKey version for the instance type.
+	 */
+	deriveSubKeysAeadWithInstanceKeyFromGroupKey(
+		groupKey: VersionedKey,
+		kdfNonce: KdfNonce,
+		keyDerivationContext: KeyDerivationContext,
+	): AeadWithInstanceKeySubKeys {
+		const instanceKey = this.deriveInstanceKey(groupKey, kdfNonce)
+		return this.deriveSubKeysAeadWithInstanceKeyFromInstanceKey(instanceKey, keyDerivationContext)
+	}
+
+	/**
+	 * Derive encryption and authentication keys for AEAD from the session key for the instance type.
+	 */
+	deriveSubKeysAeadWithSessionKey(sessionKey: AesKey, keyDerivationContext: KeyDerivationContext): AeadWithSessionKeySubKeys {
+		const context = `${AEAD_FROM_SESSION_KEY_DERIVATION}${keyDerivationContext}`
+		const inputKeyMaterial = keyToUint8Array(sessionKey)
+		return this.deriveAeadSubKeys(inputKeyMaterial, context)
+	}
+
+	private deriveAeadSubKeys(inputKeyMaterial: Uint8Array<ArrayBuffer>, context: string): AeadWithSessionKeySubKeys {
+		const derivedBytes = blake3Kdf(inputKeyMaterial, context, DEFAULT_TOTAL_KEY_LENGTH_BYTES)
+		const encryptionKey = uint8ArrayToKey(derivedBytes.subarray(0, DEFAULT_LENGTH_PER_KEY_BYTES), AesKeyLength.Aes256)
+		const authenticationKey = uint8ArrayToKey(derivedBytes.subarray(DEFAULT_LENGTH_PER_KEY_BYTES, DEFAULT_TOTAL_KEY_LENGTH_BYTES), AesKeyLength.Aes256)
+		return new AeadWithSessionKeySubKeys(encryptionKey, authenticationKey)
+	}
+
+	private deriveAeadGroupKeySubKeys(inputKeyMaterial: Uint8Array<ArrayBuffer>, context: string, groupKeyVersion: KeyVersion): AeadWithInstanceKeySubKeys {
+		const derivedBytes = blake3Kdf(inputKeyMaterial, context, DEFAULT_TOTAL_KEY_LENGTH_BYTES)
+		const encryptionKey = uint8ArrayToKey(derivedBytes.subarray(0, DEFAULT_LENGTH_PER_KEY_BYTES), AesKeyLength.Aes256)
+		const authenticationKey = uint8ArrayToKey(derivedBytes.subarray(DEFAULT_LENGTH_PER_KEY_BYTES, DEFAULT_TOTAL_KEY_LENGTH_BYTES), AesKeyLength.Aes256)
+		return new AeadWithInstanceKeySubKeys(groupKeyVersion, encryptionKey, authenticationKey)
+	}
+}
+
+export function deriveInstanceKey(groupKey: VersionedKey, kdfNonce: KdfNonce): VersionedAes256Key {
+	const context = AEAD_FROM_GROUP_KEY_AND_NONCE_DERIVATION_OF_INSTANCE_KEY
+	const inputKeyMaterial = concat(keyToUint8Array(groupKey.object), kdfNonce)
+	const derivedBytes = blake3Kdf(inputKeyMaterial, context, DEFAULT_LENGTH_PER_KEY_BYTES)
+	return { object: uint8ArrayToKey(derivedBytes, AesKeyLength.Aes256), version: groupKey.version }
+}
+
+export const SYMMETRIC_KEY_DERIVER = new SymmetricKeyDeriver()

@@ -1,0 +1,182 @@
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs
+index 3e5f8562faf34fae71fd5ee3b72738096acc4d25..c1604c4a95d20d60ddc519310a82f816b87b26bf 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs
+@@ -247,6 +247,73 @@ mod tests {
+ 		}
+ 	}
+ 
++	#[test]
++	fn crypto_dev_vectors_preserve_the_359_protocol_boundary() {
++		use super::super::decryption::InstanceDecryptor;
++		use std::collections::HashMap;
++		let vectors: Vec<Value> = serde_json::from_str(include_str!(
++			"../../../tests/fixtures/crypto_dev_attributes.json"
++		))
++		.unwrap();
++		for vector in vectors {
++			let key = GenericAesKey::from_bytes(
++				&BASE64_STANDARD
++					.decode(vector["key"].as_str().unwrap())
++					.unwrap(),
++			)
++			.unwrap();
++			let nonce = BASE64_STANDARD
++				.decode(vector["kdf_nonce"].as_str().unwrap())
++				.unwrap();
++			let ciphertext = BASE64_STANDARD
++				.decode(vector["ciphertext"].as_str().unwrap())
++				.unwrap();
++			let instance_type = vector["instance_type"].as_str().unwrap();
++			let path = vector["path"].as_str().unwrap();
++			let group_keys = HashMap::from([(7, key.clone())]);
++			let decryptor = InstanceDecryptor::with_group_keys(
++				Some(&key),
++				&group_keys,
++				Some(&nonce),
++				instance_type.into(),
++				RandomizerFacade::from_core(DeterministicRng(0x44)),
++			);
++			let input = if vector["version"] == 3 {
++				AeadEncryptionKey::SessionKey(key.clone())
++			} else {
++				AeadEncryptionKey::GroupKey(Versioned {
++					object: key.clone(),
++					version: 7,
++				})
++			};
++			let encryptor = InstanceEncryptor::new(
++				&input,
++				Some(&nonce),
++				instance_type,
++				RandomizerFacade::from_core(DeterministicRng(0x44)),
++			)
++			.unwrap();
++			let plaintext = vector["plaintext"].as_str().unwrap().as_bytes();
++			let written = encryptor.encrypt(plaintext.to_vec(), path).unwrap();
++			if vector["compatible_with_359"].as_bool().unwrap() {
++				assert_eq!(written, ciphertext);
++				assert_eq!(
++					decryptor.decrypt(&ciphertext, Some(path)).unwrap(),
++					plaintext
++				);
++			} else {
++				// crypto/dev retains the version bytes but changes the v2 derivation
++				// and the context of draft attributes. Do not guess another context.
++				assert_ne!(written, ciphertext);
++				assert!(decryptor
++					.decrypt(&ciphertext, Some(path))
++					.unwrap_err()
++					.to_string()
++					.contains("AEAD"));
++			}
++		}
++	}
++
+ 	#[test]
+ 	fn sibling_aggregate_paths_are_independent_and_authenticated() {
+ 		use super::super::decryption::InstanceDecryptor;
+diff --git a/tuta-sdk/rust/sdk/tests/fixtures/crypto_dev_attributes.json b/tuta-sdk/rust/sdk/tests/fixtures/crypto_dev_attributes.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9499ed90ff3a4985ea9e375b7fb7fa93c806408
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/tests/fixtures/crypto_dev_attributes.json
+@@ -0,0 +1,98 @@
++[
++  {
++    "version": 2,
++    "instance_type": "tutanota/97",
++    "derivation_context": "tutanota/97",
++    "path": "105",
++    "plaintext": "Sujet écrit — 🦀",
++    "ciphertext": "AgAHRERERERERERERERERERERE5a6iRLNTMQB/hEGeuFg0Dtd+y2wyyMdbZLrUa5nJggJvKqaqYGn2C1teJx6Y+wi8fUbML1k4/P",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jSUsfMTA1",
++    "compatible_with_359": false
++  },
++  {
++    "version": 2,
++    "instance_type": "tutanota/97",
++    "derivation_context": "tutanota/97",
++    "path": "105",
++    "plaintext": "",
++    "ciphertext": "AgAHRERERERERERERERERERERJ0vgEHoK6BLr02iIJD/qqoSa0MfjmJ5HW2wKKyM56RwEBa1WA==",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jSUsfMTA1",
++    "compatible_with_359": false
++  },
++  {
++    "version": 2,
++    "instance_type": "tutanota/97",
++    "derivation_context": "tutanota/97",
++    "path": "111/sender-id/94",
++    "plaintext": "Alice",
++    "ciphertext": "AgAHRERERERERERERERERERERFxD6SJalfC5zMeaKljTzaHflqa+xu1OicjTQ7yoFeoPAPTx0fxvEug=",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jSUsfMTExL3NlbmRlci1pZC85NA==",
++    "compatible_with_359": false
++  },
++  {
++    "version": 2,
++    "instance_type": "tutanota/1290",
++    "derivation_context": "tutanota/1298",
++    "path": "1297/details-id/1256",
++    "plaintext": "draft",
++    "ciphertext": "AgAHRERERERERERERERERERERFXMvBlemjOEbYs2mMd/h8tp+LvPXjznm6iFu70ySwdAxvuGXm+3uaI=",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jSUsfMTMwNS9kZXRhaWxzLWlkLzEyNTY=",
++    "compatible_with_359": false
++  },
++  {
++    "version": 3,
++    "instance_type": "tutanota/97",
++    "derivation_context": "tutanota/97",
++    "path": "105",
++    "plaintext": "Sujet écrit — 🦀",
++    "ciphertext": "A0REREREREREREREREREREQoE6G8RIOZSQ5cUHphQId1oHnVJyAVX70zC4xBYVG7tnYS0KAEoCiN+loNqmtDo6XkzahpV9Glqg==",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jU0sfMTA1",
++    "compatible_with_359": true
++  },
++  {
++    "version": 3,
++    "instance_type": "tutanota/97",
++    "derivation_context": "tutanota/97",
++    "path": "105",
++    "plaintext": "",
++    "ciphertext": "A0RERERERERERERERERERET7ZsvZJDRIJKsh4ZFDjbkA7uedrCdFPAyVdc3ixbRsrFDq6Kg=",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jU0sfMTA1",
++    "compatible_with_359": true
++  },
++  {
++    "version": 3,
++    "instance_type": "tutanota/97",
++    "derivation_context": "tutanota/97",
++    "path": "111/sender-id/94",
++    "plaintext": "Alice",
++    "ciphertext": "A0REREREREREREREREREREQ6CqK6VSNa4D9RGJZToH6vIkXLafyuCBm3kbkrBxgj4Jv1PBH+DpGc",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jU0sfMTExL3NlbmRlci1pZC85NA==",
++    "compatible_with_359": true
++  },
++  {
++    "version": 3,
++    "instance_type": "tutanota/1290",
++    "derivation_context": "tutanota/1298",
++    "path": "1297/details-id/1256",
++    "plaintext": "draft",
++    "ciphertext": "A0RERERERERERERERERERES5QvOSmckGNGe0P/QVuvz2c+1KpYrxdjqUPD7KnBtOb2gebWpHZ3VG",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "associated_data": "YXR0cmlidXRlRW5jU0sfMTMwNS9kZXRhaWxzLWlkLzEyNTY=",
++    "compatible_with_359": false
++  }
++]

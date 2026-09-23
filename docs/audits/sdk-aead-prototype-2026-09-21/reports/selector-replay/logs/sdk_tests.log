@@ -1,0 +1,388 @@
+   Compiling util v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/selector-run/tutanota-release-359.260904.0/bridge/tuta-repo/tuta-sdk/rust/util)
+   Compiling crypto-primitives v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/selector-run/tutanota-release-359.260904.0/bridge/tuta-repo/tuta-sdk/rust/crypto-primitives)
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/selector-run/tutanota-release-359.260904.0/bridge/tuta-repo/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+warning: method `parse_raw` is never used
+  --> tuta-sdk/rust/sdk/src/entity_client.rs:53:9
+   |
+31 | impl EntityClient {
+   | ----------------- method in this implementation
+...
+53 |     pub fn parse_raw(
+   |            ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tuta-sdk` (lib test) generated 2 warnings (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.97s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/replay-targets/tutanota-release-359.260904.0/sdk/debug/deps/tutasdk-cee6532dfd4c584d)
+
+running 330 tests
+test bindings::suspendable_rest_client::tests::get_sleep_time_returns_none_if_sleep_until_equals_now ... ok
+test bindings::suspendable_rest_client::tests::get_sleep_time_returns_correct_duration_if_sleep_until_in_future ... ok
+test bindings::suspendable_rest_client::tests::get_sleep_time_returns_none_if_sleep_until_in_past ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_new_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_deserialize_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_new_blobs_with_invalid_number_of_blobs_larger ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_blobs_with_invalid_number_of_blobs_fewer ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_blobs_with_invalid_number_of_blobs_larger ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_deserialize_new_blobs_with_invalid_number_of_blobs_fewer ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_blobs ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_deserialize_new_blobs ... ok
+test bindings::suspendable_rest_client::tests::get_suspension_returns_suspension_on_service_unavailable_error ... ok
+test bindings::suspendable_rest_client::tests::get_suspension_returns_suspension_on_too_many_requests_error ... ok
+test bindings::native_file_client::tests::save_and_read_roundtrip ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_new_blobs_in_chunks_do_not_exceed_max_number_of_blobs_in_binary ... ok
+test blobs::binary_blob_wrapper_serializer::tests::test_serialize_new_blobs_in_chunks ... ok
+test blobs::blob_facade::read::tests::binary_parser_checks_framing_before_allocation ... ok
+test blobs::blob_facade::read::tests::binary_parser_matches_ts_vectors_with_explicit_stricter_framing ... ok
+test blobs::blob_access_token_cache::tests::evict ... ok
+test blobs::blob_access_token_cache::tests::get_cached ... ok
+test blobs::blob_access_token_cache::tests::get_uncached ... ok
+test blobs::blob_access_token_cache::tests::get_expired ... ok
+test blobs::blob_access_token_facade::tests::request_write_token_with_uncached_and_cached ... ok
+test blobs::blob_access_token_cache::tests::can_be_used_for_another_request_expired_token ... ok
+test blobs::blob_facade::tests::chunk_data_works ... ok
+test blobs::blob_facade::tests::encode_query_params_works ... ok
+test blobs::blob_facade::read::tests::blob_element_retries_transient_server_then_returns_body ... ok
+test blobs::blob_access_token_facade::tests::archive_read_token_is_refetched_after_eviction ... ok
+test blobs::blob_facade::read::tests::binary_download_uses_instance_scope_and_chunks_at_100 ... ok
+test blobs::blob_access_token_facade::tests::read_token_cache_preserves_instance_scope ... ok
+test blobs::blob_facade::read::tests::blob_element_failover_and_token_refresh_are_bounded ... ok
+test blobs::blob_facade::read::tests::token_service_403_also_gets_one_refresh ... ok
+test crypto::asymmetric_crypto_facade::tests::authenticate_sender::should_return_tutacrypt_authentication_failed_if_sender_does_not_have_an_x25519_identity_key_in_the_requested_version ... ok
+test crypto::asymmetric_crypto_facade::tests::authenticate_sender::should_return_tutacrypt_authentication_failed_if_the_key_does_not_match ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_single_blob_legacy ... ok
+test crypto::asymmetric_crypto_facade::tests::authenticate_sender::should_return_tutacrypt_authentication_succeeded_if_the_key_matches ... ok
+test blobs::blob_facade::read::tests::binary_download_rejects_missing_or_unrequested_blobs ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair::error_when_crypto_protocol_version_does_not_match_key_pair_rsa ... ok
+test blobs::blob_facade::read::tests::binary_refresh_restarts_the_complete_archive_read_once ... ok
+test blobs::blob_facade::read::tests::get_rejects_unexpected_success_statuses ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair::should_call_tuta_crypt_decryption_when_the_protocol_version_is_set_to_tuta_crypt ... ok
+test blobs::blob_facade::read::tests::permanent_errors_and_empty_bodies_do_not_retry ... ok
+test contacts::contact_facade::contact_facade_integration_tests::test_fetch_contacts ... ok
+test contacts::contact_facade::contact_facade_integration_tests::test_fetch_contacts_entity_list ... ok
+test crypto::asymmetric_crypto_facade::tests::encrypt_pub_sym_key::encrypt_the_sym_key_with_the_recipient_tuta_crypt_public_key ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair_and_authenticate::error_if_authentication_fails ... ok
+test blobs::blob_facade::read::tests::server_failover_and_refresh_match_ts_vectors ... ok
+test bindings::suspendable_rest_client::tests::respects_service_unavailable_error_with_retry_after_throws ... ok
+test crypto::crypto_facade::test::owner_enc_session_key_is_returned_if_no_bucket_key ... ok
+test crypto::crypto_facade::test::resolve_session_key_using_permission ... ok
+test crypto::crypto_facade::test::test_rsa_bucket_key_resolves ... ok
+test crypto::crypto_facade::test::test_tuta_crypt_bucket_key_resolves ... ok
+test crypto::hkdf::tests::test_hkdf ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_multiple_attachments ... ok
+test bindings::suspendable_rest_client::tests::respects_too_many_requests_with_retry_after ... ok
+test crypto::key_encryption::tests::tuta_crypt_roundtrip ... ok
+test bindings::suspendable_rest_client::tests::respects_service_unavailable_error_with_retry_after ... ok
+test crypto::kyber::tests::test_kyber_encoding_roundtrip ... ok
+test crypto::kyber::tests::test_kyber ... ok
+test crypto::kyber::tests::test_kyber_encryption_roundtrip ... ok
+test crypto::public_key_provider::tests::load_current_pub_key::rsa_key_in_version_other_than_0 ... ok
+test crypto::public_key_provider::tests::load_current_pub_key::success ... ok
+test crypto::public_key_provider::tests::load_version_pub_key::rsa_key_in_version_other_than_0 ... ok
+test crypto::public_key_provider::tests::load_version_pub_key::invalid_version_returned ... ok
+test crypto::public_key_provider::tests::load_version_pub_key::success ... ok
+test crypto::public_key_provider::tests::version_validation::panics_if_the_version_is_negative - should panic ... ok
+test crypto::rsa::tests::test_rsa_encryption ... ok
+test crypto::rsa::tests::test_rsa_serialize_roundtrip ... ok
+test crypto::tuta_crypt::tests::test_bucket_key_serialize_decapsulate ... ok
+test crypto::tuta_crypt::tests::test_bucket_key_serialize_encapsulate_roundtrip ... ok
+test crypto::rsa::tests::test_rsa_decryption ... ok
+test crypto::tuta_crypt::tests::test_bucket_key_serialize_roundtrip ... ok
+test crypto::x25519::tests::test_identity_element_fails ... ok
+test crypto::x25519::tests::compatibility_test_x25519 ... ok
+test crypto_entity_client::aead::tests::loads_ciphertext_group_versions_without_requesting_a_session_key ... ok
+test crypto_entity_client::tests::auth_result_rsa_despite_tuta_crypt ... ok
+test crypto_entity_client::tests::can_load_mail ... ok
+test crypto_entity_client::tests::load_mail_authentication_fails ... ok
+test crypto_entity_client::tests::load_mail_authentication_succeeds ... ok
+test crypto_entity_client::tests::no_auth_for_encrypted_instances_except_mail ... ok
+test crypto_entity_client::tests::load_mail_authentication_system_sender_succeeds ... ok
+test customer::customer_facade::customer_facade_unit_test::test_fetch_customer ... ok
+test customer::customer_facade::customer_facade_unit_test::test_fetch_customer_info ... ok
+test date::calendar_facade::calendar_facade_unit_tests::filter_events_in_range_tests::should_remove_events_not_in_range_multiple_days ... ok
+test date::calendar_facade::calendar_facade_unit_tests::filter_events_in_range_tests::should_remove_events_not_in_range_one_day ... ok
+test date::calendar_facade::calendar_facade_unit_tests::generate_birthdays_tests::test_fail_to_generate_birthday_from_invalid_contacts ... ok
+test date::calendar_facade::calendar_facade_unit_tests::generate_birthdays_tests::test_generate_birthday_from_valid_contacts ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendar_events_tests::test_get_calendar_events_returns_empty ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendar_events_tests::test_get_calendar_events_with_repeating_event ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_birthday_calendar_render_info ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_do_not_create_birthday_calendar_render_info_for_free_account ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_do_not_create_birthday_calendar_render_info_for_legacy_account ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_private_custom_calendar_no_name_render_info ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_private_custom_calendar_render_info ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_private_default_calendar_render_info ... ok
+test date::calendar_facade::calendar_facade_unit_tests::get_calendars_render_data_tests::test_shared_calendar_render_info ... ok
+test date::date_time::tests::initializing_datetime_default ... ok
+test date::date_time::tests::initializing_datetime_timestamp ... ok
+test date::date_time::tests::is_after ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_create_event_instances_for_weekly_events ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_create_event_instances_with_by_rule ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_create_event_instances_with_excluded_dates ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_all_day_event_instances ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_event_with_by_rule_result_before_incremented_event_instance ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_events_biweekly ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_events_by_day_by_month_yearly ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair::error_when_the_protocol_version_is_symmetric ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_instances ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_instances_for_old_event_reaching_far_future ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_instances_with_by_rule ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_events_by_month_on_last_friday ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_instances_with_dst_change ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_instances_with_by_rule_one_month ... ok
+test crypto::asymmetric_crypto_facade::tests::encrypt_pub_sym_key::encrypt_rsa ... ok
+test date::event_facade::event_facade_unit_tests::calculate_next_occurrence_date_timed_event_tests::all_day_events::test_all_day_daily_recurrence_across_end_of_dst ... ok
+test date::event_facade::event_facade_unit_tests::calculate_event_occurrences_tests::test_generate_recurring_all_day_event_across_dst ... ok
+test date::event_facade::event_facade_unit_tests::calculate_next_occurrence_date_timed_event_tests::all_day_events::test_all_day_daily_recurrence_across_start_of_dst ... ok
+test date::event_facade::event_facade_unit_tests::calculate_next_occurrence_date_timed_event_tests::all_day_events::test_calculate_all_day_daily_recurrence_no_dst ... ok
+test date::event_facade::event_facade_unit_tests::calculate_next_occurrence_date_timed_event_tests::normal_timed_events::test_calculate_simple_daily_recurrence_no_dst ... ok
+test date::event_facade::event_facade_unit_tests::calculate_next_occurrence_date_timed_event_tests::normal_timed_events::test_daily_recurrence_across_end_of_dst ... ok
+test date::event_facade::event_facade_unit_tests::calculate_next_occurrence_date_timed_event_tests::normal_timed_events::test_daily_recurrence_across_start_of_dst ... ok
+test date::event_facade::event_facade_unit_tests::test_add_months_to_date ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_daily_with_by_month_and_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_daily_with_by_month_and_by_day_and_by_monthday ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_by_month ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_by_month_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_by_month_day_and_by_day ... ok
+test crypto::asymmetric_crypto_facade::tests::encrypt_pub_sym_key::recipient_has_tuta_crypt_public_key_and_sender_has_only_rsa_key_pair_then_put_sender_x25519_key ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_second_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_by_month_and_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_monthly_with_two_last_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_weekly_with_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_weekly_with_by_month ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_weekly_with_by_day_edge ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_weekly_with_by_day_and_wkst_edge ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_with_by_month_daily ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_weekly_with_by_day_and_wkst ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_weekly_with_by_month_and_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_yearly_with_by_month_and_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_yearly_with_by_week_no_and_wkst ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_yearly_with_negative_week_no ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_yearly_with_by_day_and_by_year_day ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_yearly_with_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_generate_birthday ... ok
+test date::event_facade::event_facade_unit_tests::test_flow_yearly_with_by_week_no_and_by_day ... ok
+test date::event_facade::event_facade_unit_tests::test_generate_future_instances_yearly_byweekno_byday_on_a_different_week ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_monthly ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_daily_invalid ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_daily ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_monthly_with_monthday_and_week ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_monthly_with_week ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_monthly_with_monthday ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_weekly ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_yearly ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_yearly_with_invalid_rule - should panic ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_yearly_with_ordinal_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_yearly_with_week ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_month_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_daily_by_month ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_daily_by_month_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_edge_week_no ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_invalid_by_month_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_invalid_date_by_month_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_monthly_by_month ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_negative_by_month_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_negative_week_no ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_negative_year_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_out_of_week_no ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_out_of_year_year_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_positive_week_no ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_weekly_by_month ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_wkst_week_no ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_year_day ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_year_day_keep_month ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_yearly_by_month ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_year_day_keep_week ... ok
+test date::event_facade::event_facade_unit_tests::test_parse_by_day_yearly_with_weekno ... ok
+test entities::entity_facade::decryption::tests::distinguishes_versions_without_misreading_legacy_ivs ... ok
+test entities::entity_facade::decryption::tests::malformed_aead_and_128_bit_session_keys_fail_without_fallback ... ok
+test entities::entity_facade::decryption::tests::decrypts_official_ts_session_vectors_and_rejects_wrong_context ... ok
+test entities::entity_facade::decryption::tests::group_vectors_require_the_correct_nonce_version_and_key ... ok
+test entities::entity_facade::decryption_keys::tests::invalid_nonce_is_rejected_and_group_key_entities_are_not_written_as_cbc ... ok
+test entities::entity_facade::decryption_keys::tests::requirements_ignore_unencrypted_key_metadata_and_deduplicate_versions ... ok
+test entities::entity_facade::decryption::tests::mixed_versions_share_context_without_reusing_the_wrong_subkeys ... ok
+test entities::entity_facade::lz4_compressed_string_compatibility_tests::create_compatibility_test_data ... ignored
+test entities::entity_facade::tests::decrypt_compressed_string ... ok
+test entities::entity_facade::tests::compress_empty_compressed_string ... ok
+test entities::entity_facade::tests::decrypt_compressed_string_with_resize ... ok
+test entities::entity_facade::tests::decrypt_empty_compressed_string ... ok
+test entities::entity_facade::tests::encrypt_unencrypted_to_db_literal ... ok
+test entities::entity_facade::tests::encrypt_value_bool ... ok
+test entities::entity_facade::tests::encrypt_value_bytes ... ok
+test entities::entity_facade::tests::aead_aggregate_authenticates_root_type_field_path_and_aggregate_id ... ok
+test entities::entity_facade::tests::encrypt_value_compressed_string ... ok
+test entities::entity_facade::tests::encrypt_value_do_not_accept_null ... ok
+test entities::entity_facade::tests::encrypt_value_date ... ok
+test entities::entity_facade::tests::encrypt_value_null ... ok
+test entities::entity_facade::tests::encrypt_value_string ... ok
+test entities::entity_facade::lz4_compressed_string_compatibility_tests::compatibility_with_js_and_java ... ok
+test entities::entity_facade::tests::test_decrypt_and_parse_date_from_string ... ok
+test entities::entity_facade::tests::encrypt_and_map_instance ... ok
+test entities::entity_facade::tests::test_parse_decrypted_value_date_from_invalid ... ok
+test entities::entity_facade::tests::test_parse_decrypted_value_date_from_number ... ok
+test entities::entity_facade::tests::test_parse_decrypted_value_date_from_string ... ok
+test entities::json_size_estimator::tests::estimate_bool_size ... ok
+test entities::entity_facade::tests::test_decrypt_mail ... ok
+test entities::json_size_estimator::tests::estimate_date_size ... ok
+test entities::json_size_estimator::tests::estimate_id_tuple ... ok
+test entities::json_size_estimator::tests::estimate_map_size ... ok
+test entities::json_size_estimator::tests::estimate_num_size ... ok
+test entities::json_size_estimator::tests::estimate_str_size ... ok
+test entities::json_size_estimator::tests::estimate_struct_size ... ok
+test entities::json_size_estimator::tests::estimate_vec_size ... ok
+test entity_client::batch::tests::accepts_missing_ids_and_preserves_server_order ... ok
+test entity_client::batch::tests::chunks_at_100_and_encodes_query ... ok
+test entity_client::batch::tests::empty_ids_do_not_request ... ok
+test entity_client::batch::tests::failed_batch_stops_the_operation ... ok
+test entity_client::stests::test_load_all_list_entries_asc ... ok
+test entity_client::stests::test_load_all_list_entries_desc ... ok
+test entity_client::batch::tests::malformed_or_missing_body_is_an_error ... ok
+test entity_client::stests::test_load_range_asc_custom_element_id ... ok
+test entity_client::stests::test_load_range_asc_generated_element_id ... ok
+test entity_client::stests::test_load_range_custom_element_id ... ok
+test entity_client::stests::test_load_range_generated_element_id ... ok
+test id::custom_id::tests::base64_round_trip_custom_id_custom_string ... ok
+test id::custom_id::tests::base64_round_trip_custom_id_number ... ok
+test instance_mapper::tests::test_de_calendar_event_uid_index ... ok
+test instance_mapper::tests::test_de_error_wrong_type ... ok
+test instance_mapper::tests::test_de_error_missing_key ... ok
+test instance_mapper::tests::test_de_group_info ... ok
+test instance_mapper::tests::test_de_group ... ok
+test instance_mapper::tests::test_de_map ... ok
+test instance_mapper::tests::test_de_mailbox_group_root ... ok
+test instance_mapper::tests::test_de_out_of_office_notification ... ok
+test instance_mapper::tests::test_ser_calendar_event_uid_index ... ok
+test instance_mapper::tests::test_ser_group ... ok
+test instance_mapper::tests::test_ser_group_info ... ok
+test instance_mapper::tests::test_ser_mailbox_group_root ... ok
+test instance_mapper::tests::test_serde_mail_details_blob ... ok
+test json_element::tests::can_deserialize_email ... ok
+test json_element::tests::can_deserialize_map ... ok
+test json_element::tests::can_deserialize_null ... ok
+test json_element::tests::can_deserialize_number ... ok
+test json_element::tests::can_serialize_map ... ok
+test instance_mapper::tests::test_serde_mail ... ok
+test json_serializer::optional_empty_tests::optional_encrypted_empty_fields_map_to_null ... ok
+test json_serializer::tests::deserialize_serialize_round_trip_works ... ok
+test json_serializer::tests::serialization_for_encrypted_works ... ok
+test json_serializer::tests::test_parse_mail_empty_encrypted_boolean_defaults_to_false ... ok
+test json_serializer::tests::test_parse_mail ... ok
+test json_serializer::tests::test_parse_mail_with_attachments ... ok
+test json_serializer::tests::test_parse_user ... ok
+test json_serializer::tests::test_parse_user_with_empty_group_key ... ok
+test key_cache::tests::get_current_group_key::no_saved_key_for_requested_group ... ok
+test key_cache::tests::get_current_group_key::should_retrieve_latest_key ... ok
+test key_cache::tests::get_current_group_key::should_retrieve_latest_key_of_each_group ... ok
+test key_cache::tests::get_group_key_for_version::should_not_find_key_on_cache ... ok
+test key_cache::tests::get_group_key_for_version::should_insert_and_retrieve_key ... ok
+test key_loader_facade::tests::get_current_sym_group_key::get_user_group_key ... ok
+test key_loader_facade::tests::get_current_sym_group_key::get_non_user_group_key ... ok
+test crypto::key_encryption::tests::rsa_roundtrip ... ok
+test key_loader_facade::tests::load_key_pair::load_current_key_pair ... ok
+test key_loader_facade::tests::load_key_pair::load_former_key_pairs ... ok
+test entities::entity_facade::tests::should_decompress_with_no_limit ... ok
+test key_loader_facade::tests::load_sym_group_key::load_and_decrypt_former_group_key ... ok
+test key_loader_facade::tests::load_sym_group_key::load_and_decrypt_former_group_key_from_cache ... ok
+test key_loader_facade::tests::load_sym_group_key::load_current_user_group_key ... ok
+test key_loader_facade::tests::load_sym_group_key::outdated_current_group_key_errors ... ok
+test login::login_facade::tests::test_resume_session ... ok
+test login::session::tests::authenticate_with_second_factor_totp_rejects_invalid_access_token ... ok
+test login::session::tests::second_factor_type_values_match_typescript ... ok
+test mail_facade::tests::archive_mail_dedupe ... ok
+test mail_facade::tests::archive_mail_one ... ok
+test mail_facade::tests::archive_mail_split ... ok
+test mail_facade::tests::mark_mail_deduped ... ok
+test mail_facade::tests::mark_mail_once ... ok
+test mail_facade::tests::mark_mail_split ... ok
+test mail_facade::tests::trash_mail_dedupe ... ok
+test mail_facade::tests::trash_mail_one ... ok
+test mail_facade::tests::trash_mail_split ... ok
+test metamodel::tests::can_deserialize_empty_application ... ok
+test net::uri::tests::should_fail ... ok
+test net::uri::tests::should_work ... ok
+test rest_error::tests::from_http_response_connection_error_test ... ok
+test rest_error::tests::from_http_response_non_error_test ... ok
+test rest_error::tests::from_http_response_precondition_failed_error_booking_reason_test ... ok
+test rest_error::tests::from_http_response_precondition_failed_error_import_reason_target_folder_deleted_test ... ok
+test rest_error::tests::from_http_response_precondition_failed_error_import_reason_test ... ok
+test rest_error::tests::from_http_response_precondition_failed_error_no_reason_test ... ok
+test rest_error::tests::from_http_response_precondition_failed_error_test ... ok
+test rest_error::tests::from_http_response_unknown_error_test ... ok
+test rest_error::tests::from_http_response_unused_precondition_test ... ok
+test services::service_executor::tests::delete_should_decrypt_map_encrypted_data_and_response ... ok
+test services::service_executor::tests::delete_should_map_unencrypted_data_and_response ... ok
+test services::service_executor::tests::get_should_decrypt_map_encrypted_data_and_response ... ok
+test services::service_executor::tests::get_should_map_unencrypted_data_and_response ... ok
+test services::service_executor::tests::post_should_decrypt_map_encrypted_data_and_response ... ok
+test services::service_executor::tests::post_should_map_unencrypted_data_and_response ... ok
+test services::service_executor::tests::put_should_decrypt_map_encrypted_data_and_response ... ok
+test services::service_executor::tests::put_should_map_unencrypted_data_and_response ... ok
+test tests::test_serialize_mail_does_not_panic ... ok
+test type_model_provider::tests::read_type_model_only_once ... ok
+test type_model_provider::tests::server_attempts_to_persist_json_after_fetch ... ok
+test type_model_provider::tests::server_can_parse_current_type_models ... ok
+test util::test::good_version_to_i64 ... ok
+test util::test::good_version_to_u64 ... ok
+test util::test::is_first_custom_id_bigger ... ok
+test util::test::is_first_custom_id_smaller ... ok
+test util::test::negative_version_to_u64 - should panic ... ok
+test util::test::test_extract_parsed_entity_id_custom ... ok
+test util::test::test_extract_parsed_entity_id_generated ... ok
+test util::test::test_extract_parsed_entity_id_tuple_custom ... ok
+test util::test::test_extract_parsed_entity_id_tuple_generated ... ok
+test util::test::to_large_version_to_i64 - should panic ... ok
+test key_loader_facade::tests::load_current_key_pair::accepts_rsa_key_version_0 ... ok
+test key_loader_facade::tests::load_key_pair::rejects_rsa_key_not_0 ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair::should_call_rsa_decryption_when_the_protocol_version_is_set_to_rsa ... ok
+test crypto::key_encryption::tests::rsa_x25519_roundtrip ... ok
+test crypto::asymmetric_crypto_facade::tests::encrypt_pub_sym_key::encrypt_symetric_key_with_an_rsa_x25519_combo_key_behaves_like_rsa ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair::error_when_crypto_protocol_version_does_not_match_key_pair_tuta_crypt ... ok
+test crypto::asymmetric_crypto_facade::tests::decrypt_sym_key_with_key_pair_and_authenticate::should_not_try_authentication_when_protocol_is_not_tuta_crypt ... ok
+test crypto::argon2_id::tests::test_argon2 ... ok
+test crypto::asymmetric_crypto_facade::tests::encrypt_pub_sym_key::tuta_crypt_encrypt_sym_key::error_when_passing_an_rsa_public_key ... ok
+test crypto::asymmetric_crypto_facade::tests::encrypt_pub_sym_key::tuta_crypt_encrypt_sym_key::error_when_passing_an_rsa_x25519_public_key ... ok
+test crypto_entity_client::tests::no_auth_for_rsa_mail ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_multiple_attachments_including_one_large ... ok
+test key_loader_facade::tests::load_current_key_pair::rejects_rsa_key_not_0 ... ok
+test blobs::blob_facade::tests::encrypt_and_upload_multiple_attachments_worst_case ... ok
+test entities::entity_facade::tests::should_not_compress_too_large_bytes ... ok
+
+test result: ok. 329 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 15.81s
+
+     Running tests/interactive_session_test.rs (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/phase-aead/replay-targets/tutanota-release-359.260904.0/sdk/debug/deps/interactive_session_test-2be298fec148bc7d)
+
+running 3 tests
+test totp_serialization_and_polling_use_existing_services ... ok
+test unsupported_kdf_fails_before_creating_a_session ... ok
+test initiation_returns_credentials_and_challenges_without_resuming_login ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+
+COMMAND: cargo test --manifest-path tuta-repo/Cargo.toml -p tuta-sdk --lib --test interactive_session_test

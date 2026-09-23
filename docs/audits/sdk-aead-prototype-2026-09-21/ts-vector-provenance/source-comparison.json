@@ -1,0 +1,62 @@
+[
+  {
+    "path": "tuta-sdk/rust/sdk/src/entities/entity_facade.rs",
+    "same_between_359_and_master": true,
+    "release359_sha256": "f3098088b4bce8cb98872a1e53ae525b7451dc7f98598c15aa4591373200b651",
+    "master_sha256": "f3098088b4bce8cb98872a1e53ae525b7451dc7f98598c15aa4591373200b651"
+  },
+  {
+    "path": "tuta-sdk/rust/sdk/src/crypto/crypto_facade.rs",
+    "same_between_359_and_master": true,
+    "release359_sha256": "2ce0fcdf15b7d13127ac8bf87c4d01baae498398166b006bf07126e3112faa44",
+    "master_sha256": "2ce0fcdf15b7d13127ac8bf87c4d01baae498398166b006bf07126e3112faa44"
+  },
+  {
+    "path": "tuta-sdk/rust/crypto-primitives/src/key.rs",
+    "same_between_359_and_master": true,
+    "release359_sha256": "80f2342225df681b0af005e5f1dd7c8d95261c3a8d85f8fdb29b9b261f0498aa",
+    "master_sha256": "80f2342225df681b0af005e5f1dd7c8d95261c3a8d85f8fdb29b9b261f0498aa"
+  },
+  {
+    "path": "tuta-sdk/rust/crypto-primitives/src/aes.rs",
+    "same_between_359_and_master": true,
+    "release359_sha256": "b10f8ada0bfeb48187e7d552aaf31ed539b194c2b5c55f34748d2842b05b7be6",
+    "master_sha256": "b10f8ada0bfeb48187e7d552aaf31ed539b194c2b5c55f34748d2842b05b7be6"
+  },
+  {
+    "path": "tuta-sdk/rust/crypto-primitives/src/aead_facade.rs",
+    "same_between_359_and_master": true,
+    "release359_sha256": "e7da7531d6b769ee60a1439555bdef13b34f46c809accd5d58b0cc4d590295b1",
+    "master_sha256": "e7da7531d6b769ee60a1439555bdef13b34f46c809accd5d58b0cc4d590295b1"
+  },
+  {
+    "path": "src/platform-kit/instance-pipeline/CryptoMapper.ts",
+    "same_between_359_and_master": true,
+    "release359_sha256": "1fe4090a51c5712b377df2eac320a627c090ac01889578318591284b2d501415",
+    "master_sha256": "1fe4090a51c5712b377df2eac320a627c090ac01889578318591284b2d501415"
+  },
+  {
+    "path": "src/platform-kit/base/facades/UserFacade.ts",
+    "same_between_359_and_master": true,
+    "release359_sha256": "d3aa927ba13d6d69f3d7e6f0e1eafd3b2c2c006cec872a9e893066d2576524a4",
+    "master_sha256": "d3aa927ba13d6d69f3d7e6f0e1eafd3b2c2c006cec872a9e893066d2576524a4"
+  },
+  {
+    "path": "src/platform-kit/base/facades/RolloutFacade.ts",
+    "same_between_359_and_master": true,
+    "release359_sha256": "941c0188857ba4dc648ec8a7c8270bdb18c59015e339a522ea6abbdd93058350",
+    "master_sha256": "941c0188857ba4dc648ec8a7c8270bdb18c59015e339a522ea6abbdd93058350"
+  },
+  {
+    "path": "src/applications/common/api/worker/EventBusEventCoordinator.ts",
+    "same_between_359_and_master": true,
+    "release359_sha256": "665909c148b21c275fe846950183c2a1f0dc01246754eacf5663eaeff7b0af32",
+    "master_sha256": "665909c148b21c275fe846950183c2a1f0dc01246754eacf5663eaeff7b0af32"
+  },
+  {
+    "path": "src/platform-kit/network/EntityRestClient.ts",
+    "same_between_359_and_master": false,
+    "release359_sha256": "9b5ff430b439e1db05423509eaedfad913a12d24e62701055b4e5cf2176ab56b",
+    "master_sha256": "97be2295d47ba1d53e35431f82e973e8250db4759535892f0b022617fdfe9c10"
+  }
+]

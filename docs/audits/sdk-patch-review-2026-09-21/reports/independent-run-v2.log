@@ -1,0 +1,6 @@
+01-batch.patch passed
+02-blob-reads.patch passed
+03-interactive-session.patch passed
+04-parse-raw.patch passed
+05-optional-empty.patch passed
+combined byte-for-byte match passed

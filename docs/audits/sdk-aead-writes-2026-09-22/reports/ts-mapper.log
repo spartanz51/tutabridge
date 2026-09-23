@@ -1,0 +1,3 @@
+Official TS CryptoMapper: 8 v2/v3 write vectors verified; sibling path accumulation reproduced in both formats.
+(node:89582) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)

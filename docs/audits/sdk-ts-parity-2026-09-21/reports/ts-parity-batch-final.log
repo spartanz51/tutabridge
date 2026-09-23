@@ -1,0 +1,52 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling tuta-sdk v359.260904.0 (/private/var/folders/tf/f990vmwn0ynfcwpnzym6xlzm0000gn/T/tutabridge-patch-review-l9133v88/independent/tuta-sdk/rust/sdk)
+warning: enum `BinaryBlobWrapperSerializationError` is never used
+  --> tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs:57:10
+   |
+57 | pub enum BinaryBlobWrapperSerializationError {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> tuta-sdk/rust/sdk/src/instance_mapper.rs:1291:19
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected {
+     |                      ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                      |
+     |                      the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+1291 |     fn as_unexpected(&self) -> Unexpected<'_> {
+     |                                          ++++
+
+warning: `tuta-sdk` (lib) generated 2 warnings (run `cargo fix --lib -p tuta-sdk` to apply 1 suggestion)
+warning: method `parse_raw` is never used
+  --> tuta-sdk/rust/sdk/src/entity_client.rs:53:9
+   |
+31 | impl EntityClient {
+   | ----------------- method in this implementation
+...
+53 |     pub fn parse_raw(
+   |            ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tuta-sdk` (lib test) generated 2 warnings (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13m 47s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target-validation/debug/deps/tutasdk-cee6532dfd4c584d)
+
+running 5 tests
+test entity_client::batch::tests::empty_ids_do_not_request ... ok
+test entity_client::batch::tests::chunks_at_100_and_encodes_query ... ok
+test entity_client::batch::tests::failed_batch_stops_the_operation ... ok
+test entity_client::batch::tests::accepts_missing_ids_and_preserves_server_order ... ok
+test entity_client::batch::tests::malformed_or_missing_body_is_an_error ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 316 filtered out; finished in 0.09s
+

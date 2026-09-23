@@ -1,0 +1,83 @@
+[
+  {
+    "segments": [],
+    "attribute": 105,
+    "path": "105"
+  },
+  {
+    "segments": [
+      {
+        "association": 3,
+        "aggregate": "first"
+      }
+    ],
+    "attribute": 2,
+    "path": "3/first/2"
+  },
+  {
+    "segments": [
+      {
+        "association": 3,
+        "aggregate": "first"
+      },
+      {
+        "association": 9,
+        "aggregate": "child1"
+      }
+    ],
+    "attribute": 17,
+    "path": "3/first/9/child1/17"
+  },
+  {
+    "segments": [
+      {
+        "association": 3,
+        "aggregate": "first"
+      },
+      {
+        "association": 9,
+        "aggregate": "child2"
+      }
+    ],
+    "attribute": 17,
+    "path": "3/first/9/child2/17"
+  },
+  {
+    "segments": [
+      {
+        "association": 3,
+        "aggregate": "second"
+      }
+    ],
+    "attribute": 2,
+    "path": "3/second/2"
+  },
+  {
+    "segments": [
+      {
+        "association": 3,
+        "aggregate": "second"
+      },
+      {
+        "association": 9,
+        "aggregate": "child1"
+      }
+    ],
+    "attribute": 17,
+    "path": "3/second/9/child1/17"
+  },
+  {
+    "segments": [
+      {
+        "association": 3,
+        "aggregate": "second"
+      },
+      {
+        "association": 9,
+        "aggregate": "child2"
+      }
+    ],
+    "attribute": 17,
+    "path": "3/second/9/child2/17"
+  }
+]

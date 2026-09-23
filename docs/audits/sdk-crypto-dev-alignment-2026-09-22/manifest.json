@@ -1,0 +1,16 @@
+{
+  "official_base": "aea5846b93a1412451e885bf99002401c3b087e8",
+  "previous_artifact": "sdk-aead-writes-2026-09-22",
+  "protocol_profile": "359-360-pre-instance-key",
+  "reference_commit": "e1ad5f9351946e3c9f96558adcbc154c384eb489",
+  "crypto_dev_fully_supported": false,
+  "trees": {
+    "baseline": "c72f2f8f6ab02df7bf69379546b9a7a734df246a",
+    "10-immutable-aead-paths.patch": "b145a249ebf6e4093e764e7b9601e15b1cf29da2",
+    "11-crypto-dev-compatibility-tests.patch": "c5ed48ae15b0e87af85dfae72d030d791d0ce19a"
+  },
+  "patches": [
+    "10-immutable-aead-paths.patch",
+    "11-crypto-dev-compatibility-tests.patch"
+  ]
+}

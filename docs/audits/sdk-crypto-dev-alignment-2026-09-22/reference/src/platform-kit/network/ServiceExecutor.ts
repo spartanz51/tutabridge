@@ -1,0 +1,173 @@
+import {
+	DeleteService,
+	Entity,
+	GetService,
+	getServiceRestPath,
+	isSameTypeRef,
+	MethodDefinition,
+	ParamTypeFromRef,
+	PostService,
+	PutService,
+	ReturnTypeFromRef,
+	ServiceDefinition,
+	TypeRef,
+} from "@tutao/meta"
+import { RestClient } from "@tutao/rest-client"
+import { HttpMethod, MediaType, RestTextBody } from "@tutao/rest-client/types"
+import { IServiceExecutor } from "./ServiceRequest.js"
+import { isNotNull, lazy, Nullable } from "@tutao/utils"
+import { assertWorkerOrNode, ProgrammingError } from "@tutao/app-env"
+import { EntityAdapter, InstancePipeline, LoggedInUserProvider, SessionKeyResolver, TypeModelResolver } from "@tutao/instance-pipeline"
+import { LoginIncompleteError } from "@tutao/rest-client/error"
+import { DEFAULT_REST_CLIENT_OPTIONS, ExtraServiceParams } from "../instance-pipeline/RestClientOptions"
+
+import { IncomingServerJson, OutgoingServerJson } from "../instance-pipeline/TypeMapper"
+
+assertWorkerOrNode()
+
+export class ServiceExecutor implements IServiceExecutor {
+	constructor(
+		private readonly restClient: RestClient,
+		private readonly authDataProvider: LoggedInUserProvider,
+		private readonly instancePipeline: InstancePipeline,
+		private readonly sessionKeyResolver: lazy<SessionKeyResolver>,
+		private readonly typeModelResolver: TypeModelResolver,
+	) {}
+
+	get<S extends GetService>(
+		service: S,
+		data: ParamTypeFromRef<S["get"]["data"]>,
+		params: Nullable<ExtraServiceParams>,
+	): Promise<ReturnTypeFromRef<S["get"]["return"]>> {
+		return this.executeServiceRequest(service, HttpMethod.GET, data, params)
+	}
+
+	post<S extends PostService>(
+		service: S,
+		data: ParamTypeFromRef<S["post"]["data"]>,
+		params: Nullable<ExtraServiceParams> = null,
+	): Promise<ReturnTypeFromRef<S["post"]["return"]>> {
+		return this.executeServiceRequest(service, HttpMethod.POST, data, params)
+	}
+
+	put<S extends PutService>(
+		service: S,
+		data: ParamTypeFromRef<S["put"]["data"]>,
+		params: Nullable<ExtraServiceParams>,
+	): Promise<ReturnTypeFromRef<S["put"]["return"]>> {
+		return this.executeServiceRequest(service, HttpMethod.PUT, data, params)
+	}
+
+	delete<S extends DeleteService>(
+		service: S,
+		data: ParamTypeFromRef<S["delete"]["data"]>,
+		params: Nullable<ExtraServiceParams>,
+	): Promise<ReturnTypeFromRef<S["delete"]["return"]>> {
+		return this.executeServiceRequest(service, HttpMethod.DELETE, data, params)
+	}
+
+	private async executeServiceRequest(
+		service: ServiceDefinition,
+		method: HttpMethod,
+		requestEntity: Nullable<Entity>,
+		params: Nullable<ExtraServiceParams> = null,
+	): Promise<any> {
+		const methodDefinition = this.getMethodDefinition(service, method)
+		if (
+			methodDefinition.return &&
+			params?.sessionKey == null &&
+			(await this.typeModelResolver.resolveClientTypeReference(methodDefinition.return)).encrypted &&
+			!this.authDataProvider.isFullyLoggedIn()
+		) {
+			// Short-circuit before we do an actual request which we can't decrypt
+			// If we have a session key passed it doesn't mean that it is for the return type, but it is likely
+			// so we allow the request.
+			throw new LoginIncompleteError(`Tried to make service request with encrypted return type but is not fully logged in yet, service: ${service.name}`)
+		}
+
+		const modelVersion = await this.getModelVersion(methodDefinition)
+
+		const path = getServiceRestPath(service)
+		const headers = { ...this.authDataProvider.createAuthHeaders(), ...params?.extraHeaders, v: String(modelVersion) }
+
+		const encryptedEntity = await this.encryptDataIfNeeded(methodDefinition, requestEntity, service, method, params ?? null)
+
+		const data: string | null = await this.restClient.request(path, method, {
+			...DEFAULT_REST_CLIENT_OPTIONS,
+			queryParams: params?.queryParams ?? null,
+			headers,
+			responseType: MediaType.Json,
+			body: isNotNull(encryptedEntity) ? new RestTextBody(encryptedEntity.getJsonRepresentation()) : null,
+			suspensionBehavior: params?.suspensionBehavior ?? DEFAULT_REST_CLIENT_OPTIONS.suspensionBehavior,
+			baseUrl: params?.baseUrl ?? null,
+		})
+
+		if (methodDefinition.return) {
+			return await this.decryptResponse(methodDefinition.return, data as string, params)
+		}
+	}
+
+	private getMethodDefinition(service: ServiceDefinition, method: HttpMethod): MethodDefinition {
+		switch (method) {
+			case HttpMethod.GET:
+				return (service as GetService)["get"]
+			case HttpMethod.POST:
+				return (service as PostService)["post"]
+			case HttpMethod.PUT:
+				return (service as PutService)["put"]
+			case HttpMethod.DELETE:
+				return (service as DeleteService)["delete"]
+			case HttpMethod.PATCH:
+				throw new ProgrammingError("Services do not implement PATCH for now")
+		}
+	}
+
+	private async getModelVersion(methodDefinition: MethodDefinition): Promise<number> {
+		// This is some kind of hack because we don't generate data for the whole model anywhere (unfortunately).
+		const someTypeRef = methodDefinition.data ?? methodDefinition.return
+		if (someTypeRef == null) {
+			throw new ProgrammingError("Need either data or return for the service method!")
+		}
+		const model = await this.typeModelResolver.resolveClientTypeReference(someTypeRef)
+		return model.version
+	}
+
+	private async encryptDataIfNeeded(
+		methodDefinition: MethodDefinition,
+		requestEntity: Entity | null,
+		service: ServiceDefinition,
+		method: HttpMethod,
+		params: ExtraServiceParams | null,
+	): Promise<Nullable<OutgoingServerJson>> {
+		if (methodDefinition.data != null) {
+			if (requestEntity == null || !isSameTypeRef(methodDefinition.data, requestEntity._type)) {
+				throw new ProgrammingError(`Invalid service data! ${service.name} ${method}`)
+			}
+
+			const requestTypeModel = await this.typeModelResolver.resolveClientTypeReference(methodDefinition.data)
+			if (requestTypeModel.encrypted && params?.sessionKey == null) {
+				throw new ProgrammingError(`Must provide a session key for an encrypted data transfer type!: ${service.app}/${service.name}`)
+			}
+
+			const sessionKey = params?.sessionKey ?? null
+			const ownerKey = params?.ownerKey ?? null
+			return await this.instancePipeline.mapAndEncryptWithSessionKeyAndOwnerEncSessionKeys(requestEntity._type, requestEntity, sessionKey, ownerKey)
+		} else {
+			return null
+		}
+	}
+
+	private async decryptResponse<T extends Entity>(typeRef: TypeRef<T>, data: string, params: Nullable<ExtraServiceParams> = null): Promise<T> {
+		const typeModel = await this.typeModelResolver.resolveServerTypeReference(typeRef)
+		const incomingJson = IncomingServerJson.expectSingleInstance(data, typeModel)
+		const encryptedParsedInstance = await this.instancePipeline.typeMapper.parseServerJson(incomingJson)
+		const entityAdapter = await EntityAdapter.fromEncryptedParsedInstance(
+			encryptedParsedInstance,
+			this.instancePipeline.modelMapper,
+			this.instancePipeline.cryptoMapper,
+		)
+		const sessionKey = (await this.sessionKeyResolver().resolveServiceSessionKey(entityAdapter)) ?? params?.sessionKey ?? null
+
+		return await this.instancePipeline.decryptAndMap(incomingJson, sessionKey)
+	}
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "patch": "01-batch.patch",
+    "status": "passed",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "tuta-sdk",
+      "--lib",
+      "entity_client::batch::tests"
+    ]
+  },
+  {
+    "patch": "02-blob-reads.patch",
+    "status": "passed",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "tuta-sdk",
+      "--lib",
+      "blobs::"
+    ]
+  },
+  {
+    "patch": "03-interactive-session.patch",
+    "status": "passed",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "tuta-sdk",
+      "--test",
+      "interactive_session_test"
+    ]
+  },
+  {
+    "patch": "04-parse-raw.patch",
+    "status": "passed",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "tuta-sdk",
+      "--lib",
+      "entity_client::"
+    ]
+  },
+  {
+    "patch": "05-optional-empty.patch",
+    "status": "passed",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "tuta-sdk",
+      "--lib",
+      "json_serializer::"
+    ]
+  }
+]

@@ -1,0 +1,191 @@
+{
+  "same_warning_messages_and_source_paths_as_read_prototype": true,
+  "baseline_diagnostics": [
+    [
+      "`format!` in `error!` args",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "`format!` in `error!` args",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "`format!` in `error!` args",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "called `unwrap` on `symmetric_permission` after checking its variant with `is_some`",
+      "tuta-sdk/rust/sdk/src/crypto/crypto_facade.rs"
+    ],
+    [
+      "called `unwrap` on `target_week_day` after checking its variant with `is_none`",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "enum `BinaryBlobWrapperSerializationError` is never used",
+      "tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs"
+    ],
+    [
+      "explicit call to `.into_iter()` in function argument accepting `IntoIterator`",
+      "tuta-sdk/rust/sdk/src/blobs/blob_facade.rs"
+    ],
+    [
+      "hiding a lifetime that's elided elsewhere is confusing",
+      "tuta-sdk/rust/sdk/src/instance_mapper.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/entities/entity_facade.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/entities/entity_facade.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/lib.rs"
+    ],
+    [
+      "manual implementation of `ok`",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "manual implementation of `ok`",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/instance_mapper.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/json_serializer.rs"
+    ],
+    [
+      "useless conversion to the same type: `ApiCallError`",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "useless conversion to the same type: `std::string::String`",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ]
+  ],
+  "current_diagnostics": [
+    [
+      "`format!` in `error!` args",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "`format!` in `error!` args",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "`format!` in `error!` args",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "called `unwrap` on `symmetric_permission` after checking its variant with `is_some`",
+      "tuta-sdk/rust/sdk/src/crypto/crypto_facade.rs"
+    ],
+    [
+      "called `unwrap` on `target_week_day` after checking its variant with `is_none`",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "enum `BinaryBlobWrapperSerializationError` is never used",
+      "tuta-sdk/rust/sdk/src/blobs/binary_blob_wrapper_serializer.rs"
+    ],
+    [
+      "explicit call to `.into_iter()` in function argument accepting `IntoIterator`",
+      "tuta-sdk/rust/sdk/src/blobs/blob_facade.rs"
+    ],
+    [
+      "hiding a lifetime that's elided elsewhere is confusing",
+      "tuta-sdk/rust/sdk/src/instance_mapper.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/entities/entity_facade.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/entities/entity_facade.rs"
+    ],
+    [
+      "implicitly cloning a `String` by calling `to_string` on its dereferenced type",
+      "tuta-sdk/rust/sdk/src/lib.rs"
+    ],
+    [
+      "manual implementation of `ok`",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "manual implementation of `ok`",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/date/event_facade.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/instance_mapper.rs"
+    ],
+    [
+      "unneeded `return` statement",
+      "tuta-sdk/rust/sdk/src/json_serializer.rs"
+    ],
+    [
+      "useless conversion to the same type: `ApiCallError`",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ],
+    [
+      "useless conversion to the same type: `std::string::String`",
+      "tuta-sdk/rust/sdk/src/crypto_entity_client.rs"
+    ]
+  ]
+}

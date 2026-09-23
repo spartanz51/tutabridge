@@ -1,0 +1,3 @@
+Official TS decrypts all 4 Rust v2/v3 vectors; rejects wrong field/type/key/tag; generated 4 TS vectors for Rust.
+(node:48616) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)

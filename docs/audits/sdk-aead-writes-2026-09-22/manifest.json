@@ -1,0 +1,31 @@
+{
+  "patches": [
+    "patches/01-batch.patch",
+    "patches/02-blob-reads.patch",
+    "patches/03-interactive-session.patch",
+    "patches/04-parse-raw.patch",
+    "patches/05-optional-empty.patch",
+    "patches/06-aead-session-reads.patch",
+    "patches/07-aead-group-reads.patch",
+    "patches/08-aead-attribute-writes.patch",
+    "patches/09-aead-entity-writes.patch"
+  ],
+  "files": {
+    "bridge.patch": "395198644b0ff1886d44eebea37384438145b31d419153fc6c1fd40d4f692afa",
+    "prototype.py": "46de6c1fecd228f6b2649cf99c0ee74a9e191c7ff152b7d0f1b68d15b9b5a639",
+    "test_prototype.py": "2f627686892cac49a173f702eb855aebd34bf21557397e357e8cb9b5195f7f00",
+    "network_probe.py": "3100d4e949dd07b40fe65256cae9f51269b43e43c691232711523de39455ee99",
+    "smoke_tuta_api.py": "ed8e9b03e047083e316fac810e33b1bc021c1f87b507eae4a46a3357e12e73c4",
+    "capability-baseline.json": "daa4c5bae7045a14cc8092dac2975f3b2d14df5d4ce61e0fb5c2852f08065142",
+    "patches/01-batch.patch": "d2c736d25229399f254fdaed564b0332c8b42d2d4804575895518b08e9388c9b",
+    "patches/02-blob-reads.patch": "99d8a4caebf9a3223b2062ce3c5a0d4a243fd2505b17459bd542688fbd522977",
+    "patches/03-interactive-session.patch": "81ede451ff537230ffe9432fbc2758634632c5ebdfd265b7fb0dafd9c1bfff6e",
+    "patches/04-parse-raw.patch": "895dbe1cd2f4bf4e5ea48478b797c06af5c8e43fe7ce771787e0314b9c3a13f9",
+    "patches/05-optional-empty.patch": "af02d638184dcf81e724ae92061364337cd786b0598515fb39b7467561b3341e",
+    "patches/06-aead-session-reads.patch": "917851d569b6db66000891b5667644d44398a90be4231e86001b5f18ca4b1603",
+    "patches/07-aead-group-reads.patch": "be963eced01e44f74525d5dfb0aade6af1a5ec6ef2abdd226332268bbe7ef494",
+    "patches/08-aead-attribute-writes.patch": "ab364a66280052eae24b7d7048b08d38ce45b04c92687c4ade6350f2ea9899d0",
+    "patches/09-aead-entity-writes.patch": "9f45ae20c15f7e9c3b66bbc6dc5a485720ecda4ab4fc6fe38f64d6f306b4624c",
+    "baseline-evidence/ts-parity-protocol.log": "a69cc83b5139bcb243927797d71eaeacaf2b6b0e80bfd9bc5e61647cbb9c3768"
+  }
+}
