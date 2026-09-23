@@ -28,6 +28,7 @@ pub async fn get_config() -> Result<Config, String> {
 
 #[tauri::command]
 pub async fn save_config(config: Config) -> Result<(), String> {
+    config.validate_ports()?;
     config::save_config(&config).map_err(|e| format!("Failed to save config: {e}"))
 }
 

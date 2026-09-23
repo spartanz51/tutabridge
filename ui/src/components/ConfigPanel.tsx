@@ -17,6 +17,7 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
   const [email, setEmail] = useState("");
   const [imapPort, setImapPort] = useState(1143);
   const [smtpPort, setSmtpPort] = useState(1025);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [apiUrl, setApiUrl] = useState("https://app.tuta.com");
   const [syncLimit, setSyncLimit] = useState(500);
   const [fetchAll, setFetchAll] = useState(false);
@@ -40,16 +41,45 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
 
   const isRunning = status === "Running" || status === "Starting";
 
+  // Same rules as `Config::validate_ports` in the backend: usable ports, all
+  // distinct. Two services on one port make the bridge fail to start.
+  const portError = (() => {
+    const ports: [string, number][] = [
+      ["IMAP", imapPort],
+      ["SMTP", smtpPort],
+    ];
+    if (mcpPermission !== "disabled") ports.push(["MCP", mcpPort]);
+    for (const [name, port] of ports) {
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return `${name} port must be between 1 and 65535`;
+      }
+    }
+    for (let i = 0; i < ports.length; i++) {
+      for (let j = i + 1; j < ports.length; j++) {
+        if (ports[i][1] === ports[j][1]) {
+          return `${ports[i][0]} and ${ports[j][0]} ports must differ`;
+        }
+      }
+    }
+    return null;
+  })();
+
   const handleSave = async () => {
-    await onSave({
-      email,
-      imap_port: imapPort,
-      smtp_port: smtpPort,
-      api_url: apiUrl,
-      sync_limit: fetchAll ? 0 : syncLimit,
-      mcp_permission: mcpPermission,
-      mcp_port: mcpPort,
-    });
+    setSaveError(null);
+    try {
+      await onSave({
+        email,
+        imap_port: imapPort,
+        smtp_port: smtpPort,
+        api_url: apiUrl,
+        sync_limit: fetchAll ? 0 : syncLimit,
+        mcp_permission: mcpPermission,
+        mcp_port: mcpPort,
+      });
+    } catch (e) {
+      setSaveError(String(e));
+      return;
+    }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -105,6 +135,8 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
                 <label>IMAP Port</label>
                 <input
                   type="number"
+                  min={1}
+                  max={65535}
                   value={imapPort}
                   onChange={(e) => setImapPort(Number(e.target.value))}
                 />
@@ -113,6 +145,8 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
                 <label>SMTP Port</label>
                 <input
                   type="number"
+                  min={1}
+                  max={65535}
                   value={smtpPort}
                   onChange={(e) => setSmtpPort(Number(e.target.value))}
                 />
@@ -192,6 +226,8 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
               <>
                 <input
                   type="number"
+                  min={1}
+                  max={65535}
                   value={mcpPort}
                   onChange={(e) => setMcpPort(Number(e.target.value))}
                   placeholder="MCP port (127.0.0.1)"
@@ -210,13 +246,15 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
         )}
       </div>
 
+      {(portError || saveError) && <p className="error-text">{portError ?? saveError}</p>}
+
       <div className="form-actions">
         {isRunning && (
           <small className="field-hint config-restart-hint">
             Changes apply after a restart.
           </small>
         )}
-        <button className="primary" onClick={handleSave} disabled={loading || !email}>
+        <button className="primary" onClick={handleSave} disabled={loading || !email || !!portError}>
           {saved ? "Saved!" : "Save"}
         </button>
         {isRunning && (

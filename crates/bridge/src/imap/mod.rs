@@ -29,8 +29,21 @@ pub async fn serve(
     tls: TlsAcceptor,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    info!("IMAP server listening on 127.0.0.1:{} (TLS)", port);
+    let listener = crate::net::bind_local("IMAP", port).await?;
+    serve_listener(listener, store, backend, local_store, tls, password_hash).await
+}
+
+/// Serve IMAP on a listener the caller has already bound, so a caller that
+/// needs to know the port is taken can find out before starting anything else.
+pub async fn serve_listener(
+    listener: TcpListener,
+    store: Arc<MailStore>,
+    backend: Arc<dyn MailBackend>,
+    local_store: Arc<LocalStore>,
+    tls: TlsAcceptor,
+    password_hash: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("IMAP server listening on {} (TLS)", listener.local_addr()?);
 
     crate::net::accept_loop(
         listener,

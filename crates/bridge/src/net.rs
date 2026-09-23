@@ -24,6 +24,21 @@ pub(crate) const MAX_CONNECTIONS: usize = 64;
 /// a file descriptor forever.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Bind `service`'s listener on 127.0.0.1:`port`. The error names the service
+/// and the port, and says what to do when another application holds it: the
+/// GUI shows it as the bridge status, the CLI prints it on exit.
+pub(crate) async fn bind_local(service: &str, port: u16) -> Result<TcpListener, String> {
+    TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AddrInUse => format!(
+                "{service} port {port} is already in use by another application; \
+                 choose a different {service} port"
+            ),
+            _ => format!("Cannot listen for {service} on 127.0.0.1:{port}: {e}"),
+        })
+}
+
 /// True for the read errors a peer produces by going away without a clean
 /// TLS shutdown: a TCP EOF with no close_notify, which rustls reports as
 /// `UnexpectedEof`, or a TCP reset, which the kernel sends when the peer
@@ -169,6 +184,37 @@ mod tests {
         );
         assert_eq!(super::log_capture::lines_containing(here).len(), 1);
         assert!(super::log_capture::lines_containing(there).is_empty());
+    }
+
+    #[tokio::test]
+    async fn binding_a_taken_port_names_the_service_and_the_port() {
+        // Hold a port the way a local mail catcher holds 1025.
+        let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = squatter.local_addr().unwrap().port();
+
+        let err = bind_local("SMTP", port).await.unwrap_err();
+
+        assert_eq!(
+            err,
+            format!(
+                "SMTP port {port} is already in use by another application; \
+                 choose a different SMTP port"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_a_free_port_succeeds_on_loopback() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let listener = bind_local("IMAP", port).await.unwrap();
+
+        assert_eq!(
+            listener.local_addr().unwrap().to_string(),
+            format!("127.0.0.1:{port}")
+        );
     }
 
     #[test]

@@ -61,6 +61,32 @@ fn default_api_url() -> String {
     "https://app.tuta.com".to_string()
 }
 
+impl Config {
+    /// The listening ports must be usable and distinct. Two services on one
+    /// port make the second bind fail at start; port 0 makes the system pick
+    /// a random port no mail client would ever find. The MCP port only counts
+    /// when the MCP server is enabled.
+    pub fn validate_ports(&self) -> Result<(), String> {
+        let mut ports = vec![("IMAP", self.imap_port), ("SMTP", self.smtp_port)];
+        if self.mcp_permission != McpPermission::Disabled {
+            ports.push(("MCP", self.mcp_port));
+        }
+        for (name, port) in &ports {
+            if *port == 0 {
+                return Err(format!("{name} port must be between 1 and 65535"));
+            }
+        }
+        for (i, (a, pa)) in ports.iter().enumerate() {
+            for (b, pb) in &ports[i + 1..] {
+                if pa == pb {
+                    return Err(format!("{a} and {b} ports must differ (both are {pa})"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -154,6 +180,51 @@ fn parse_config(content: &str) -> Result<Config, toml::de::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_ports(imap: u16, smtp: u16, mcp: u16, mcp_permission: McpPermission) -> Config {
+        Config {
+            imap_port: imap,
+            smtp_port: smtp,
+            mcp_port: mcp,
+            mcp_permission,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn default_ports_are_valid() {
+        assert_eq!(Config::default().validate_ports(), Ok(()));
+    }
+
+    #[test]
+    fn imap_and_smtp_on_one_port_are_refused() {
+        // The second bind would fail at start and take the bridge down.
+        assert_eq!(
+            with_ports(1143, 1143, 1944, McpPermission::Disabled).validate_ports(),
+            Err("IMAP and SMTP ports must differ (both are 1143)".to_string())
+        );
+    }
+
+    #[test]
+    fn port_zero_is_refused() {
+        // An emptied field became 0, and the system then picks a random port.
+        assert_eq!(
+            with_ports(1143, 0, 1944, McpPermission::Disabled).validate_ports(),
+            Err("SMTP port must be between 1 and 65535".to_string())
+        );
+    }
+
+    #[test]
+    fn the_mcp_port_only_counts_when_mcp_is_enabled() {
+        assert_eq!(
+            with_ports(1143, 1025, 1025, McpPermission::Disabled).validate_ports(),
+            Ok(())
+        );
+        assert_eq!(
+            with_ports(1143, 1025, 1025, McpPermission::Metadata).validate_ports(),
+            Err("SMTP and MCP ports must differ (both are 1025)".to_string())
+        );
+    }
 
     #[test]
     fn test_default_config() {

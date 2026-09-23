@@ -155,8 +155,15 @@ impl BridgeHandle {
             .as_ref()
             .map(|rx| WsStatus::from(*rx.borrow()))
             .unwrap_or(WsStatus::Stopped);
+        // Only a running bridge has an uptime. A teardown from inside the
+        // bridge task leaves `started_at` set (only `stop()` clears it), and
+        // the counter used to keep climbing next to a Stopped status.
+        let running = *self.status.read().await == BridgeStatus::Running;
         BridgeStats {
-            uptime_secs: self.started_at.map(|t| t.elapsed().as_secs()),
+            uptime_secs: self
+                .started_at
+                .filter(|_| running)
+                .map(|t| t.elapsed().as_secs()),
             mails_synced: count,
             ws_status,
         }
@@ -178,6 +185,10 @@ impl BridgeHandle {
         *self.status.write().await = BridgeStatus::Starting;
         self.emit_log("TutaBridge starting...");
 
+        if let Err(msg) = config.validate_ports() {
+            return Err(self.start_failed(msg).await);
+        }
+
         let tls_acceptor = match tls::load_or_create_tls_acceptor() {
             Ok(a) => a,
             Err(e) => {
@@ -187,6 +198,21 @@ impl BridgeHandle {
             }
         };
         self.emit_log("TLS initialized");
+
+        // Bind both listeners before logging in. A port another application
+        // already holds then fails the start at once, with a message naming
+        // it, instead of a full login (and a TOTP prompt) followed by a
+        // teardown that logged nothing.
+        let imap_listener = match crate::net::bind_local("IMAP", config.imap_port).await {
+            Ok(listener) => listener,
+            Err(msg) => return Err(self.start_failed(msg).await),
+        };
+        let smtp_listener = match crate::net::bind_local("SMTP", config.smtp_port).await {
+            Ok(listener) => listener,
+            Err(msg) => return Err(self.start_failed(msg).await),
+        };
+        self.emit_log(&format!("IMAP listening on 127.0.0.1:{}", config.imap_port));
+        self.emit_log(&format!("SMTP listening on 127.0.0.1:{}", config.smtp_port));
 
         self.emit_log(&format!("Authenticating as {}...", config.email));
         let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await
@@ -247,8 +273,6 @@ impl BridgeHandle {
 
         let status = self.status.clone();
         let log_tx = self.log_tx.clone();
-        let imap_port = config.imap_port;
-        let smtp_port = config.smtp_port;
         let sync_limit = config.sync_limit;
         let pw = config.bridge_password.clone();
         let mcp_port = config.mcp_port;
@@ -342,9 +366,6 @@ impl BridgeHandle {
             let imap_tls = tls_acceptor.clone();
             let smtp_tls = tls_acceptor;
 
-            let _ = log_tx.send(format!("IMAP listening on 127.0.0.1:{imap_port}"));
-            let _ = log_tx.send(format!("SMTP listening on 127.0.0.1:{smtp_port}"));
-
             // mpsc channel from event bus -> handler.
             let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
 
@@ -377,8 +398,8 @@ impl BridgeHandle {
                 event_rx,
                 shutdown_sync_rx.clone(),
             ));
-            let mut imap_handle = tokio::spawn(imap::serve(
-                imap_port,
+            let mut imap_handle = tokio::spawn(imap::serve_listener(
+                imap_listener,
                 store.clone(),
                 backend.clone(),
                 local_store.clone(),
@@ -397,25 +418,26 @@ impl BridgeHandle {
                 mcp_permission,
                 shutdown_sync_rx.clone(),
             ));
-            let mut smtp_handle =
-                tokio::spawn(smtp::serve(smtp_port, backend.clone(), smtp_tls, pw));
+            let mut smtp_handle = tokio::spawn(smtp::serve_listener(
+                smtp_listener,
+                backend.clone(),
+                smtp_tls,
+                pw,
+            ));
 
+            let mut server_failure: Option<String> = None;
             tokio::select! {
                 _ = rx => {
                     let _ = log_tx.send("Bridge shutting down...".to_string());
-                    let _ = shutdown_sync_tx.send(true);
                 }
-                r = &mut imap_handle => {
-                    if let Err(e) = r {
-                        let _ = log_tx.send(format!("IMAP server error: {e}"));
-                    }
-                }
-                r = &mut smtp_handle => {
-                    if let Err(e) = r {
-                        let _ = log_tx.send(format!("SMTP server error: {e}"));
-                    }
-                }
+                r = &mut imap_handle => server_failure = Some(server_exit_message("IMAP", r)),
+                r = &mut smtp_handle => server_failure = Some(server_exit_message("SMTP", r)),
             }
+            if let Some(msg) = &server_failure {
+                log::error!("{msg}");
+                let _ = log_tx.send(msg.clone());
+            }
+            let _ = shutdown_sync_tx.send(true);
 
             // Tear everything down and wait for it, so ports are released before
             // a subsequent start rebinds them. Skip awaiting a handle that already
@@ -441,7 +463,10 @@ impl BridgeHandle {
             if !smtp_handle.is_finished() {
                 let _ = smtp_handle.await;
             }
-            *status.write().await = BridgeStatus::Stopped;
+            *status.write().await = match server_failure {
+                Some(msg) => BridgeStatus::Error(msg),
+                None => BridgeStatus::Stopped,
+            };
             let _ = log_tx.send("Bridge stopped".to_string());
         });
 
@@ -469,14 +494,89 @@ impl BridgeHandle {
         let _ = self.stats_dirty_tx.send(());
     }
 
+    /// Record a failed start: in the log stream, in the GUI panel and as the
+    /// bridge status, so the user sees why it did not start.
+    async fn start_failed(&self, msg: String) -> String {
+        log::error!("{msg}");
+        self.emit_log(&msg);
+        *self.status.write().await = BridgeStatus::Error(msg.clone());
+        msg
+    }
+
     fn emit_log(&self, msg: &str) {
         let _ = self.log_tx.send(msg.to_string());
+    }
+}
+
+/// What to tell the user when a server task ends on its own. Its future only
+/// returns on an error, the accept loop never finishing by itself, or the task
+/// panicked. The previous handling matched only the panic, so an error from the
+/// server tore the bridge down with nothing logged.
+fn server_exit_message(
+    service: &str,
+    exit: Result<Result<(), Box<dyn std::error::Error + Send + Sync>>, tokio::task::JoinError>,
+) -> String {
+    match exit {
+        Ok(Ok(())) => format!("{service} server stopped unexpectedly"),
+        Ok(Err(e)) => format!("{service} server failed: {e}"),
+        Err(e) => format!("{service} server crashed: {e}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_server_that_returns_an_error_is_reported() {
+        // The case that used to tear the bridge down silently: the task did
+        // not panic, its future returned an error.
+        let task = tokio::spawn(async {
+            Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                "SMTP port 1025 is already in use by another application".into(),
+            )
+        });
+        assert_eq!(
+            server_exit_message("SMTP", task.await),
+            "SMTP server failed: SMTP port 1025 is already in use by another application"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_panics_is_reported() {
+        let task = tokio::spawn(async {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let msg = server_exit_message("IMAP", task.await);
+        assert!(msg.starts_with("IMAP server crashed: "), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_returns_ok_is_reported_as_unexpected() {
+        let task = tokio::spawn(async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+        assert_eq!(
+            server_exit_message("IMAP", task.await),
+            "IMAP server stopped unexpectedly"
+        );
+    }
+
+    #[tokio::test]
+    async fn uptime_is_only_reported_while_running() {
+        // A teardown from inside the task sets the status but leaves
+        // `started_at`, which only `stop()` clears.
+        let mut handle = BridgeHandle::new();
+        handle.started_at = Some(std::time::Instant::now());
+        *handle.status.write().await = BridgeStatus::Running;
+        assert!(handle.stats().await.uptime_secs.is_some());
+
+        *handle.status.write().await = BridgeStatus::Error("SMTP server failed".into());
+        assert_eq!(handle.stats().await.uptime_secs, None);
+
+        *handle.status.write().await = BridgeStatus::Stopped;
+        assert_eq!(handle.stats().await.uptime_secs, None);
+    }
 
     #[test]
     fn parse_model_version_extracts_first_entry_version() {

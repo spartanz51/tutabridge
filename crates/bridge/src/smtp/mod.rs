@@ -146,8 +146,19 @@ pub async fn serve(
     tls: TlsAcceptor,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    info!("SMTP server listening on 127.0.0.1:{} (TLS)", port);
+    let listener = crate::net::bind_local("SMTP", port).await?;
+    serve_listener(listener, tuta, tls, password_hash).await
+}
+
+/// Serve SMTP on a listener the caller has already bound (see
+/// `imap::serve_listener`).
+pub async fn serve_listener(
+    listener: TcpListener,
+    tuta: Arc<dyn MailBackend>,
+    tls: TlsAcceptor,
+    password_hash: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("SMTP server listening on {} (TLS)", listener.local_addr()?);
 
     crate::net::accept_loop(
         listener,
