@@ -418,6 +418,7 @@ pub async fn run_syncer(
     local_store: Arc<LocalStore>,
     backend: Arc<dyn MailBackend>,
     sync_limit: usize,
+    startup_done: watch::Sender<bool>,
     shutdown: watch::Receiver<bool>,
 ) {
     info!(
@@ -501,6 +502,12 @@ pub async fn run_syncer(
     } else {
         debug!("Skipping full-metadata sync — already complete, event bus reconciles");
     }
+
+    // Both steps above replace whole folders in memory (and the full sync
+    // prunes the disk cache to what the server listed). The event handler
+    // holds its events until now, or a mail it applied in between would be
+    // overwritten. Nothing below replaces a folder.
+    let _ = startup_done.send(true);
 
     // One-time backfill of the full-text body index from bodies that were
     // already cached (downloaded before the index existed). Bodies fetched from

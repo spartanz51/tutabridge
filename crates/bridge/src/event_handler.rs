@@ -46,9 +46,24 @@ pub async fn run_event_handler(
     backend: Arc<dyn MailBackend>,
     last_batch_ids: Arc<Mutex<HashMap<String, String>>>,
     mut rx: mpsc::Receiver<EventBusMessage>,
+    mut startup_done: watch::Receiver<bool>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     info!("Event handler started");
+    // Hold events until the syncer has loaded the cache (and run its full
+    // sync, when it does one). Those replace whole folders in memory, so an
+    // event applied meanwhile, typically the catch-up of what happened while
+    // the bridge was off, would be silently overwritten. Events wait in the
+    // channel; the batch cursor only advances once they are applied. A
+    // syncer that ended without signalling (dropped sender) releases them.
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => {
+            info!("Event handler shutting down");
+            return;
+        }
+        _ = startup_done.wait_for(|done| *done) => {}
+    }
     loop {
         tokio::select! {
             biased;
@@ -816,5 +831,321 @@ mod tests {
         assert_eq!(out.mail_set_entry_creates.len(), 1);
         assert_eq!(out.mail_events.len(), 1);
         assert!(!out.folder_list_dirty);
+    }
+}
+
+/// The syncer and the event handler running together at startup, as the bridge
+/// runs them: the catch-up events must survive the cache load.
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::mail::parser::ParsedMessage;
+    use crate::sync::{mail_to_metadata, run_syncer};
+    use crypto_primitives::aes::Aes256Key;
+    use crypto_primitives::key::GenericAesKey;
+    use crypto_primitives::randomizer_facade::RandomizerFacade;
+    use std::time::{Duration, Instant};
+    use tutasdk::date::DateTime;
+    use tutasdk::entities::generated::tutanota::{
+        Mail, MailAddress, MailDetails, MailSetEntry, TutanotaFile,
+    };
+    use tutasdk::folder_system::MailSetKind;
+    use tutasdk::{GeneratedId, IdTupleGenerated};
+
+    const FOLDER: &str = "inbox";
+    /// Enough cached mails for the load to take a while, like a real inbox.
+    const CACHED: usize = 20_000;
+    /// Sorts first in the load and has a body file but `has_details = 0`, so
+    /// the load heals its row right after reading the disk: the test's cue
+    /// that the disk snapshot is taken.
+    const MARKER: &str = "marker00";
+
+    fn id(s: &str) -> GeneratedId {
+        GeneratedId(s.to_string())
+    }
+
+    fn mail(element: &str, received_ms: u64) -> Mail {
+        Mail {
+            _id: Some(IdTupleGenerated::new(id("list1"), id(element))),
+            _permissions: id("perm"),
+            _format: 0,
+            _ownerEncSessionKey: None,
+            subject: format!("Subject {element}"),
+            receivedDate: DateTime::from_millis(received_ms),
+            state: 2,
+            unread: true,
+            confidential: false,
+            replyType: 0,
+            _ownerGroup: None,
+            differentEnvelopeSender: None,
+            listUnsubscribe: false,
+            movedTime: None,
+            phishingStatus: 0,
+            authStatus: None,
+            method: 0,
+            recipientCount: 1,
+            encryptionAuthStatus: None,
+            _ownerKeyVersion: None,
+            processingState: 0,
+            processNeeded: false,
+            sendAt: None,
+            serverClassificationData: None,
+            _kdfNonce: None,
+            sender: MailAddress {
+                _id: None,
+                name: "Sender".to_string(),
+                address: "sender@tuta.com".to_string(),
+                contact: None,
+                _errors: Default::default(),
+            },
+            attachments: vec![],
+            conversationEntry: IdTupleGenerated::new(id("conv_list"), id("conv_elem")),
+            firstRecipient: None,
+            mailDetails: None,
+            mailDetailsDraft: None,
+            bucketKey: None,
+            sets: vec![],
+            clientSpamClassifierResult: None,
+            _errors: Default::default(),
+        }
+    }
+
+    fn folder() -> FolderInfo {
+        FolderInfo {
+            id: FOLDER.to_string(),
+            list_id: "folders".to_string(),
+            entries_list_id: "entries".to_string(),
+            kind: MailSetKind::Inbox,
+            imap_path: "INBOX".to_string(),
+            special_use: None,
+        }
+    }
+
+    /// Tuta, unreachable except for the folder list.
+    struct OfflineBackend;
+    #[async_trait::async_trait]
+    impl MailBackend for OfflineBackend {
+        async fn load_mail_ids_for_folder(
+            &self,
+            _f: &FolderInfo,
+            _l: usize,
+        ) -> Result<Vec<Mail>, String> {
+            Err("offline".into())
+        }
+        async fn load_mail(&self, _l: &str, _e: &str) -> Result<Option<Mail>, String> {
+            Err("offline".into())
+        }
+        async fn decrypt_inline_mail(&self, _j: &str) -> Result<Option<Mail>, String> {
+            Err("offline".into())
+        }
+        async fn decrypt_inline_mail_set_entry(
+            &self,
+            _j: &str,
+        ) -> Result<Option<MailSetEntry>, String> {
+            Err("offline".into())
+        }
+        async fn decrypt_inline_mail_details_blob(
+            &self,
+            _j: &str,
+        ) -> Result<Option<MailDetails>, String> {
+            Err("offline".into())
+        }
+        async fn load_mail_details(&self, _m: &Mail) -> Result<Option<MailDetails>, String> {
+            Err("offline".into())
+        }
+        async fn load_attachments(
+            &self,
+            _m: &Mail,
+        ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, String> {
+            Err("offline".into())
+        }
+        async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
+            Ok(vec![folder()])
+        }
+        async fn set_unread_status(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _u: bool,
+        ) -> Result<(), String> {
+            Err("offline".into())
+        }
+        async fn trash_mails(&self, _ids: Vec<IdTupleGenerated>) -> Result<(), String> {
+            Err("offline".into())
+        }
+        async fn move_mails(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _t: &FolderInfo,
+        ) -> Result<(), String> {
+            Err("offline".into())
+        }
+        async fn send_mail(&self, _m: &ParsedMessage) -> Result<(), String> {
+            Err("offline".into())
+        }
+    }
+
+    /// The disk cache of a bridge that already ran: CACHED mails, a known
+    /// event-bus cursor and a completed full sync, so startup is a cache load
+    /// followed by the event bus catch-up.
+    fn cache_of_a_previous_run() -> Arc<LocalStore> {
+        let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+        let key = GenericAesKey::Aes256(Aes256Key::generate(&randomizer));
+        let dir = std::env::temp_dir().join(format!("tb_startup_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ls = LocalStore::open(&dir.join("store.db"), &dir.join("mails"), key).unwrap();
+        let mut metas: Vec<_> = (0..CACHED)
+            .map(|i| {
+                let m = mail(&format!("m{i:07}"), 1_000_000 + i as u64);
+                mail_to_metadata(&m, FOLDER, i as u32 + 1)
+            })
+            .collect();
+        metas.push(mail_to_metadata(
+            &mail(MARKER, 9_000_000_000),
+            FOLDER,
+            CACHED as u32 + 1,
+        ));
+        ls.upsert_mail_metadata_batch(&metas).unwrap();
+        ls.write_eml(MARKER, "Subject: marker\r\n\r\nbody").unwrap();
+        ls.set_event_bus_batch_id("group", "batch0").unwrap();
+        ls.set_meta("full_metadata_synced_v1", "1").unwrap();
+        ls.set_meta("body_fts_indexed_v1", "1").unwrap();
+        Arc::new(ls)
+    }
+
+    fn disk_snapshot_taken(ls: &LocalStore) -> bool {
+        ls.load_folder_metadata(FOLDER)
+            .unwrap()
+            .iter()
+            .any(|m| m.element_id == MARKER && m.has_details)
+    }
+
+    fn delete_batch(element_id: &str) -> EventBusMessage {
+        EventBusMessage::EntityUpdate(EntityUpdateBatch {
+            batch_id: "batch1".to_string(),
+            group_id: "group".to_string(),
+            updates: vec![EntityUpdateEvent {
+                application: TUTANOTA_APP.to_string(),
+                type_id: MAIL_TYPE_ID,
+                instance_list_id: "list1".to_string(),
+                instance_id: element_id.to_string(),
+                operation: Operation::Delete,
+                instance: None,
+                blob_instance: None,
+            }],
+        })
+    }
+
+    async fn in_memory(store: &MailStore, element_id: &str) -> bool {
+        store
+            .get_folder(FOLDER)
+            .await
+            .iter()
+            .any(|m| m.mail._id.as_ref().unwrap().element_id.0 == element_id)
+    }
+
+    /// A mail deleted while the bridge was off: its catch-up event lands after
+    /// the cache load read the disk. Applied at once, the load's replace of
+    /// the folder brought the mail back in memory for the whole session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_catch_up_event_during_the_cache_load_is_not_overwritten() {
+        let ls = cache_of_a_previous_run();
+        let store = MailStore::new();
+        let backend: Arc<dyn MailBackend> = Arc::new(OfflineBackend);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (startup_tx, startup_rx) = watch::channel(false);
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let victim = "m0000042";
+
+        let syncer = tokio::spawn(run_syncer(
+            store.clone(),
+            ls.clone(),
+            backend.clone(),
+            1,
+            startup_tx,
+            shutdown_rx.clone(),
+        ));
+        let handler = tokio::spawn(run_event_handler(
+            store.clone(),
+            ls.clone(),
+            backend,
+            Arc::new(Mutex::new(HashMap::new())),
+            event_rx,
+            startup_rx,
+            shutdown_rx,
+        ));
+
+        let t = Instant::now();
+        while !disk_snapshot_taken(&ls) {
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "the cache load never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        event_tx.send(delete_batch(victim)).await.unwrap();
+
+        // Wait for the load to land in memory, then for the event.
+        let t = Instant::now();
+        loop {
+            let loaded = store.get_folder(FOLDER).await.len() >= CACHED;
+            if loaded && !in_memory(&store, victim).await {
+                break;
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "the deleted mail is still listed after the cache load (loaded: {loaded})"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let deleted_on_disk = !ls
+            .load_folder_metadata(FOLDER)
+            .unwrap()
+            .iter()
+            .any(|m| m.element_id == victim);
+        assert!(deleted_on_disk);
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::join!(syncer, handler);
+    }
+
+    /// A syncer that ends before signalling (it only does on shutdown) must
+    /// not leave the event handler waiting forever.
+    #[tokio::test]
+    async fn events_are_released_if_the_syncer_ends_without_signalling() {
+        let ls = cache_of_a_previous_run();
+        let store = MailStore::new();
+        store
+            .upsert_mail_in_folder(
+                FOLDER,
+                StoredMail {
+                    mail: mail("m0000001", 1_000_001),
+                    body_loaded: false,
+                    uid: 2,
+                    attachments_pending: false,
+                },
+            )
+            .await;
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (startup_tx, startup_rx) = watch::channel(false);
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let handler = tokio::spawn(run_event_handler(
+            store.clone(),
+            ls,
+            Arc::new(OfflineBackend),
+            Arc::new(Mutex::new(HashMap::new())),
+            event_rx,
+            startup_rx,
+            shutdown_rx,
+        ));
+
+        drop(startup_tx);
+        event_tx.send(delete_batch("m0000001")).await.unwrap();
+        drop(event_tx);
+
+        tokio::time::timeout(Duration::from_secs(10), handler)
+            .await
+            .expect("the event handler kept waiting")
+            .unwrap();
+        assert!(!in_memory(&store, "m0000001").await);
     }
 }

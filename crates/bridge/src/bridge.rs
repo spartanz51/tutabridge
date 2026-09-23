@@ -378,12 +378,16 @@ impl BridgeHandle {
 
             // mpsc channel from event bus -> handler.
             let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+            // The syncer tells the event handler when its startup is done
+            // (see `event_handler::run_event_handler`).
+            let (startup_done_tx, startup_done_rx) = watch::channel(false);
 
             let syncer_handle = tokio::spawn(sync::run_syncer(
                 store.clone(),
                 local_store.clone(),
                 backend.clone(),
                 sync_limit,
+                startup_done_tx,
                 shutdown_sync_rx.clone(),
             ));
             let bus_handle = {
@@ -406,6 +410,7 @@ impl BridgeHandle {
                 backend.clone(),
                 bus_ids_for_handler,
                 event_rx,
+                startup_done_rx,
                 shutdown_sync_rx.clone(),
             ));
             let mut imap_handle = tokio::spawn(imap::serve_listener(
