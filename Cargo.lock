@@ -5985,7 +5985,6 @@ dependencies = [
  "futures",
  "log 0.4.29",
  "num_enum",
- "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

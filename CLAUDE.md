@@ -20,9 +20,11 @@ Tuta WS  ──► Event bus ──► Event handler ────────┘
   There is no periodic re-listing.
 - **Bodies**: the syncer's prefetch loop downloads mail bodies up to
   `sync_limit`; older bodies are fetched on demand.
-- The **IMAP server** (`imap/`) only reads from the `MailStore`. The only
-  IMAP→network calls are mutations: `STORE \Seen`, `MOVE`, `EXPUNGE` (trash).
-  Sending goes through SMTP to Tuta's draft and send services.
+- The **IMAP server** (`imap/`) reads from the `MailStore`. Its only
+  network read is FETCH of a body not downloaded yet (on demand, with a
+  cooldown); its other network calls are mutations: `STORE \Seen`, `MOVE`,
+  `EXPUNGE` (trash). Sending goes through SMTP to Tuta's draft and send
+  services.
 
 ## Testing
 

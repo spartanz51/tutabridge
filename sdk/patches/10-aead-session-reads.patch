@@ -1,4 +1,4 @@
-From 8bcfa8d5d43d9459286312f0c9214a3c36bd1d48 Mon Sep 17 00:00:00 2001
+From cb1a790ed5819556dc2145c0e3764f74b8679010 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:07:00 +0200
 Subject: [PATCH] [sdk] Decrypt AEAD attribute values encrypted with the
@@ -7,17 +7,18 @@ Subject: [PATCH] [sdk] Decrypt AEAD attribute values encrypted with the
 Values encrypted with the AEAD v3 scheme carry their cipher version; they
 are decrypted with the instance session key and the authenticated field
 context (attributeEncSK and the field path, aggregate ids included), as
-TS CryptoMapper does. CBC values keep their existing path.
+TS CryptoMapper does. CBC values keep their existing path. Tested
+against vectors produced by the TS client.
 ---
- .../rust/sdk/src/entities/entity_facade.rs    | 142 +++++++++++--
- .../src/entities/entity_facade/decryption.rs  | 186 ++++++++++++++++++
- .../tests/fixtures/aead_attributes_ts.json    |  50 +++++
- 3 files changed, 360 insertions(+), 18 deletions(-)
+ .../rust/sdk/src/entities/entity_facade.rs    | 142 ++++++++++++--
+ .../src/entities/entity_facade/decryption.rs  | 185 ++++++++++++++++++
+ .../sdk/test_data/aead_attributes_ts.json     |  16 ++
+ 3 files changed, 325 insertions(+), 18 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
- create mode 100644 tuta-sdk/rust/sdk/tests/fixtures/aead_attributes_ts.json
+ create mode 100644 tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json
 
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
-index 55a715e7a6..339cf61ef0 100644
+index 55a715e7a6..d735acf692 100644
 --- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
 @@ -1,3 +1,6 @@
@@ -223,7 +224,7 @@ index 55a715e7a6..339cf61ef0 100644
 +		let subkeys = AeadSubKeys::derive_from_session_key(&key, "tutanota/97");
 +		let aead = AeadFacade::new(RandomizerFacade::from_core(rand_core::OsRng));
 +		let sender = entity.get_mut("111").unwrap().assert_array_mut_ref()[0].assert_dict_mut_ref();
-+		// IDs are protocol IDs, checked against the official Mail/MailAddress models.
++		// Mail.sender (111) is a MailAddress aggregate: _id (93), name (94).
 +		sender.insert("93".into(), ElementValue::String("sender-id".into()));
 +		sender.insert(
 +			"94".into(),
@@ -264,10 +265,10 @@ index 55a715e7a6..339cf61ef0 100644
  }
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
 new file mode 100644
-index 0000000000..62d50b6f3a
+index 0000000000..7350ca57e6
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,185 @@
 +//! Attribute decryption follows the instance type and field paths used by CryptoMapper.
 +use crate::ApiCallError;
 +use crypto_primitives::aead_facade::{AeadFacade, AeadSubKeys};
@@ -387,10 +388,9 @@ index 0000000000..62d50b6f3a
 +
 +	#[test]
 +	fn decrypts_official_ts_session_vectors_and_rejects_wrong_context() {
-+		let vectors: Vec<Value> = serde_json::from_str(include_str!(
-+			"../../../tests/fixtures/aead_attributes_ts.json"
-+		))
-+		.unwrap();
++		let vectors: Vec<Value> =
++			serde_json::from_str(include_str!("../../../test_data/aead_attributes_ts.json"))
++				.unwrap();
 +		for vector in vectors.iter().filter(|v| v["version"] == 3) {
 +			let key = GenericAesKey::from_bytes(
 +				&BASE64_STANDARD
@@ -454,60 +454,25 @@ index 0000000000..62d50b6f3a
 +		}
 +	}
 +}
-diff --git a/tuta-sdk/rust/sdk/tests/fixtures/aead_attributes_ts.json b/tuta-sdk/rust/sdk/tests/fixtures/aead_attributes_ts.json
+diff --git a/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json b/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json
 new file mode 100644
-index 0000000000..18842a47f0
+index 0000000000..7387354262
 --- /dev/null
-+++ b/tuta-sdk/rust/sdk/tests/fixtures/aead_attributes_ts.json
-@@ -0,0 +1,50 @@
++++ b/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json
+@@ -0,0 +1,16 @@
 +[
-+  {
-+    "aad": "attributeEncSK\u001f105",
-+    "ciphertext": "Ax9XnkOy/Fr0REYYdEspcH95XpiqzSbmz0wN6GBMGQwq/llvhsiMxrcwo1xvd5iplkQ4KJjBJop4alQRpxSW0kKd+G6rjdW0GgH/wNQ=",
-+    "group_version": 7,
-+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
-+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
-+    "legacy_error": "MacError",
-+    "path": "105",
-+    "plaintext": "AEAD diagnostic: été ✓",
-+    "type": "tutanota/97",
-+    "version": 3
-+  },
-+  {
-+    "aad": "attributeEncSK\u001f3/aggregateId/9/anotherCustomId/17",
-+    "ciphertext": "A/wwsRFB4n0uhzYIjgSTARuk4MCL4g4XbbcGQnCqjsQQEnkKklZRKlhKcbJpWYMh3hDAsaZuNao/RHcRyC6DK6jiT9IZys8+DWYr9F4=",
-+    "group_version": 7,
-+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
-+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
-+    "legacy_error": "MacError",
-+    "path": "3/aggregateId/9/anotherCustomId/17",
-+    "plaintext": "AEAD diagnostic: été ✓",
-+    "type": "tutanota/97",
-+    "version": 3
-+  },
-+  {
-+    "aad": "attributeEncGK\u001f105",
-+    "ciphertext": "AgAHOD8cIubtzCk2+NiyfiDpiEn1rzmW6KWPGvYXs4zqAzisewk0lDRwVuVSApCZuSCctUC9QmJzmsaXFbigKBXcFxAHxXjekSMew+vb4A==",
-+    "group_version": 7,
-+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
-+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
-+    "legacy_error": "MacError",
-+    "path": "105",
-+    "plaintext": "AEAD diagnostic: été ✓",
-+    "type": "tutanota/97",
-+    "version": 2
-+  },
-+  {
-+    "aad": "attributeEncGK\u001f3/aggregateId/9/anotherCustomId/17",
-+    "ciphertext": "AgAHJ2fTExf6sFytn7JDpY4w0SAVPxBIBGsScsYOeWoBqRCiHreRcJLEbb7+T/+mGJ3dV7/xFPcoHBGe/790JEFNP7ilpvSlgZdjtF6wCw==",
-+    "group_version": 7,
-+    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
-+    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
-+    "legacy_error": "MacError",
-+    "path": "3/aggregateId/9/anotherCustomId/17",
-+    "plaintext": "AEAD diagnostic: été ✓",
-+    "type": "tutanota/97",
-+    "version": 2
-+  }
++	{
++		"version": 3,
++		"path": "105",
++		"key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++		"ciphertext": "Ax9XnkOy/Fr0REYYdEspcH95XpiqzSbmz0wN6GBMGQwq/llvhsiMxrcwo1xvd5iplkQ4KJjBJop4alQRpxSW0kKd+G6rjdW0GgH/wNQ=",
++		"plaintext": "AEAD diagnostic: été ✓"
++	},
++	{
++		"version": 3,
++		"path": "3/aggregateId/9/anotherCustomId/17",
++		"key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++		"ciphertext": "A/wwsRFB4n0uhzYIjgSTARuk4MCL4g4XbbcGQnCqjsQQEnkKklZRKlhKcbJpWYMh3hDAsaZuNao/RHcRyC6DK6jiT9IZys8+DWYr9F4=",
++		"plaintext": "AEAD diagnostic: été ✓"
++	}
 +]
-\ No newline at end of file

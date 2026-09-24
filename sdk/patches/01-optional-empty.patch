@@ -1,4 +1,4 @@
-From 5699b1083930e39dc429adce55b480fe72e9779a Mon Sep 17 00:00:00 2001
+From d1aa5c00eee593caa3d0088538b20b29e6d6a462 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0200
 Subject: [PATCH] [sdk] Treat an empty optional encrypted value as null

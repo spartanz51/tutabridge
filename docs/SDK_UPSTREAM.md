@@ -25,21 +25,23 @@ tracks which, and in what state. The patch reference itself is
 
 ## Tracking
 
-Status: `planned`, `open #N`, `merged in <release>`, `declined #N`,
-`internal` (not meant for Tuta).
+Status: `planned`, `maybe` (needs a decision or a different shape first),
+`open #N`, `merged in <release>`, `declined #N`, `internal` (not meant for
+Tuta, possibly revisited later).
 
 | Patch | PR title | Status | Notes |
 |---|---|---|---|
 | 01 optional empty | Treat an empty optional encrypted value as null | planned | Bug fix, exact mirror of TS `CryptoMapper.decryptValue`. First candidate. |
-| 02 create session KDF | Normalize the address and check the KDF in create_session | planned | Bug fix: a Bcrypt account gets a wrong verifier today. |
-| 03 load multiple | Add load_multiple to EntityClient and CryptoEntityClient | planned | Same scope as declined #10854; only as a hand-written resubmission. |
-| 04 blob downloads | | internal for now | Same area as declined #10870. An upstream version would follow TS, where blob elements load through `loadMultiple`. |
-| 05 blob elements | | internal for now | Same. |
-| 06 parse raw | | internal | Plumbing with no TS counterpart. |
-| 07 interactive session | | internal | The declined #10871 scope. |
-| 08 owner session key | Decrypt a parsed entity with a session key from its owner | maybe | TS passes a key provider (`keyProviderFromInstance`); an upstream version may need that shape. |
-| 09 AEAD session reads | | internal | Tuta is reworking AEAD on `crypto/dev` with a different v2 protocol. |
-| 10 AEAD group reads | | internal | Same. |
+| 02 normalize address | Normalize the mail address in create_session | planned | Bug fix, TS `LoginFacade` parity. |
+| 03 account KDF | Derive the passphrase key with the account's KDF | planned | Bug fix: a Bcrypt account got a wrong verifier, and a panic in the KDF helper. |
+| 04 load multiple | Load list elements by id in batches | planned | Same scope as declined #10854; only as a hand-written resubmission. |
+| 05 blob downloads | | internal | Same area as declined #10870. An upstream version would follow TS, where blob elements load through `loadMultiple`. |
+| 06 blob elements | | internal | Same. |
+| 07 parse raw | | internal | Plumbing with no TS counterpart. |
+| 08 interactive session | | internal | The declined #10871 scope. |
+| 09 owner session key | Decrypt a parsed entity with a session key from its owner | maybe | TS passes an owner-encrypted key provider (`keyProviderFromInstance`) and leaves the child's own key fields alone; an upstream version would take that shape. |
+| 10 AEAD session reads | | internal | Tuta is reworking AEAD on `crypto/dev` with a different v2 protocol. |
+| 11 AEAD group reads | | internal | Same. |
 
 ## History
 

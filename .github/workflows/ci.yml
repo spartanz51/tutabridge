@@ -105,5 +105,10 @@ jobs:
       - name: Build CLI (lean, no GUI)
         run: cargo build --release -p tutabridge
 
-      - name: Test core
-        run: cargo test -p tutabridge-core
+      # Same check as on macOS: GNU tools and Ubuntu's git must generate the
+      # same SDK commit.
+      - name: Verify vendored SDK
+        run: scripts/sdk-generate.sh --check
+
+      - name: Test core and the SDK extensions
+        run: cargo test -p tutabridge-core -p tutabridge-tuta

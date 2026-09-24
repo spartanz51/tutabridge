@@ -1,4 +1,4 @@
-From 2abab08f328c84f7f20fe11432fd6faa77300d23 Mon Sep 17 00:00:00 2001
+From 470bdca718255c0749cef1e6af6553c25b7ff596 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:04:00 +0200
 Subject: [PATCH] [sdk] Load a blob element from its archive
@@ -9,12 +9,12 @@ element from the blob servers, with the same retry and failover as
 blob downloads. It returns the JSON payload; parsing and decryption
 with the owner's session key are left to the caller.
 ---
- .../sdk/src/blobs/blob_access_token_facade.rs |   2 +
- .../rust/sdk/src/blobs/blob_facade/read.rs    | 102 +++++++++++++++++-
- 2 files changed, 103 insertions(+), 1 deletion(-)
+ .../sdk/src/blobs/blob_access_token_facade.rs |  36 ++++--
+ .../rust/sdk/src/blobs/blob_facade/read.rs    | 104 +++++++++++++++++-
+ 2 files changed, 127 insertions(+), 13 deletions(-)
 
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
-index 606b25accf..9eda731631 100644
+index 1c7acd5428..9eda731631 100644
 --- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
 @@ -20,6 +20,7 @@ use std::sync::Arc;
@@ -25,19 +25,61 @@ index 606b25accf..9eda731631 100644
  	Instance {
  		archive: GeneratedId,
  		list: GeneratedId,
-@@ -102,6 +103,7 @@ impl BlobAccessTokenFacade {
+@@ -101,26 +102,37 @@ impl BlobAccessTokenFacade {
+ 							.encode(self.randomizer_facade.generate_random_array::<4>()),
  					))
  				};
- 				let (archive, instance, data_type) = match key {
+-				let ReadTokenKey::Instance {
+-					archive,
+-					list,
+-					element,
+-					data_type,
+-				} = key;
++				let (archive, instance, data_type) = match key {
 +					ReadTokenKey::Archive(archive) => (archive, None, None),
- 					ReadTokenKey::Instance {
- 						archive,
- 						list,
++					ReadTokenKey::Instance {
++						archive,
++						list,
++						element,
++						data_type,
++					} => (
++						archive,
++						Some((list, element)),
++						Some(data_type.discriminant()),
++					),
++				};
+ 				let read = BlobReadData {
+ 					_id: aggregate_id(),
+ 					archiveId: archive.clone(),
+-					instanceListId: Some(list.clone()),
+-					instanceIds: vec![InstanceId {
+-						_id: aggregate_id(),
+-						instanceId: Some(element.clone()),
+-					}],
++					instanceListId: instance.map(|id| id.0.clone()),
++					instanceIds: instance
++						.map(|id| {
++							vec![InstanceId {
++								_id: aggregate_id(),
++								instanceId: Some(id.1.clone()),
++							}]
++						})
++						.unwrap_or_default(),
+ 				};
+ 				self.service_executor
+ 					.post::<BlobAccessTokenService>(
+ 						BlobAccessTokenPostIn {
+ 							_format: 0,
+-							archiveDataType: Some(data_type.discriminant()),
++							archiveDataType: data_type,
+ 							read: Some(read),
+ 							write: None,
+ 						},
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
-index 28961e9233..e2b5baf6cf 100644
+index d8bdc61afc..f1f6226e90 100644
 --- a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
-@@ -5,15 +5,54 @@ use crate::bindings::rest_client::{
+@@ -5,10 +5,11 @@ use crate::bindings::rest_client::{
  use crate::blobs::blob_access_token_facade::ReadTokenKey;
  use crate::entities::generated::storage::{BlobGetIn, BlobId, BlobServerAccessInfo};
  use crate::entities::Entity;
@@ -50,10 +92,12 @@ index 28961e9233..e2b5baf6cf 100644
  use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
  use std::collections::HashMap;
  use std::future::Future;
+@@ -17,6 +18,44 @@ use std::future::Future;
+ const BLOB_DOWNLOAD_LIMIT: usize = 100;
  
  impl BlobFacade {
-+	/// Loads encrypted blob elements from an archive owned by the current user.
-+	/// The response is a JSON array, mapped and decrypted by the caller.
++	/// Loads one encrypted blob element from an archive owned by the current
++	/// user. Returns the JSON response; the caller parses and decrypts it.
 +	pub async fn load_blob_element(
 +		&self,
 +		type_ref: &TypeRef,
@@ -93,7 +137,7 @@ index 28961e9233..e2b5baf6cf 100644
  	/// Downloads encrypted blobs authorized by a referencing instance, in batches of 100.
  	/// This does not require ownership of the archive containing those blobs.
  	pub async fn download_blobs(
-@@ -221,6 +260,7 @@ mod tests {
+@@ -224,6 +263,7 @@ mod tests {
  	};
  	use crate::blobs::blob_access_token_facade::MockBlobAccessTokenFacade;
  	use crate::entities::generated::storage::{BlobServerAccessInfo, BlobServerUrl};
@@ -101,10 +145,11 @@ index 28961e9233..e2b5baf6cf 100644
  	use crate::instance_mapper::InstanceMapper;
  	use crate::json_serializer::JsonSerializer;
  	use crate::type_model_provider::TypeModelProvider;
-@@ -301,6 +341,66 @@ mod tests {
+@@ -309,6 +349,68 @@ mod tests {
  		}
  	}
- 	#[tokio::test]
+ 
++	#[tokio::test]
 +	async fn blob_element_retries_transient_server_then_returns_body() {
 +		let mut token = MockBlobAccessTokenFacade::default();
 +		token
@@ -140,6 +185,7 @@ index 28961e9233..e2b5baf6cf 100644
 +			b"[]"
 +		);
 +	}
++
 +	#[tokio::test]
 +	async fn permanent_errors_and_empty_bodies_do_not_retry() {
 +		for status in [401, 474, 200] {
@@ -164,7 +210,7 @@ index 28961e9233..e2b5baf6cf 100644
 +				.is_err());
 +		}
 +	}
-+	#[tokio::test]
++
+ 	#[tokio::test]
  	async fn binary_download_uses_instance_scope_and_chunks_at_100() {
  		let mut token = MockBlobAccessTokenFacade::default();
- 		token.expect_request_read_token().times(1).withf(|key| matches!(key,ReadTokenKey::Instance{archive,list,element,data_type} if archive.as_str()=="archive" && list.as_str()=="files" && element.as_str()=="file" && *data_type==ArchiveDataType::Attachments)).returning(|_|Ok(info()));

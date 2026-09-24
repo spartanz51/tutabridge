@@ -47,6 +47,9 @@ pub struct FolderInfo {
 /// IMAP hierarchy delimiter used to build nested folder paths.
 pub const IMAP_DELIMITER: char = '/';
 
+/// Client name Tuta shows for the bridge's sessions in the account's session list.
+pub const CLIENT_IDENTIFIER: &str = "TutaBridge";
+
 #[async_trait::async_trait]
 pub trait MailBackend: Send + Sync {
     async fn load_mail_ids_for_folder(
@@ -1059,7 +1062,7 @@ impl MailBackend for TutaSession {
         let mut result = Vec::new();
         for indented in folder_system.indented_list() {
             let folder = indented.folder;
-            let kind = folder.bridge_mail_set_kind();
+            let kind = folder.kind();
 
             // Only expose folder types we support over IMAP.
             let is_custom = kind == MailSetKind::Custom;
@@ -1078,7 +1081,7 @@ impl MailBackend for TutaSession {
             // Build the IMAP path by mapping each ancestor segment.
             let mut segments: Vec<String> = Vec::new();
             for ancestor in folder_system.path_to_folder(&tutasdk::GeneratedId(elem_id.clone())) {
-                let akind = ancestor.bridge_mail_set_kind();
+                let akind = ancestor.kind();
                 if let Some(name) = system_imap_name(akind) {
                     segments.push(name.to_string());
                 } else {
@@ -1238,7 +1241,7 @@ pub async fn login_with_2fa(
 
     log::info!("Authenticating with Tuta servers...");
     let session = sdk
-        .initiate_session(&cfg.email, password, "TutaBridge")
+        .initiate_session(&cfg.email, password, CLIENT_IDENTIFIER)
         .await
         .map_err(|e| {
             Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))

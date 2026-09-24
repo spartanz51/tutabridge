@@ -116,7 +116,7 @@ the client talks to.
 
 ## Architecture
 
-Store-backed: the IMAP server never makes a network call to read.
+Store-backed: the IMAP server answers from memory and the encrypted disk cache.
 
 ```
 Tuta API / WebSocket  ->  Syncer + event bus  ->  MailStore (in-memory)  <-  IMAP server  <-  mail client
@@ -126,8 +126,10 @@ Tuta API / WebSocket  ->  Syncer + event bus  ->  MailStore (in-memory)  <-  IMA
 * At startup the **syncer** loads the on-disk encrypted cache into an
   in-memory `MailStore`; after that, Tuta's **event bus** keeps it current in
   real time (new mail, moves, deletions, read state).
-* The **IMAP server** only ever reads from the store. The only IMAP-to-network
-  calls are mutations: mark read/unread, move and trash. Sending goes through
+* The **IMAP server** reads from the store. Its only network read is the
+  body of a mail not downloaded yet, fetched when a client opens it; the
+  other network calls are mutations: mark read/unread, move and trash.
+  Sending goes through
   SMTP to Tuta's `DraftService` and `SendDraftService`.
 
 The storage key is derived from your Tuta session, so there is no extra password

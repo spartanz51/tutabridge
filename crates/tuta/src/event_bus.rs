@@ -11,7 +11,7 @@
 //! server's wire format where numeric fields are sent as strings). The other
 //! message kinds (`unreadCounterUpdate`, `leaderStatus`,
 //! `operationStatusUpdate`, …) are emitted as raw [`serde_json::Value`] so the
-//! caller can decide what to do with them — using the SDK's type-mapping
+//! caller can decide what to do with them, using the SDK's type-mapping
 //! machinery if a typed view is needed.
 
 use std::collections::HashMap;
@@ -127,7 +127,7 @@ pub enum EventBusMessage {
     /// batch, it should record `batch_id` as the new "last processed" id for
     /// `group_id` so the next reconnect can resume from there.
     EntityUpdate(EntityUpdateBatch),
-    /// Unread-counter update — raw JSON; convert via the SDK's type machinery
+    /// Unread-counter update as raw JSON; convert via the SDK's type machinery
     /// if a typed view is needed.
     CounterUpdate(Value),
     LeaderStatus(Value),
@@ -162,12 +162,8 @@ pub enum WsState {
 
 #[derive(Debug, Error)]
 pub enum EventBusError {
-    #[error("websocket transport error: {0}")]
-    Transport(String),
     #[error("authentication rejected (code {0})")]
     AuthenticationRejected(u16),
-    #[error("cached event batch ids expired — full re-sync required")]
-    OutOfSync,
     #[error("invalid message: {0}")]
     InvalidMessage(String),
     #[error("client stopped")]
@@ -188,7 +184,7 @@ enum CloseAction {
 /// Event-bus client. A single instance can be `run` many times; the WebSocket
 /// connection lives for the duration of `run`. The per-group "last processed
 /// batch id" state is shared via [`EventBusClient::last_batch_ids`] so the
-/// caller can advance it as batches are processed — the next reconnect will
+/// caller can advance it as batches are processed; the next reconnect will
 /// use the latest values.
 pub struct EventBusClient {
     /// REST base URL, e.g. `https://app.tuta.com`. Converted to `wss://` for
@@ -207,6 +203,7 @@ pub struct EventBusClient {
 }
 
 impl EventBusClient {
+    #[must_use]
     pub fn new(
         base_url: String,
         sys_model_version: u32,
@@ -228,6 +225,7 @@ impl EventBusClient {
 
     /// Subscribe to live connection-state transitions
     /// (`Stopped` → `Connecting` → `Connected` → `Reconnecting` → …).
+    #[must_use]
     pub fn state(&self) -> watch::Receiver<WsState> {
         self.state.subscribe()
     }
@@ -236,6 +234,7 @@ impl EventBusClient {
     /// entry after each fully processed batch; the next reconnect uses the
     /// current values to ask the server to resend events missed since that
     /// batch.
+    #[must_use]
     pub fn last_batch_ids(&self) -> Arc<Mutex<HashMap<String, String>>> {
         Arc::clone(&self.last_batch_ids)
     }
@@ -250,7 +249,7 @@ impl EventBusClient {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), EventBusError> {
         let mut failed_attempts: u32 = 0;
-        // Helper: announce a state, ignoring "no subscribers" — observers are
+        // Helper: announce a state, ignoring "no subscribers": observers are
         // optional and the bus must not block on them.
         let publish = |s: WsState| {
             let _ = self.state.send(s);
@@ -338,7 +337,7 @@ impl EventBusClient {
                     frame = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => match frame {
                         Err(_) => {
                             warn!(
-                                "ws: no frame for {}s — forcing reconnect (probable zombie socket)",
+                                "ws: no frame for {}s, forcing reconnect (probable zombie socket)",
                                 IDLE_TIMEOUT.as_secs()
                             );
                             break "idle-timeout";
@@ -616,7 +615,7 @@ mod tests {
         // markers happen to use a single string payload, so this also doubles
         // as a sanity check that the framing does not eat content.
         match parse_message("initialSyncWorkEstimate;1;2;3").unwrap() {
-            // "1;2;3" parses as the first integer 0 via fallback — that's fine,
+            // "1;2;3" parses as the first integer 0 via fallback, which is fine:
             // the point is that we did not panic on the inner semicolons.
             EventBusMessage::InitialSyncWorkEstimate(_) => {}
             other => panic!("wrong variant {:?}", other),
@@ -709,7 +708,7 @@ mod tests {
 
     #[test]
     fn parses_unread_counter_update_as_raw_value() {
-        // We deliberately do not try to type counter updates — the consumer
+        // We deliberately do not try to type counter updates: the consumer
         // can apply the SDK's type machinery if it needs a typed view.
         let raw = r#"{"1493":"0","1494":"mailGroupX","2559":"1","2560":"h","1495":[]}"#;
         match parse_message(&format!("unreadCounterUpdate;{}", raw)).unwrap() {
@@ -723,7 +722,7 @@ mod tests {
     #[test]
     fn heartbeat_fires_before_idle_timeout() {
         // We must send (and receive, via the server's Pong reply) a frame
-        // inside IDLE_TIMEOUT — otherwise a perfectly healthy connection
+        // inside IDLE_TIMEOUT, otherwise a perfectly healthy connection
         // would be killed every IDLE_TIMEOUT seconds. Keep at least 20s
         // headroom for round-trip latency under adverse network conditions.
         assert!(

@@ -1,4 +1,4 @@
-From eef1a14f34455b43f578d79cd5d6c4a907146e1d Mon Sep 17 00:00:00 2001
+From 46e41ee14e0e7761a00a15990d4f406142df2489 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:09:00 +0200
 Subject: [PATCH] [sdk] Decrypt AEAD attribute values encrypted with a group
@@ -10,17 +10,18 @@ the instance's KDF nonce, as TS AeadWithGroupKeyDecryptor does. Instances
 carrying a KDF nonce go through this path, including decrypt_parsed.
 Writing such instances is refused until AEAD writes are supported.
 ---
- tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  18 ++
- .../rust/sdk/src/crypto_entity_client/aead.rs | 160 ++++++++++++++
- .../rust/sdk/src/entities/entity_facade.rs    |  51 ++++-
- .../src/entities/entity_facade/decryption.rs  | 180 +++++++++++++++-
+ tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  20 +-
+ .../rust/sdk/src/crypto_entity_client/aead.rs | 162 ++++++++++++++
+ .../rust/sdk/src/entities/entity_facade.rs    |  41 +++-
+ .../src/entities/entity_facade/decryption.rs  | 178 +++++++++++++++-
  .../entities/entity_facade/decryption_keys.rs | 197 ++++++++++++++++++
- 5 files changed, 597 insertions(+), 9 deletions(-)
+ .../sdk/test_data/aead_attributes_ts.json     |  16 ++
+ 6 files changed, 604 insertions(+), 10 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
  create mode 100644 tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
 
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
-index 2db05dd505..c1593a4baf 100644
+index 2db05dd505..04293715f9 100644
 --- a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 @@ -1,3 +1,5 @@
@@ -29,11 +30,20 @@ index 2db05dd505..c1593a4baf 100644
  use std::sync::Arc;
  
  use crate::bindings::rest_client::RestClientError;
+@@ -11,7 +13,7 @@ use crate::crypto::key::AsymmetricKeyPair;
+ use crate::crypto::public_key_provider::{PublicKeyIdentifier, PublicKeyLoadingError};
+ use crate::crypto::X25519PublicKey;
+ use crate::element_value::{ElementValue, ParsedEntity};
+-use crate::entities::entity_facade::{EntityFacade, ID_FIELD};
++use crate::entities::entity_facade::{has_kdf_nonce, EntityFacade, ID_FIELD};
+ use crate::entities::generated::base::PersistenceResourcePostReturn;
+ use crate::entities::generated::sys::BucketKey;
+ use crate::entities::generated::tutanota::{Mail, MailAddress};
 @@ -191,6 +193,11 @@ impl CryptoEntityClient {
  			.map_err(|e| ApiCallError::internal_with_err(e, type_ref.to_string().as_str()))?;
  		let type_model = self.entity_client.resolve_client_type_ref(&type_ref)?;
  
-+		if crate::entities::entity_facade::has_kdf_nonce(type_model, &parsed_entity) {
++		if has_kdf_nonce(type_model, &parsed_entity) {
 +			return Err(ApiCallError::internal(
 +				"AEAD instance writes are not supported".into(),
 +			));
@@ -45,7 +55,7 @@ index 2db05dd505..c1593a4baf 100644
  		type_model: &TypeModel,
  		parsed_entity: ParsedEntity,
  	) -> Result<ParsedEntity, ApiCallError> {
-+		if crate::entities::entity_facade::has_kdf_nonce(type_model, &parsed_entity) {
++		if has_kdf_nonce(type_model, &parsed_entity) {
 +			return self
 +				.process_entity_with_group_keys(type_model, parsed_entity, None)
 +				.await;
@@ -58,7 +68,7 @@ index 2db05dd505..c1593a4baf 100644
  	) -> Result<ParsedEntity, ApiCallError> {
  		let type_model = self.entity_client.resolve_server_type_ref(type_ref)?;
 +		// Group-key attributes use their instance owner and ciphertext key version.
-+		if crate::entities::entity_facade::has_kdf_nonce(&type_model, &parsed_entity) {
++		if has_kdf_nonce(&type_model, &parsed_entity) {
 +			return self
 +				.process_entity_with_group_keys(&type_model, parsed_entity, inherited_session_key)
 +				.await;
@@ -68,10 +78,10 @@ index 2db05dd505..c1593a4baf 100644
  		}
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
 new file mode 100644
-index 0000000000..ddd0ec12c5
+index 0000000000..49e100f8fa
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,162 @@
 +use super::CryptoEntityClient;
 +use crate::element_value::{ElementValue, ParsedEntity};
 +use crate::entities::entity_facade::{
@@ -109,9 +119,10 @@ index 0000000000..ddd0ec12c5
 +					.crypto_facade
 +					.resolve_session_key(&entity, model)
 +					.await
-+					.map_err(|_| {
-+						ApiCallError::internal(
-+							"Failed to resolve required attribute session key".into(),
++					.map_err(|e| {
++						ApiCallError::internal_with_err(
++							e,
++							"Failed to resolve required attribute session key",
 +						)
 +					})?,
 +			};
@@ -131,10 +142,11 @@ index 0000000000..ddd0ec12c5
 +					.key_loader_facade
 +					.load_sym_group_key(owner, version, None)
 +					.await
-+					.map_err(|_| {
-+						ApiCallError::internal(format!(
-+							"Failed to load AEAD group key version {version}"
-+						))
++					.map_err(|e| {
++						ApiCallError::internal_with_err(
++							e,
++							&format!("Failed to load AEAD group key version {version}"),
++						)
 +					})?;
 +				keys.group_keys.insert(version, key);
 +			}
@@ -233,7 +245,7 @@ index 0000000000..ddd0ec12c5
 +	}
 +}
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
-index 339cf61ef0..6317589c74 100644
+index d735acf692..9748cf3686 100644
 --- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
 @@ -1,5 +1,7 @@
@@ -244,7 +256,7 @@ index 339cf61ef0..6317589c74 100644
  
  use crate::crypto::crypto_facade::ResolvedSessionKey;
  use crate::date::DateTime;
-@@ -65,6 +67,23 @@ pub trait EntityFacade: Send + Sync {
+@@ -65,6 +67,13 @@ pub trait EntityFacade: Send + Sync {
  		resolved_session_key: ResolvedSessionKey,
  	) -> Result<ParsedEntity, ApiCallError>;
  
@@ -253,22 +265,12 @@ index 339cf61ef0..6317589c74 100644
 +		type_model: &TypeModel,
 +		entity: ParsedEntity,
 +		keys: EntityDecryptionKeys,
-+	) -> Result<ParsedEntity, ApiCallError> {
-+		if !keys.group_keys.is_empty() {
-+			return Err(ApiCallError::internal(
-+				"This entity decoder does not support group-key attributes".into(),
-+			));
-+		}
-+		let session = keys.session_key.ok_or_else(|| {
-+			ApiCallError::internal("This entity decoder requires a session key".into())
-+		})?;
-+		self.decrypt_and_map(type_model, entity, session)
-+	}
++	) -> Result<ParsedEntity, ApiCallError>;
 +
  	fn encrypt_and_map(
  		&self,
  		type_model: &TypeModel,
-@@ -556,13 +575,36 @@ impl EntityFacade for EntityFacadeImpl {
+@@ -556,13 +565,36 @@ impl EntityFacade for EntityFacadeImpl {
  		entity: ParsedEntity,
  		resolved_session_key: ResolvedSessionKey,
  	) -> Result<ParsedEntity, ApiCallError> {
@@ -307,7 +309,7 @@ index 339cf61ef0..6317589c74 100644
  
  		let owner_enc_session_key_attribute_id: String = type_model
              .get_attribute_id_by_attribute_name(OWNER_ENC_SESSION_KEY_FIELD)
-@@ -602,6 +644,11 @@ impl EntityFacade for EntityFacadeImpl {
+@@ -602,6 +634,11 @@ impl EntityFacade for EntityFacadeImpl {
  		instance: &ParsedEntity,
  		sk: &GenericAesKey,
  	) -> Result<ParsedEntity, ApiCallError> {
@@ -320,7 +322,7 @@ index 339cf61ef0..6317589c74 100644
  	}
  }
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
-index 62d50b6f3a..76224bc64e 100644
+index 7350ca57e6..d20a25cd11 100644
 --- a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
 @@ -3,7 +3,9 @@ use crate::ApiCallError;
@@ -452,16 +454,15 @@ index 62d50b6f3a..76224bc64e 100644
  		}
  	}
  }
-@@ -183,4 +248,105 @@ mod tests {
+@@ -182,4 +247,103 @@ mod tests {
  			assert!(decryptor.decrypt(&vec![3; len], Some("105")).is_err());
  		}
  	}
 +	#[test]
 +	fn group_vectors_require_the_correct_nonce_version_and_key() {
-+		let vectors: Vec<Value> = serde_json::from_str(include_str!(
-+			"../../../tests/fixtures/aead_attributes_ts.json"
-+		))
-+		.unwrap();
++		let vectors: Vec<Value> =
++			serde_json::from_str(include_str!("../../../test_data/aead_attributes_ts.json"))
++				.unwrap();
 +		for vector in vectors.iter().filter(|v| v["version"] == 2) {
 +			let key = GenericAesKey::from_bytes(
 +				&BASE64_STANDARD
@@ -544,10 +545,9 @@ index 62d50b6f3a..76224bc64e 100644
 +			assert_eq!(decryptor.decrypt(&ct, Some("105")).unwrap(), b"group");
 +		}
 +		assert_eq!(decryptor.group_subkeys.borrow().len(), 2);
-+		let vectors: Vec<Value> = serde_json::from_str(include_str!(
-+			"../../../tests/fixtures/aead_attributes_ts.json"
-+		))
-+		.unwrap();
++		let vectors: Vec<Value> =
++			serde_json::from_str(include_str!("../../../test_data/aead_attributes_ts.json"))
++				.unwrap();
 +		let v = vectors.iter().find(|v| v["version"] == 3).unwrap();
 +		let ct = BASE64_STANDARD
 +			.decode(v["ciphertext"].as_str().unwrap())
@@ -761,3 +761,29 @@ index 0000000000..7684035884
 +			.contains("writes are not supported"));
 +	}
 +}
+diff --git a/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json b/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json
+index 7387354262..242561cc0e 100644
+--- a/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json
++++ b/tuta-sdk/rust/sdk/test_data/aead_attributes_ts.json
+@@ -12,5 +12,21 @@
+ 		"key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+ 		"ciphertext": "A/wwsRFB4n0uhzYIjgSTARuk4MCL4g4XbbcGQnCqjsQQEnkKklZRKlhKcbJpWYMh3hDAsaZuNao/RHcRyC6DK6jiT9IZys8+DWYr9F4=",
+ 		"plaintext": "AEAD diagnostic: été ✓"
++	},
++	{
++		"version": 2,
++		"path": "105",
++		"key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++		"kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++		"ciphertext": "AgAHOD8cIubtzCk2+NiyfiDpiEn1rzmW6KWPGvYXs4zqAzisewk0lDRwVuVSApCZuSCctUC9QmJzmsaXFbigKBXcFxAHxXjekSMew+vb4A==",
++		"plaintext": "AEAD diagnostic: été ✓"
++	},
++	{
++		"version": 2,
++		"path": "3/aggregateId/9/anotherCustomId/17",
++		"key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++		"kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++		"ciphertext": "AgAHJ2fTExf6sFytn7JDpY4w0SAVPxBIBGsScsYOeWoBqRCiHreRcJLEbb7+T/+mGJ3dV7/xFPcoHBGe/790JEFNP7ilpvSlgZdjtF6wCw==",
++		"plaintext": "AEAD diagnostic: été ✓"
+ 	}
+ ]

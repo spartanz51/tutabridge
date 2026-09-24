@@ -1,13 +1,14 @@
-From ed3942aeaf4609cc7860179867e4a67e2568b0ca Mon Sep 17 00:00:00 2001
+From a20ab51bd8a6b3b8242ba15ad5ec2ad4c77c9051 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:02:00 +0200
-Subject: [PATCH] [sdk] Add load_multiple to EntityClient and
- CryptoEntityClient
+Subject: [PATCH] [sdk] Load list elements by id in batches
 
-Loads list elements by id, 100 per request, like TS
-EntityRestClient.loadMultiple: elements the server does not return are
-omitted, in the server's order. Avoids one request per element when a
-caller needs many known ids from one list.
+Adds EntityClient::load_multiple and its typed CryptoEntityClient
+counterpart: list elements by id, 100 per request, like TS
+EntityRestClient.loadMultiple. The result follows the server's order;
+ids the server does not return are omitted. Only list element types are
+supported. Avoids one request per element when a caller needs many
+known ids from one list.
 ---
  tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  14 ++
  tuta-sdk/rust/sdk/src/entity_client.rs        | 149 +++++++++++++++++-
@@ -39,7 +40,7 @@ index e3f114c748..1dbd37291c 100644
  		&self,
  		instance: Instance,
 diff --git a/tuta-sdk/rust/sdk/src/entity_client.rs b/tuta-sdk/rust/sdk/src/entity_client.rs
-index bc1786b191..168a260212 100644
+index bc1786b191..7f4f042e50 100644
 --- a/tuta-sdk/rust/sdk/src/entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/entity_client.rs
 @@ -1,4 +1,6 @@
@@ -65,8 +66,8 @@ index bc1786b191..168a260212 100644
  	}
  
 +	/// Loads the list elements with the given ids, `LOAD_MULTIPLE_LIMIT` per
-+	/// request. As in TS `EntityRestClient.loadMultiple`, elements the server
-+	/// does not return are omitted, in the server's order.
++	/// request, like TS `EntityRestClient.loadMultiple`. The result follows
++	/// the server's order; ids the server does not return are omitted.
 +	pub async fn load_multiple(
 +		&self,
 +		type_ref: &TypeRef,
@@ -132,7 +133,7 @@ index bc1786b191..168a260212 100644
  		assert_eq!(result_entity, vec![entity_map]);
  	}
  
-+	fn load_multiple_client(rest_client: MockRestClient) -> EntityClient {
++	fn test_entity_client(rest_client: MockRestClient) -> EntityClient {
 +		let type_provider = Arc::new(mock_type_model_provider());
 +		EntityClient::new(
 +			Arc::new(rest_client),
@@ -158,7 +159,7 @@ index bc1786b191..168a260212 100644
 +				})
 +			});
 +
-+		let result = load_multiple_client(rest_client)
++		let result = test_entity_client(rest_client)
 +			.load_multiple(
 +				&TestListGeneratedElementIdEntity::type_ref(),
 +				&GeneratedId("list_id".to_owned()),
@@ -193,7 +194,7 @@ index bc1786b191..168a260212 100644
 +		}
 +		let ids: Vec<GeneratedId> = (0..101).map(|i| GeneratedId(format!("id{i}"))).collect();
 +
-+		let result = load_multiple_client(rest_client)
++		let result = test_entity_client(rest_client)
 +			.load_multiple(
 +				&TestListGeneratedElementIdEntity::type_ref(),
 +				&GeneratedId("list_id".to_owned()),
@@ -209,7 +210,7 @@ index bc1786b191..168a260212 100644
 +		let mut rest_client = MockRestClient::new();
 +		rest_client.expect_request_binary().times(0);
 +
-+		let result = load_multiple_client(rest_client)
++		let result = test_entity_client(rest_client)
 +			.load_multiple(
 +				&TestListGeneratedElementIdEntity::type_ref(),
 +				&GeneratedId("list_id".to_owned()),

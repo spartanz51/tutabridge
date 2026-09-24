@@ -5,13 +5,13 @@
 //!
 //! ```text
 //! ┌──────────────────────────┬───────────────────────────────────────┐
-//! │  4 bytes — timestamp     │  9 bytes — Mail.element_id (raw)      │
+//! │  4 bytes: timestamp      │  9 bytes: Mail.element_id (raw)       │
 //! │  receivedDate >> 10 (BE) │                                       │
 //! └──────────────────────────┴───────────────────────────────────────┘
 //! ```
 //!
-//! The timestamp is shifted right by 10 bits — i.e. quantised to ~1.024s
-//! resolution — to fit into 4 bytes (covers up to year ~2109). The 9 raw
+//! The timestamp is shifted right by 10 bits, i.e. quantised to ~1.024s
+//! resolution, to fit into 4 bytes (covers up to year ~2109). The 9 raw
 //! bytes of the [`Mail`] id are appended verbatim; the same bytes encoded
 //! with Tuta's `base64ext` alphabet form the [`GeneratedId`] string of the
 //! mail.
@@ -68,7 +68,7 @@ pub enum MailSetEntryIdError {
 /// # Panics
 ///
 /// Panics if `mail_id` does not decode to exactly `MAIL_ID_BYTES` (9) bytes
-/// when interpreted as base64ext — i.e. if it is not a well-formed Tuta
+/// when interpreted as base64ext, i.e. if it is not a well-formed Tuta
 /// `GeneratedId`. Such an id would never appear in practice; this guards
 /// against misuse in tests / new code paths.
 #[must_use]
@@ -94,7 +94,7 @@ pub fn construct(receive_date: DateTime, mail_id: &GeneratedId) -> CustomId {
 
 /// Split a [`CustomId`] coming from a `MailSetEntry._id` back into the
 /// (received-date, mail id) pair it encodes. The returned timestamp has the
-/// ~1s quantisation baked into the wire format (`millis & !0x3FF`) — fine for
+/// ~1s quantisation baked into the wire format (`millis & !0x3FF`): fine for
 /// sorting / display, but do not compare for strict equality with a fresh
 /// `Date.now()`.
 pub fn deconstruct(id: &CustomId) -> Result<(DateTime, GeneratedId), MailSetEntryIdError> {
@@ -120,7 +120,7 @@ mod tests {
     use super::*;
 
     /// Test vector copied verbatim from the TS test suite
-    /// (`test/tests/typerefs/EntityUtilsTest.ts`) — guarantees we stay
+    /// (`test/tests/typerefs/EntityUtilsTest.ts`), so we stay
     /// wire-compatible with the official client.
     #[test]
     fn ts_test_vector() {
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn deconstruct_rejects_a_long_id() {
-        // 14 bytes of base64url payload — explicitly more than the 13-byte
+        // 14 bytes of base64url payload, explicitly more than the 13-byte
         // envelope so the parser cannot silently truncate.
         let id = CustomId("AAAAAAAAAAAAAAAAAAA".to_string());
         assert_eq!(
@@ -213,7 +213,7 @@ mod tests {
     #[should_panic(expected = "malformed Tuta GeneratedId")]
     fn construct_panics_on_a_non_generated_id() {
         // Passing something that does not decode to 9 bytes is a contract
-        // violation — caller bug. We assert loudly rather than silently
+        // violation (a caller bug). We assert loudly rather than silently
         // truncate.
         let bogus = GeneratedId("!".to_string());
         let _ = construct(DateTime::from_millis(0), &bogus);

@@ -1,4 +1,4 @@
-From eee918b41bd68d5679e3793437e3f4f7ca82c691 Mon Sep 17 00:00:00 2001
+From c27883d150baaabaac93ef38522c830b6e07cd3b Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:03:00 +0200
 Subject: [PATCH] [sdk] Download blobs referenced by an instance
@@ -12,10 +12,10 @@ fail over to the next (tryServers). Read tokens are cached apart from
 write tokens.
 ---
  .../sdk/src/blobs/blob_access_token_cache.rs  |  17 +-
- .../sdk/src/blobs/blob_access_token_facade.rs | 187 +++++++-
+ .../sdk/src/blobs/blob_access_token_facade.rs | 177 +++++-
  tuta-sdk/rust/sdk/src/blobs/blob_facade.rs    |   2 +
- .../rust/sdk/src/blobs/blob_facade/read.rs    | 452 ++++++++++++++++++
- 4 files changed, 646 insertions(+), 12 deletions(-)
+ .../rust/sdk/src/blobs/blob_facade/read.rs    | 519 ++++++++++++++++++
+ 4 files changed, 703 insertions(+), 12 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
 
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs
@@ -79,7 +79,7 @@ index dae127d190..5bf7dfa05f 100644
  		cache.remove(key);
  	}
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
-index a432c6c057..606b25accf 100644
+index a432c6c057..1c7acd5428 100644
 --- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
 @@ -1,7 +1,7 @@
@@ -126,7 +126,7 @@ index a432c6c057..606b25accf 100644
  			randomizer_facade,
  			service_executor,
  		}
-@@ -74,6 +88,64 @@ impl BlobAccessTokenFacade {
+@@ -74,6 +88,54 @@ impl BlobAccessTokenFacade {
  			.await
  	}
  
@@ -143,36 +143,26 @@ index a432c6c057..606b25accf 100644
 +							.encode(self.randomizer_facade.generate_random_array::<4>()),
 +					))
 +				};
-+				let (archive, instance, data_type) = match key {
-+					ReadTokenKey::Instance {
-+						archive,
-+						list,
-+						element,
-+						data_type,
-+					} => (
-+						archive,
-+						Some((list, element)),
-+						Some(data_type.discriminant()),
-+					),
-+				};
++				let ReadTokenKey::Instance {
++					archive,
++					list,
++					element,
++					data_type,
++				} = key;
 +				let read = BlobReadData {
 +					_id: aggregate_id(),
 +					archiveId: archive.clone(),
-+					instanceListId: instance.map(|id| id.0.clone()),
-+					instanceIds: instance
-+						.map(|id| {
-+							vec![InstanceId {
-+								_id: aggregate_id(),
-+								instanceId: Some(id.1.clone()),
-+							}]
-+						})
-+						.unwrap_or_default(),
++					instanceListId: Some(list.clone()),
++					instanceIds: vec![InstanceId {
++						_id: aggregate_id(),
++						instanceId: Some(element.clone()),
++					}],
 +				};
 +				self.service_executor
 +					.post::<BlobAccessTokenService>(
 +						BlobAccessTokenPostIn {
 +							_format: 0,
-+							archiveDataType: data_type,
++							archiveDataType: Some(data_type.discriminant()),
 +							read: Some(read),
 +							write: None,
 +						},
@@ -191,7 +181,7 @@ index a432c6c057..606b25accf 100644
  	/// Remove a given write token from the cache.
  	#[allow(unused)]
  	pub fn evict_access_token(&self, key: &BlobWriteTokenKey) {
-@@ -129,4 +201,115 @@ mod tests {
+@@ -129,4 +191,115 @@ mod tests {
  			.expect("failed to request token");
  		assert_eq!(expected_access_info, cached_access_info);
  	}
@@ -319,10 +309,10 @@ index 992e87c3df..34917c23d5 100644
  use crate::bindings::rest_client::RestClient;
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
 new file mode 100644
-index 0000000000..28961e9233
+index 0000000000..d8bdc61afc
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,519 @@
 +use super::BlobFacade;
 +use crate::bindings::rest_client::{
 +	encode_query_params, HttpMethod, RestClientError, RestClientOptions,
@@ -337,6 +327,9 @@ index 0000000000..28961e9233
 +use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 +use std::collections::HashMap;
 +use std::future::Future;
++
++/// Maximum number of blob ids per blob service request.
++const BLOB_DOWNLOAD_LIMIT: usize = 100;
 +
 +impl BlobFacade {
 +	/// Downloads encrypted blobs authorized by a referencing instance, in batches of 100.
@@ -376,7 +369,7 @@ index 0000000000..28961e9233
 +			.ok_or_else(|| ApiCallError::internal("Missing BlobGetIn model".to_owned()))?
 +			.version;
 +		let mut result = HashMap::new();
-+		for chunk in ids.chunks(100) {
++		for chunk in ids.chunks(BLOB_DOWNLOAD_LIMIT) {
 +			let request = BlobGetIn {
 +				_format: 0,
 +				archiveId: archive.clone(),
@@ -425,29 +418,29 @@ index 0000000000..28961e9233
 +		Ok(result)
 +	}
 +
-+	/// Mirrors doBlobRequestWithRetry: evict and repeat the complete read once on 403.
++	/// Mirrors doBlobRequestWithRetry: on 403, evicts the token and repeats the
++	/// complete read once.
 +	async fn with_read_token<T, F, R>(&self, key: &ReadTokenKey, read: F) -> Result<T, ApiCallError>
 +	where
 +		F: Fn(BlobServerAccessInfo) -> R,
 +		R: Future<Output = Result<T, ApiCallError>>,
 +	{
-+		for attempt in 0..=1 {
-+			let result = async {
-+				let info = self
-+					.blob_access_token_facade
-+					.request_read_token(key)
-+					.await?;
-+				read(info).await
-+			}
-+			.await;
-+			match result {
-+				Err(ApiCallError::ServerResponseError {
-+					source: HttpError::NotAuthorizedError,
-+				}) if attempt == 0 => self.blob_access_token_facade.evict_read_token(key),
-+				result => return result,
-+			}
++		let read_once = || async {
++			let info = self
++				.blob_access_token_facade
++				.request_read_token(key)
++				.await?;
++			read(info).await
++		};
++		match read_once().await {
++			Err(ApiCallError::ServerResponseError {
++				source: HttpError::NotAuthorizedError,
++			}) => {
++				self.blob_access_token_facade.evict_read_token(key);
++				read_once().await
++			},
++			result => result,
 +		}
-+		Err(HttpError::NotAuthorizedError.into())
 +	}
 +
 +	/// Mirrors tryServers: fail over only for errors specific to one blob server.
@@ -553,6 +546,7 @@ index 0000000000..28961e9233
 +	use crate::HeadersProvider;
 +	use crypto_primitives::randomizer_facade::RandomizerFacade;
 +	use std::sync::{Arc, Mutex};
++
 +	fn info() -> BlobServerAccessInfo {
 +		BlobServerAccessInfo {
 +			blobAccessToken: "token".into(),
@@ -569,6 +563,7 @@ index 0000000000..28961e9233
 +			..create_test_entity()
 +		}
 +	}
++
 +	fn facade(rest: MockRestClient, token: MockBlobAccessTokenFacade) -> BlobFacade {
 +		let provider = Arc::new(TypeModelProvider::new_test(
 +			Arc::new(MockRestClient::new()),
@@ -585,9 +580,11 @@ index 0000000000..28961e9233
 +			provider,
 +		)
 +	}
++
 +	fn id() -> IdTupleGenerated {
 +		IdTupleGenerated::new(GeneratedId("archive".into()), GeneratedId("element".into()))
 +	}
++
 +	fn wire(entries: &[(GeneratedId, Vec<u8>)]) -> Vec<u8> {
 +		let mut out = (entries.len() as u32).to_be_bytes().to_vec();
 +		for (id, bytes) in entries {
@@ -598,6 +595,7 @@ index 0000000000..28961e9233
 +		}
 +		out
 +	}
++
 +	#[test]
 +	fn binary_parser_checks_framing_before_allocation() {
 +		let id = GeneratedId(BASE64_EXT.encode([1; 9]));
@@ -625,10 +623,22 @@ index 0000000000..28961e9233
 +			assert!(parse_multiple_blobs_response(&bad).is_err());
 +		}
 +	}
++
 +	#[tokio::test]
 +	async fn binary_download_uses_instance_scope_and_chunks_at_100() {
 +		let mut token = MockBlobAccessTokenFacade::default();
-+		token.expect_request_read_token().times(1).withf(|key| matches!(key,ReadTokenKey::Instance{archive,list,element,data_type} if archive.as_str()=="archive" && list.as_str()=="files" && element.as_str()=="file" && *data_type==ArchiveDataType::Attachments)).returning(|_|Ok(info()));
++		token
++			.expect_request_read_token()
++			.times(1)
++			.withf(|key| {
++				*key == ReadTokenKey::Instance {
++					archive: GeneratedId("archive".into()),
++					list: GeneratedId("files".into()),
++					element: GeneratedId("file".into()),
++					data_type: ArchiveDataType::Attachments,
++				}
++			})
++			.returning(|_| Ok(info()));
 +		let sizes = Arc::new(Mutex::new(Vec::new()));
 +		let seen = sizes.clone();
 +		let mut rest = MockRestClient::new();
@@ -686,6 +696,7 @@ index 0000000000..28961e9233
 +			.unwrap()
 +			.is_empty());
 +	}
++
 +	#[tokio::test]
 +	async fn binary_download_rejects_missing_or_unrequested_blobs() {
 +		let requested = GeneratedId(BASE64_EXT.encode([1; 9]));
@@ -723,7 +734,7 @@ index 0000000000..28961e9233
 +				.is_err());
 +		}
 +	}
-+	// Expectations obtained by executing the upstream TS functions at the fixture's commit.
++
 +	#[tokio::test]
 +	async fn binary_refresh_restarts_the_complete_archive_read_once() {
 +		let mut token = MockBlobAccessTokenFacade::default();
@@ -773,5 +784,51 @@ index 0000000000..28961e9233
 +			.unwrap();
 +		assert_eq!(result.len(), 101);
 +		assert_eq!(*sizes.lock().unwrap(), vec![100, 1, 100, 1]);
++	}
++
++	#[tokio::test]
++	async fn binary_download_fails_over_to_the_next_server() {
++		let mut token = MockBlobAccessTokenFacade::default();
++		token
++			.expect_request_read_token()
++			.times(1)
++			.returning(|_| Ok(info()));
++		let blob = GeneratedId(BASE64_EXT.encode([1; 9]));
++		let body = wire(&[(blob.clone(), vec![42])]);
++		let mut rest = MockRestClient::new();
++		let mut sequence = mockall::Sequence::new();
++		rest.expect_request_binary()
++			.times(1)
++			.in_sequence(&mut sequence)
++			.withf(|url, _, _| url.starts_with("https://first/"))
++			.returning(|_, _, _| {
++				Ok(RestResponse {
++					status: 500,
++					headers: HashMap::new(),
++					body: None,
++				})
++			});
++		rest.expect_request_binary()
++			.times(1)
++			.in_sequence(&mut sequence)
++			.withf(|url, _, _| url.starts_with("https://second/"))
++			.returning(move |_, _, _| {
++				Ok(RestResponse {
++					status: 200,
++					headers: HashMap::new(),
++					body: Some(body.clone()),
++				})
++			});
++
++		let result = facade(rest, token)
++			.download_blobs(
++				&id().list_id,
++				&id(),
++				ArchiveDataType::Attachments,
++				std::slice::from_ref(&blob),
++			)
++			.await
++			.unwrap();
++		assert_eq!(result[&blob], vec![42]);
 +	}
 +}

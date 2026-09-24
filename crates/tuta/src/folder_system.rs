@@ -1,9 +1,12 @@
+//! The folder tree of a mailbox, ported from the TS `FolderSystem`.
 use crate::entities::generated::tutanota::{Mail, MailSet};
 use crate::GeneratedId;
 use num_enum::TryFromPrimitive;
 use std::collections::HashMap;
 use tutasdk::IdTupleGenerated;
 
+/// Folder type of a `MailSet`, as in TS `MailSetKind`. Values this code does
+/// not know map to `Unknown`.
 #[derive(Copy, Clone, PartialEq, Eq, TryFromPrimitive, Debug)]
 #[repr(u64)]
 pub enum MailSetKind {
@@ -21,13 +24,15 @@ pub enum MailSetKind {
     Unknown = 9999,
 }
 
+/// Folder helpers on the SDK's `MailSet`.
 pub trait MailSetExt {
-    fn bridge_mail_set_kind(&self) -> MailSetKind;
+    /// The folder type, `Unknown` for values this code does not know.
+    fn kind(&self) -> MailSetKind;
     fn element_id(&self) -> Option<&GeneratedId>;
     fn is_visible_system(&self) -> bool;
 }
 impl MailSetExt for MailSet {
-    fn bridge_mail_set_kind(&self) -> MailSetKind {
+    fn kind(&self) -> MailSetKind {
         MailSetKind::try_from(self.folderType as u64).unwrap_or(MailSetKind::Unknown)
     }
 
@@ -40,7 +45,7 @@ impl MailSetExt for MailSet {
     /// Mirrors TS `isVisibleSystemMailSet`.
     fn is_visible_system(&self) -> bool {
         matches!(
-            self.bridge_mail_set_kind(),
+            self.kind(),
             MailSetKind::Inbox
                 | MailSetKind::Sent
                 | MailSetKind::Trash
@@ -92,13 +97,9 @@ impl FolderSystem {
         for folder in folders {
             if folder.is_visible_system() {
                 system.push(folder);
-            } else if folder.bridge_mail_set_kind() == MailSetKind::Custom
-                && folder.parentFolder.is_none()
-            {
+            } else if folder.kind() == MailSetKind::Custom && folder.parentFolder.is_none() {
                 top_level_custom.push(folder);
-            } else if folder.bridge_mail_set_kind() == MailSetKind::Imported
-                && imported_mail_set.is_none()
-            {
+            } else if folder.kind() == MailSetKind::Imported && imported_mail_set.is_none() {
                 imported_mail_set = Some(folder);
             }
         }
@@ -125,10 +126,10 @@ impl FolderSystem {
     /// Search for a specific system folder type. Some mailboxes may not have
     /// every system folder. Mirrors TS `getSystemFolderByType`.
     #[must_use]
-    pub fn system_folder_by_type(&self, bridge_mail_set_kind: MailSetKind) -> Option<&MailSet> {
+    pub fn system_folder_by_type(&self, kind: MailSetKind) -> Option<&MailSet> {
         self.system_subtrees
             .iter()
-            .find(|s| s.folder.bridge_mail_set_kind() == bridge_mail_set_kind)
+            .find(|s| s.folder.kind() == kind)
             .map(|s| &s.folder)
     }
 
@@ -271,7 +272,7 @@ fn system_order(kind: MailSetKind) -> u8 {
 }
 
 fn compare_system(a: &MailSet, b: &MailSet) -> std::cmp::Ordering {
-    system_order(a.bridge_mail_set_kind()).cmp(&system_order(b.bridge_mail_set_kind()))
+    system_order(a.kind()).cmp(&system_order(b.kind()))
 }
 
 fn compare_custom(a: &MailSet, b: &MailSet) -> std::cmp::Ordering {
@@ -321,8 +322,8 @@ mod tests {
             .into_iter()
             .filter(|f| f.folder.is_visible_system())
             .collect();
-        assert_eq!(systems[0].folder.bridge_mail_set_kind(), MailSetKind::Inbox);
-        assert_eq!(systems[1].folder.bridge_mail_set_kind(), MailSetKind::Spam);
+        assert_eq!(systems[0].folder.kind(), MailSetKind::Inbox);
+        assert_eq!(systems[1].folder.kind(), MailSetKind::Spam);
 
         let customs = fs.custom_folders_of_parent(None);
         assert_eq!(
@@ -398,7 +399,7 @@ mod tests {
             ..create_test_entity()
         };
         assert_eq!(
-            fs.folder_by_mail(&mail).map(|f| f.bridge_mail_set_kind()),
+            fs.folder_by_mail(&mail).map(|f| f.kind()),
             Some(MailSetKind::Inbox)
         );
     }
@@ -412,14 +413,14 @@ mod tests {
         ]);
         assert!(fs.custom_folders_of_parent(None).is_empty());
         assert_eq!(
-            fs.imported_mail_set().map(|f| f.bridge_mail_set_kind()),
+            fs.imported_mail_set().map(|f| f.kind()),
             Some(MailSetKind::Imported)
         );
         assert!(fs.folder_by_id(&GeneratedId("label1".to_owned())).is_none());
     }
 
     #[test]
-    fn bridge_mail_set_kind_maps_new_variants() {
+    fn kind_maps_new_variants() {
         assert_eq!(MailSetKind::try_from(8u64), Ok(MailSetKind::Label));
         assert_eq!(MailSetKind::try_from(9u64), Ok(MailSetKind::Imported));
         assert_eq!(MailSetKind::try_from(10u64), Ok(MailSetKind::Scheduled));
