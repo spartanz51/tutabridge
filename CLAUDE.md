@@ -54,8 +54,9 @@ cargo build                   # CLI + GUI
 cargo build -p tutabridge-core  # Core library only
 ```
 
-## SDK branches (tuta-repo submodule)
+## Vendored SDK (tuta-repo submodule)
 
-- `feat/rust-sdk-blob-read` — blob element reading (MailDetailsBlob)
-- `feat/rust-sdk-load-multiple` — batch entity loading (load_multiple)
-- Locally, `feat/rust-sdk-blob-read` has both merged for development
+Generated, never edited: the official Tuta release in `sdk/BASE` plus
+`sdk/patches/`, built by `scripts/sdk-generate.sh` (`--check` verifies the
+pin, CI runs it). Bridge-specific SDK extensions live in `crates/tuta`.
+See `docs/SDK_PATCHES.md`.

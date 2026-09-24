@@ -34,7 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sdk = Sdk::new(api_url, rest_client, file_client);
 
     println!("==> initiate_session for {email}");
-    let session = sdk.initiate_session(&email, &password).await?;
+    let session = sdk
+        .initiate_session(&email, &password, "TutaBridge")
+        .await?;
     let access_token = session.credentials.access_token.clone();
     println!(
         "    got credentials, {} pending challenge(s)",

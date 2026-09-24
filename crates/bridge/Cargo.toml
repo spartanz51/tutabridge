@@ -6,6 +6,7 @@ rust-version = "1.84.0"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+tutabridge-tuta = { path = "../tuta" }
 tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["net"] }
 
 tokio = { version = "1.43", features = ["full"] }
@@ -53,5 +54,6 @@ keyring = { version = "3", features = ["windows-native"] }
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
+tutabridge-tuta = { path = "../tuta", features = ["testing"] }
 tuta-sdk = { path = "../../tuta-repo/tuta-sdk/rust/sdk", features = ["net", "logging", "testing"] }
 rpassword = "7"

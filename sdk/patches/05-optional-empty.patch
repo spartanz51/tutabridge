@@ -1,0 +1,84 @@
+From dc0ed00e50224afe10b9cfd0c02d6d5ed7714f68 Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Wed, 23 Sep 2026 15:38:44 +0200
+Subject: [PATCH] [sdk] Resolve an empty optional encrypted value to null
+
+An empty optional encrypted value means null, as in TS CryptoMapper, instead of
+being handed to the cipher and failing with InvalidDataSizeError.
+
+---
+ tuta-sdk/rust/sdk/src/json_serializer.rs      | 10 +++++
+ .../json_serializer/optional_empty_tests.rs   | 39 +++++++++++++++++++
+ 2 files changed, 49 insertions(+)
+ create mode 100644 tuta-sdk/rust/sdk/src/json_serializer/optional_empty_tests.rs
+
+diff --git a/tuta-sdk/rust/sdk/src/json_serializer.rs b/tuta-sdk/rust/sdk/src/json_serializer.rs
+index 47733782d0..93cbd8b866 100644
+--- a/tuta-sdk/rust/sdk/src/json_serializer.rs
++++ b/tuta-sdk/rust/sdk/src/json_serializer.rs
+@@ -74,6 +74,13 @@ impl JsonSerializer {
+ 
+ 			let mapped_value = match (&value_type.cardinality, value) {
+ 				(Cardinality::ZeroOrOne, JsonElement::Null) => ElementValue::Null,
++				// Older cardinality changes can leave an empty, unencrypted sentinel.
++				// Match CryptoMapper: an optional encrypted empty value means null.
++				(Cardinality::ZeroOrOne, JsonElement::String(value))
++					if value_type.encrypted && value.is_empty() =>
++				{
++					ElementValue::Null
++				},
+ 				(Cardinality::One, JsonElement::String(v))
+ 					if value_type.encrypted && v.is_empty() =>
+ 				{
+@@ -885,3 +892,6 @@ mod tests {
+ 				});
+ 	}
+ }
++
++#[cfg(test)]
++mod optional_empty_tests;
+diff --git a/tuta-sdk/rust/sdk/src/json_serializer/optional_empty_tests.rs b/tuta-sdk/rust/sdk/src/json_serializer/optional_empty_tests.rs
+new file mode 100644
+index 0000000000..71d33e8648
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/json_serializer/optional_empty_tests.rs
+@@ -0,0 +1,39 @@
++use super::*;
++use crate::bindings::{file_client::MockFileClient, rest_client::MockRestClient};
++use crate::entities::{generated::tutanota::Body, Entity};
++
++#[test]
++fn optional_encrypted_empty_fields_map_to_null() {
++	let provider = Arc::new(TypeModelProvider::new_test(
++		Arc::new(MockRestClient::new()),
++		Arc::new(MockFileClient::new()),
++		"http://test".to_owned(),
++	));
++	let serializer = JsonSerializer::new(provider);
++	for field in ["1275", "1276"] {
++		let mut raw: RawEntity =
++			serde_json::from_str(r#"{"1274":"body","1275":null,"1276":null}"#).unwrap();
++		assert_eq!(
++			serializer.parse(&Body::type_ref(), raw.clone()).unwrap()[field],
++			ElementValue::Null
++		);
++		raw.insert(field.to_owned(), JsonElement::String(String::new()));
++		assert_eq!(
++			serializer.parse(&Body::type_ref(), raw.clone()).unwrap()[field],
++			ElementValue::Null
++		);
++		raw.insert(
++			field.to_owned(),
++			JsonElement::String(BASE64_STANDARD.encode([1; 16])),
++		);
++		assert_eq!(
++			serializer.parse(&Body::type_ref(), raw.clone()).unwrap()[field],
++			ElementValue::Bytes(vec![1; 16])
++		);
++		raw.insert(
++			field.to_owned(),
++			JsonElement::String("invalid-base64!".to_owned()),
++		);
++		assert!(serializer.parse(&Body::type_ref(), raw).is_err());
++	}
++}
