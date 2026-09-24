@@ -3,7 +3,8 @@
 #
 #   scripts/sdk-generate.sh            apply sdk/patches on sdk/BASE in tuta-repo
 #   scripts/sdk-generate.sh --check    verify the tuta-repo pin is exactly that
-#   scripts/sdk-generate.sh --push     also publish it on the SDK fork
+#   scripts/sdk-generate.sh --push     also publish it on the SDK fork, on a
+#                                      branch named after the generated commit
 #   scripts/sdk-generate.sh --verify-each
 #                                      also check every patch on its own: after
 #                                      each one the SDK must be formatted and
@@ -91,8 +92,12 @@ check)
 generate | push | verify-each)
 	git -C "$sdk" checkout --quiet --detach "$generated"
 	if [ "$mode" = push ]; then
-		git -C "$sdk" push --quiet "$FORK" "$generated:refs/heads/generated/${tag#tutanota-release-}"
-		echo "pushed generated/${tag#tutanota-release-}"
+		# One branch per generated commit, never rewritten: every pin that main
+		# ever had stays fetchable.
+		branch="generated/${tag#tutanota-release-}-${generated:0:12}"
+		git -C "$sdk" push --quiet "$FORK" "$generated:refs/heads/$branch"
+		git config -f .gitmodules submodule.tuta-repo.branch "$branch"
+		echo "pushed $branch (recorded in .gitmodules)"
 	fi
 	echo "tuta-repo now at $generated ($tag + sdk/patches); stage it with: git add tuta-repo"
 	;;

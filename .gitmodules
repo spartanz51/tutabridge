@@ -1,4 +1,4 @@
 [submodule "tuta-repo"]
 	path = tuta-repo
 	url = https://github.com/spartanz51/tutanota.git
-	branch = generated/360.260922.0
+	branch = generated/360.260922.0-f525eb9b65e5

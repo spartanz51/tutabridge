@@ -13,10 +13,10 @@ tuta-repo                 submodule pinned at the generated commit
 crates/tuta               bridge-specific code that used to live in the fork
 ```
 
-The result is hosted on the SDK fork (`spartanz51/tutanota`, branch
-`generated/<version>`) only so that `cargo`, CI, `dev.sh` and the AUR
-`-git` package keep building from a plain submodule. The fork is an output,
-not a source.
+The result is hosted on the SDK fork (`spartanz51/tutanota`, one branch per
+generated commit, `generated/<version>-<commit>`, never rewritten) only so
+that `cargo`, CI, `dev.sh` and the AUR `-git` package keep building from a
+plain submodule. The fork is an output, not a source.
 
 ## Checking a pin
 
