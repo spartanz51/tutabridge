@@ -1,0 +1,627 @@
+From 824f0bf794e8b78e2e2340d15da85f323de20936 Mon Sep 17 00:00:00 2001
+From: lab <lab@invalid>
+Date: Wed, 23 Sep 2026 15:38:44 +0200
+Subject: [PATCH 08/11] 08-aead-attribute-writes.patch
+
+---
+ .../rust/sdk/src/entities/entity_facade.rs    | 117 ++++++-
+ .../entities/entity_facade/decryption_keys.rs |   2 +-
+ .../src/entities/entity_facade/encryption.rs  | 326 ++++++++++++++++++
+ .../sdk/tests/fixtures/aead_mapper_ts.json    |  66 ++++
+ 4 files changed, 497 insertions(+), 14 deletions(-)
+ create mode 100644 tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs
+ create mode 100644 tuta-sdk/rust/sdk/tests/fixtures/aead_mapper_ts.json
+
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+index 6317589c74..7294187d9b 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+@@ -1,7 +1,10 @@
+ mod decryption;
+ mod decryption_keys;
++mod encryption;
+ use decryption::InstanceDecryptor;
+ pub use decryption_keys::{has_kdf_nonce, EntityDecryptionKeys, EntityDecryptionRequirements};
++pub use encryption::AeadEncryptionKey;
++use encryption::{EncryptionContext, InstanceEncryptor};
+ 
+ use crate::crypto::crypto_facade::ResolvedSessionKey;
+ use crate::date::DateTime;
+@@ -90,6 +93,19 @@ pub trait EntityFacade: Send + Sync {
+ 		instance: &ParsedEntity,
+ 		sk: &GenericAesKey,
+ 	) -> Result<ParsedEntity, ApiCallError>;
++
++	/// Encrypt attributes using the root instance's AEAD context.
++	fn encrypt_and_map_with_aead(
++		&self,
++		type_model: &TypeModel,
++		instance: &ParsedEntity,
++		key: &AeadEncryptionKey,
++	) -> Result<ParsedEntity, ApiCallError> {
++		let _ = (type_model, instance, key);
++		Err(ApiCallError::internal(
++			"This entity encoder does not support AEAD".into(),
++		))
++	}
+ }
+ 
+ impl EntityFacadeImpl {
+@@ -160,6 +176,16 @@ impl EntityFacadeImpl {
+ 		type_model: &TypeModel,
+ 		instance: &ParsedEntity,
+ 		sk: &GenericAesKey,
++	) -> Result<ParsedEntity, ApiCallError> {
++		self.encrypt_and_map_with_context(type_model, instance, EncryptionContext::Cbc(sk), "")
++	}
++
++	fn encrypt_and_map_with_context(
++		&self,
++		type_model: &TypeModel,
++		instance: &ParsedEntity,
++		context: EncryptionContext<'_>,
++		field_path_prefix: &str,
+ 	) -> Result<ParsedEntity, ApiCallError> {
+ 		let mut encrypted = ParsedEntity::new();
+ 
+@@ -172,18 +198,37 @@ impl EntityFacadeImpl {
+ 				))
+ 			})?;
+ 
+-			let encrypted_value = if !value_type.encrypted {
++			let encrypted_value = if !value_type.encrypted || value_type.name == ID_FIELD {
+ 				instance_value.clone()
+-			} else if instance_value.eq(&value_type.value_type.get_default()) {
++			} else if matches!(context, EncryptionContext::Cbc(_))
++				&& instance_value.eq(&value_type.value_type.get_default())
++			{
+ 				// If the value is a default value and encrypted, we restore an empty string (default for encrypted fields)
+ 				ElementValue::String(String::new())
+ 			} else {
+-				Self::encrypt_value(
+-					value_type,
+-					instance_value,
+-					sk,
+-					InitializationVector::generate(&self.randomizer_facade),
+-				)?
++				match context {
++					EncryptionContext::Cbc(sk) => Self::encrypt_value(
++						value_type,
++						instance_value,
++						sk,
++						InitializationVector::generate(&self.randomizer_facade),
++					)?,
++					EncryptionContext::Aead(encryptor) => {
++						if matches!(instance_value, ElementValue::Null) {
++							if value_type.cardinality != Cardinality::ZeroOrOne {
++								return Err(ApiCallError::internal(
++									"Missing required encrypted value".into(),
++								));
++							}
++							ElementValue::Null
++						} else {
++							ElementValue::Bytes(encryptor.encrypt(
++								Self::map_value_to_binary(&value_type.value_type, instance_value),
++								&format!("{field_path_prefix}{value_id_string}"),
++							)?)
++						}
++					},
++				}
+ 			};
+ 			encrypted.insert(value_id_string.to_string(), encrypted_value);
+ 		}
+@@ -222,7 +267,8 @@ impl EntityFacadeImpl {
+ 					association_id_string.as_str(),
+ 					association_type,
+ 					instance,
+-					sk,
++					context,
++					field_path_prefix,
+ 				)?,
+ 				AssociationType::ElementAssociation
+ 				| AssociationType::ListAssociation
+@@ -248,7 +294,8 @@ impl EntityFacadeImpl {
+ 		association_id: &str,
+ 		association: &ModelAssociation,
+ 		instance: &ParsedEntity,
+-		sk: &GenericAesKey,
++		context: EncryptionContext<'_>,
++		field_path_prefix: &str,
+ 	) -> Result<ElementValue, ApiCallError> {
+ 		let dependency_type_ref = TypeRef::new(
+ 			association.dependency.unwrap_or(type_model.app),
+@@ -266,8 +313,32 @@ impl EntityFacadeImpl {
+ 		let aggregates = instance_association.assert_array();
+ 		let mut encrypted_aggregates = Vec::with_capacity(aggregates.len());
+ 		for aggregate in &aggregates {
++			let mut child = aggregate.assert_dict();
++			let prefix = if matches!(context, EncryptionContext::Aead(_)) {
++				let id_field =
++					aggregated_type_model.get_attribute_id_by_attribute_name(ID_FIELD)?;
++				if matches!(child.get(&id_field), None | Some(ElementValue::Null)) {
++					child.insert(
++						id_field.clone(),
++						make_random_aggregate_id(&self.randomizer_facade),
++					);
++				}
++				let id = match child.get(&id_field) {
++					Some(ElementValue::String(id)) => id.as_str(),
++					Some(ElementValue::IdCustomId(id)) => id.as_str(),
++					Some(ElementValue::IdGeneratedId(id)) => id.as_str(),
++					_ => {
++						return Err(ApiCallError::internal(
++							"Invalid aggregate ID for AEAD".into(),
++						))
++					},
++				};
++				format!("{field_path_prefix}{association_id}/{id}/")
++			} else {
++				String::new()
++			};
+ 			let parsed_entity =
+-				self.encrypt_and_map_inner(aggregated_type_model, &aggregate.assert_dict(), sk)?;
++				self.encrypt_and_map_with_context(aggregated_type_model, &child, context, &prefix)?;
+ 			encrypted_aggregates.push(ElementValue::Dict(parsed_entity));
+ 		}
+ 
+@@ -638,6 +709,26 @@ impl EntityFacade for EntityFacadeImpl {
+ 		Ok(mapped_decrypted)
+ 	}
+ 
++	fn encrypt_and_map_with_aead(
++		&self,
++		type_model: &TypeModel,
++		instance: &ParsedEntity,
++		key: &AeadEncryptionKey,
++	) -> Result<ParsedEntity, ApiCallError> {
++		let encryptor = InstanceEncryptor::new(
++			key,
++			decryption_keys::kdf_nonce(type_model, instance)?,
++			&format!("{}/{}", type_model.app, String::from(type_model.id)),
++			self.randomizer_facade.clone(),
++		)?;
++		self.encrypt_and_map_with_context(
++			type_model,
++			instance,
++			EncryptionContext::Aead(&encryptor),
++			"",
++		)
++	}
++
+ 	fn encrypt_and_map(
+ 		&self,
+ 		type_model: &TypeModel,
+@@ -646,14 +737,14 @@ impl EntityFacade for EntityFacadeImpl {
+ 	) -> Result<ParsedEntity, ApiCallError> {
+ 		if has_kdf_nonce(type_model, instance) {
+ 			return Err(ApiCallError::internal(
+-				"AEAD instance writes are not supported".into(),
++				"An AEAD instance requires the AEAD writer".into(),
+ 			));
+ 		}
+ 		self.encrypt_and_map_inner(type_model, instance, sk)
+ 	}
+ }
+ 
+-fn make_random_aggregate_id(random: &RandomizerFacade) -> ElementValue {
++pub(crate) fn make_random_aggregate_id(random: &RandomizerFacade) -> ElementValue {
+ 	let new_id_bytes = random.generate_random_array::<4>();
+ 	let new_id_string = BASE64_URL_SAFE_NO_PAD.encode(new_id_bytes);
+ 	let new_id = crate::CustomId(new_id_string);
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
+index 7684035884..6b6db7977d 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
+@@ -192,6 +192,6 @@ mod tests {
+ 			.encrypt_and_map(&model, &entity, &key)
+ 			.unwrap_err()
+ 			.to_string()
+-			.contains("writes are not supported"));
++			.contains("requires the AEAD writer"));
+ 	}
+ }
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs
+new file mode 100644
+index 0000000000..3e5f8562fa
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/encryption.rs
+@@ -0,0 +1,326 @@
++use crate::ApiCallError;
++use crypto_primitives::aead_facade::{AeadFacade, AeadSubKeys};
++use crypto_primitives::key::GenericAesKey;
++use crypto_primitives::randomizer_facade::RandomizerFacade;
++use crypto_primitives::versioned::VersionedAesKey;
++
++/// Input key for AEAD attributes. Group-key encryption uses the instance's KDF nonce.
++pub enum AeadEncryptionKey {
++	SessionKey(GenericAesKey),
++	GroupKey(VersionedAesKey),
++}
++
++#[derive(Clone, Copy)]
++pub(super) enum EncryptionContext<'a> {
++	Cbc(&'a GenericAesKey),
++	Aead(&'a InstanceEncryptor),
++}
++
++pub(super) struct InstanceEncryptor {
++	subkeys: AeadSubKeys,
++	domain: &'static str,
++	aead: AeadFacade,
++}
++
++impl InstanceEncryptor {
++	pub(super) fn new(
++		key: &AeadEncryptionKey,
++		kdf_nonce: Option<&[u8]>,
++		instance_type: &str,
++		randomizer: RandomizerFacade,
++	) -> Result<Self, ApiCallError> {
++		let (subkeys, domain) = match key {
++			AeadEncryptionKey::SessionKey(GenericAesKey::Aes256(key)) => (
++				AeadSubKeys::derive_from_session_key(key, instance_type),
++				"attributeEncSK\u{001f}",
++			),
++			AeadEncryptionKey::SessionKey(_) => {
++				return Err(ApiCallError::internal(
++					"AEAD session keys must be 256 bits".into(),
++				));
++			},
++			AeadEncryptionKey::GroupKey(key) => {
++				let nonce = kdf_nonce.filter(|nonce| nonce.len() == 32).ok_or_else(|| {
++					ApiCallError::internal("Missing or invalid AEAD KDF nonce".into())
++				})?;
++				// Validate before a caller changes server-side nonce metadata.
++				if key.version > u64::from(u8::MAX) {
++					return Err(ApiCallError::internal(
++						"Unsupported AEAD group key version".into(),
++					));
++				}
++				(
++					AeadSubKeys::derive_from_group_key(key, nonce, instance_type),
++					"attributeEncGK\u{001f}",
++				)
++			},
++		};
++		Ok(Self {
++			subkeys,
++			domain,
++			aead: AeadFacade::new(randomizer),
++		})
++	}
++
++	pub(super) fn encrypt(
++		&self,
++		bytes: Vec<u8>,
++		field_path: &str,
++	) -> Result<Vec<u8>, ApiCallError> {
++		self.aead
++			.encrypt(
++				&self.subkeys,
++				bytes,
++				format!("{}{field_path}", self.domain).as_bytes(),
++			)
++			.map_err(|error| {
++				ApiCallError::internal_with_err(error, "Failed to encrypt AEAD attribute")
++			})
++	}
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++	use base64::{prelude::BASE64_STANDARD, Engine};
++	use crypto_primitives::randomizer_facade::test_util::DeterministicRng;
++	use crypto_primitives::versioned::Versioned;
++	use rand_core::{CryptoRng, Error, RngCore};
++	use serde_json::Value;
++
++	struct FixedNonce([u8; 16]);
++	impl CryptoRng for FixedNonce {}
++	impl RngCore for FixedNonce {
++		fn next_u32(&mut self) -> u32 {
++			unreachable!()
++		}
++		fn next_u64(&mut self) -> u64 {
++			unreachable!()
++		}
++		fn fill_bytes(&mut self, bytes: &mut [u8]) {
++			bytes.copy_from_slice(&self.0);
++		}
++		fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Error> {
++			self.fill_bytes(bytes);
++			Ok(())
++		}
++	}
++
++	#[test]
++	fn ciphertext_matches_official_typescript_vectors_byte_for_byte() {
++		let vectors: Vec<Value> = serde_json::from_str(include_str!(
++			"../../../tests/fixtures/aead_attributes_ts.json"
++		))
++		.unwrap();
++		for vector in vectors {
++			let version = vector["version"].as_u64().unwrap();
++			let expected = BASE64_STANDARD
++				.decode(vector["ciphertext"].as_str().unwrap())
++				.unwrap();
++			let key = GenericAesKey::from_bytes(
++				&BASE64_STANDARD
++					.decode(vector["key"].as_str().unwrap())
++					.unwrap(),
++			)
++			.unwrap();
++			let nonce = BASE64_STANDARD
++				.decode(vector["kdf_nonce"].as_str().unwrap())
++				.unwrap();
++			let header_len = if version == 3 { 1 } else { 3 };
++			let randomizer = RandomizerFacade::from_core(FixedNonce(
++				expected[header_len..header_len + 16].try_into().unwrap(),
++			));
++			let key = if version == 3 {
++				AeadEncryptionKey::SessionKey(key)
++			} else {
++				AeadEncryptionKey::GroupKey(Versioned {
++					object: key,
++					version: 7,
++				})
++			};
++			let encoder =
++				InstanceEncryptor::new(&key, Some(&nonce), "tutanota/97", randomizer).unwrap();
++			assert_eq!(
++				encoder
++					.encrypt(
++						vector["plaintext"].as_str().unwrap().as_bytes().to_vec(),
++						vector["path"].as_str().unwrap()
++					)
++					.unwrap(),
++				expected
++			);
++		}
++	}
++
++	#[test]
++	fn invalid_key_contexts_are_rejected() {
++		let rng = || RandomizerFacade::from_core(DeterministicRng(0x44));
++		let session =
++			AeadEncryptionKey::SessionKey(GenericAesKey::from_bytes(&[0x11; 16]).unwrap());
++		assert!(InstanceEncryptor::new(&session, None, "tutanota/97", rng()).is_err());
++		let group = |version| {
++			AeadEncryptionKey::GroupKey(Versioned {
++				object: GenericAesKey::from_bytes(&[0x11; 32]).unwrap(),
++				version,
++			})
++		};
++		for nonce in [None, Some(&[0; 31][..])] {
++			assert!(InstanceEncryptor::new(&group(7), nonce, "tutanota/97", rng()).is_err());
++		}
++		assert!(InstanceEncryptor::new(&group(256), Some(&[0; 32]), "tutanota/97", rng()).is_err());
++	}
++
++	#[test]
++	fn mapper_matches_ts_for_empty_unicode_and_aggregate_values() {
++		use crate::element_value::{ElementValue, ParsedEntity};
++		use crate::entities::entity_facade::{EntityFacade, EntityFacadeImpl};
++		use crate::entities::{generated::tutanota::Mail, Entity};
++		use std::sync::Arc;
++		let provider = Arc::new(crate::util::test_utils::mock_type_model_provider());
++		let mut model = provider
++			.resolve_client_type_ref(&Mail::type_ref())
++			.unwrap()
++			.clone();
++		model
++			.values
++			.retain(|id, _| *id == 105.into() || *id == 1839.into());
++		model.associations.retain(|id, _| *id == 111.into());
++		let facade = EntityFacadeImpl::new(
++			provider,
++			RandomizerFacade::from_core(DeterministicRng(0x44)),
++		);
++		let vectors: Vec<Value> =
++			serde_json::from_str(include_str!("../../../tests/fixtures/aead_mapper_ts.json"))
++				.unwrap();
++		for pair in vectors.chunks_exact(2) {
++			let vector = &pair[0];
++			let key = GenericAesKey::from_bytes(&[0x11; 32]).unwrap();
++			let key = if vector["version"] == 3 {
++				AeadEncryptionKey::SessionKey(key)
++			} else {
++				AeadEncryptionKey::GroupKey(Versioned {
++					object: key,
++					version: 7,
++				})
++			};
++			let child = ParsedEntity::from([
++				("93".into(), ElementValue::String("sender-id".into())),
++				("94".into(), ElementValue::String("Alice".into())),
++				(
++					"95".into(),
++					ElementValue::String("alice@example.org".into()),
++				),
++				("96".into(), ElementValue::Array(vec![])),
++			]);
++			let entity = ParsedEntity::from([
++				(
++					"105".into(),
++					ElementValue::String(vector["plaintext"].as_str().unwrap().into()),
++				),
++				("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++				(
++					"111".into(),
++					ElementValue::Array(vec![ElementValue::Dict(child)]),
++				),
++			]);
++			let encrypted = facade
++				.encrypt_and_map_with_aead(&model, &entity, &key)
++				.unwrap();
++			assert_eq!(
++				encrypted["105"].assert_bytes(),
++				&BASE64_STANDARD
++					.decode(vector["ciphertext"].as_str().unwrap())
++					.unwrap()
++			);
++			let child = &encrypted["111"].assert_array_ref()[0].assert_dict_ref();
++			assert_eq!(
++				child["94"].assert_bytes(),
++				&BASE64_STANDARD
++					.decode(pair[1]["ciphertext"].as_str().unwrap())
++					.unwrap()
++			);
++			assert_eq!(child["93"], ElementValue::String("sender-id".into()));
++			assert_eq!(
++				child["95"],
++				ElementValue::String("alice@example.org".into())
++			);
++		}
++	}
++
++	#[test]
++	fn sibling_aggregate_paths_are_independent_and_authenticated() {
++		use super::super::decryption::InstanceDecryptor;
++		use crate::element_value::{ElementValue, ParsedEntity};
++		use crate::entities::entity_facade::{EntityFacade, EntityFacadeImpl};
++		use crate::entities::{generated::tutanota::Mail, Entity};
++		use std::collections::HashMap;
++		use std::sync::Arc;
++		let provider = Arc::new(crate::util::test_utils::mock_type_model_provider());
++		let mut model = provider
++			.resolve_client_type_ref(&Mail::type_ref())
++			.unwrap()
++			.clone();
++		model.values.retain(|id, _| *id == 1839.into());
++		model.associations.retain(|id, _| *id == 111.into());
++		let facade = EntityFacadeImpl::new(
++			provider,
++			RandomizerFacade::from_core(DeterministicRng(0x44)),
++		);
++		for version in [2, 3] {
++			let key = GenericAesKey::from_bytes(&[0x11; 32]).unwrap();
++			let input = if version == 3 {
++				AeadEncryptionKey::SessionKey(key.clone())
++			} else {
++				AeadEncryptionKey::GroupKey(Versioned {
++					object: key.clone(),
++					version: 7,
++				})
++			};
++			let children = ["first", "second"]
++				.iter()
++				.map(|id| {
++					ElementValue::Dict(ParsedEntity::from([
++						("93".into(), ElementValue::String((*id).into())),
++						("94".into(), ElementValue::String((*id).into())),
++						(
++							"95".into(),
++							ElementValue::String("someone@example.org".into()),
++						),
++						("96".into(), ElementValue::Array(vec![])),
++					]))
++				})
++				.collect();
++			let entity = ParsedEntity::from([
++				("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++				("111".into(), ElementValue::Array(children)),
++			]);
++			let encrypted = facade
++				.encrypt_and_map_with_aead(&model, &entity, &input)
++				.unwrap();
++			let group_keys = HashMap::from([(7, key.clone())]);
++			let decryptor = InstanceDecryptor::with_group_keys(
++				Some(&key),
++				&group_keys,
++				Some(&[0x22; 32]),
++				"tutanota/97".into(),
++				RandomizerFacade::from_core(DeterministicRng(0x44)),
++			);
++			for (child, id) in encrypted["111"]
++				.assert_array_ref()
++				.iter()
++				.zip(["first", "second"])
++			{
++				let cipher = child.assert_dict_ref()["94"].assert_bytes();
++				assert_eq!(
++					decryptor
++						.decrypt(cipher, Some(&format!("111/{id}/94")))
++						.unwrap(),
++					id.as_bytes()
++				);
++				assert!(decryptor
++					.decrypt(cipher, Some("111/first/second/94"))
++					.is_err());
++			}
++		}
++	}
++}
+diff --git a/tuta-sdk/rust/sdk/tests/fixtures/aead_mapper_ts.json b/tuta-sdk/rust/sdk/tests/fixtures/aead_mapper_ts.json
+new file mode 100644
+index 0000000000..14b5e0b45a
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/tests/fixtures/aead_mapper_ts.json
+@@ -0,0 +1,66 @@
++[
++  {
++    "version": 2,
++    "path": "105",
++    "plaintext": "Sujet écrit — 🦀",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "AgAHRERERERERERERERERERERExBlOEDNU1n3i+XmZI2U+65n/SbRjmKMEyfJCCmQp83A3ALFXO7WrBfdpM1h9tNocrtLX2VOxIT"
++  },
++  {
++    "version": 2,
++    "path": "111/sender-id/94",
++    "plaintext": "Alice",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "AgAHRERERERERERERERERERERF5Yl+cSlY7OvIzXCGW6eLSzgHR8fohb7W1ZE64T3qkkjsmG9Gzax/E="
++  },
++  {
++    "version": 2,
++    "path": "105",
++    "plaintext": "",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "AgAHRERERERERERERERERERERJ80/oRPN8Im38D7rZ5aNV31BwxlvywOYFMyGdxL6A5m+KFmuw=="
++  },
++  {
++    "version": 2,
++    "path": "111/sender-id/94",
++    "plaintext": "Alice",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "AgAHRERERERERERERERERERERF5Yl+cSlY7OvIzXCGW6eLSzgHR8fohb7W1ZE64T3qkkjsmG9Gzax/E="
++  },
++  {
++    "version": 3,
++    "path": "105",
++    "plaintext": "Sujet écrit — 🦀",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "A0REREREREREREREREREREQoE6G8RIOZSQ5cUHphQId1oHnVJyAVX70zC4xBYVG7tnYS0KAEoCiN+loNqmtDo6XkzahpV9Glqg=="
++  },
++  {
++    "version": 3,
++    "path": "111/sender-id/94",
++    "plaintext": "Alice",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "A0REREREREREREREREREREQ6CqK6VSNa4D9RGJZToH6vIkXLafyuCBm3kbkrBxgj4Jv1PBH+DpGc"
++  },
++  {
++    "version": 3,
++    "path": "105",
++    "plaintext": "",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "A0RERERERERERERERERERET7ZsvZJDRIJKsh4ZFDjbkA7uedrCdFPAyVdc3ixbRsrFDq6Kg="
++  },
++  {
++    "version": 3,
++    "path": "111/sender-id/94",
++    "plaintext": "Alice",
++    "key": "ERERERERERERERERERERERERERERERERERERERERERE=",
++    "kdf_nonce": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
++    "ciphertext": "A0REREREREREREREREREREQ6CqK6VSNa4D9RGJZToH6vIkXLafyuCBm3kbkrBxgj4Jv1PBH+DpGc"
++  }
++]
+\ No newline at end of file

@@ -1,0 +1,4 @@
+tutao/tutanota tag: tutanota-release-360.260921.0
+commit: 46270557c251d1a31157d72e0aaf0cc63bb33ecf
+Apply in order with: git am sdk-patches/*.patch
+Lab prototype, not production: 08 and 09 (AEAD writes) are unvalidated on a real account.

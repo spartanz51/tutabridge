@@ -1,0 +1,781 @@
+From 6fa61cb1552e864b5d8f5bc50c4bde65885329b9 Mon Sep 17 00:00:00 2001
+From: lab <lab@invalid>
+Date: Wed, 23 Sep 2026 15:38:44 +0200
+Subject: [PATCH 07/11] 07-aead-group-reads.patch
+
+---
+ tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  12 ++
+ .../rust/sdk/src/crypto_entity_client/aead.rs | 173 +++++++++++++++
+ .../rust/sdk/src/entities/entity_facade.rs    |  61 +++++-
+ .../src/entities/entity_facade/decryption.rs  | 180 +++++++++++++++-
+ .../entities/entity_facade/decryption_keys.rs | 197 ++++++++++++++++++
+ 5 files changed, 606 insertions(+), 17 deletions(-)
+ create mode 100644 tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
+ create mode 100644 tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
+
+diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
+index 2eb766ebb1..88e0d8d996 100644
+--- a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
++++ b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
+@@ -1,3 +1,5 @@
++mod aead;
++
+ use std::sync::Arc;
+ 
+ use crate::bindings::rest_client::RestClientError;
+@@ -191,6 +193,11 @@ impl CryptoEntityClient {
+ 			.map_err(|e| ApiCallError::internal_with_err(e, type_ref.to_string().as_str()))?;
+ 		let type_model = self.entity_client.resolve_client_type_ref(&type_ref)?;
+ 
++		if crate::entities::entity_facade::has_kdf_nonce(type_model, &parsed_entity) {
++			return Err(ApiCallError::internal(
++				"AEAD instance writes are not supported".into(),
++			));
++		}
+ 		let parsed_instance = if type_model.is_encrypted() {
+ 			let session_key = self
+ 				.crypto_facade
+@@ -254,6 +261,11 @@ impl CryptoEntityClient {
+ 		type_model: &TypeModel,
+ 		parsed_entity: ParsedEntity,
+ 	) -> Result<ParsedEntity, ApiCallError> {
++		if crate::entities::entity_facade::has_kdf_nonce(type_model, &parsed_entity) {
++			return self
++				.process_entity_with_group_keys(type_model, parsed_entity, None)
++				.await;
++		}
+ 		let possible_session_key = self
+ 			.crypto_facade
+ 			.resolve_session_key(&parsed_entity, type_model)
+diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
+new file mode 100644
+index 0000000000..5fff9fd9ec
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
+@@ -0,0 +1,173 @@
++use super::CryptoEntityClient;
++use crate::element_value::{ElementValue, ParsedEntity};
++use crate::entities::entity_facade::{
++	EntityDecryptionKeys, EntityDecryptionRequirements, BUCKET_KEY_FIELD, OWNER_GROUP_FIELD,
++};
++use crate::metamodel::TypeModel;
++use crate::ApiCallError;
++
++impl CryptoEntityClient {
++	/// Decrypt an already parsed response, optionally using an inherited session key.
++	/// Group-key attributes use their own instance owner and ciphertext key version.
++	pub async fn decrypt_parsed(
++		&self,
++		type_ref: &crate::TypeRef,
++		entity: ParsedEntity,
++		inherited_session_key: Option<crate::crypto::crypto_facade::ResolvedSessionKey>,
++	) -> Result<ParsedEntity, ApiCallError> {
++		let model = self.entity_client.resolve_server_type_ref(type_ref)?;
++		self.process_entity_with_group_keys(&model, entity, inherited_session_key)
++			.await
++	}
++
++	/// Group-key attributes do not require an owner-encrypted session key.
++	pub(super) async fn process_entity_with_group_keys(
++		&self,
++		model: &TypeModel,
++		entity: ParsedEntity,
++		inherited_session_key: Option<crate::crypto::crypto_facade::ResolvedSessionKey>,
++	) -> Result<ParsedEntity, ApiCallError> {
++		let requirements =
++			EntityDecryptionRequirements::with_resolver(model, &entity, &|reference| {
++				self.entity_client.resolve_server_type_ref(reference)
++			})?;
++		// Bucket-key resolution also establishes sender identity and caches keys for
++		// attachments. Preserve that work even if every attribute is group-encrypted.
++		let has_bucket_key = model
++			.get_attribute_id_by_attribute_name(BUCKET_KEY_FIELD)
++			.ok()
++			.and_then(|id| entity.get(&id))
++			.is_some_and(
++				|value| matches!(value, ElementValue::Array(values) if !values.is_empty()),
++			);
++		let mut keys = EntityDecryptionKeys::default();
++		if requirements.session_key || has_bucket_key {
++			keys.session_key = match inherited_session_key {
++				Some(key) if !has_bucket_key => Some(key),
++				_ => self
++					.crypto_facade
++					.resolve_session_key(&entity, model)
++					.await
++					.map_err(|_| {
++						ApiCallError::internal(
++							"Failed to resolve required attribute session key".into(),
++						)
++					})?,
++			};
++			if keys.session_key.is_none() {
++				return Err(ApiCallError::internal(
++					"Missing required attribute session key".into(),
++				));
++			}
++		}
++		if !requirements.group_key_versions.is_empty() {
++			let owner_id = model.get_attribute_id_by_attribute_name(OWNER_GROUP_FIELD)?;
++			let Some(ElementValue::IdGeneratedId(owner)) = entity.get(&owner_id) else {
++				return Err(ApiCallError::internal("Missing AEAD owner group".into()));
++			};
++			for version in requirements.group_key_versions {
++				let key = self
++					.key_loader_facade
++					.load_sym_group_key(owner, version, None)
++					.await
++					.map_err(|_| {
++						ApiCallError::internal(format!(
++							"Failed to load AEAD group key version {version}"
++						))
++					})?;
++				keys.group_keys.insert(version, key);
++			}
++		}
++		let sender_identity = keys
++			.session_key
++			.as_ref()
++			.and_then(|key| key.sender_identity_pub_key.clone());
++		let mut decrypted = self
++			.entity_facade
++			.decrypt_and_map_with_keys(model, entity, keys)?;
++		if let Some(status) = self
++			.get_encryption_auth_status_or_none(model, &mut decrypted, sender_identity)
++			.await?
++		{
++			let id = model.get_attribute_id_by_attribute_name("encryptionAuthStatus")?;
++			decrypted.insert(id, ElementValue::Number(status));
++		}
++		Ok(decrypted)
++	}
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++	use crate::bindings::{file_client::MockFileClient, rest_client::MockRestClient};
++	use crate::crypto::{
++		asymmetric_crypto_facade::MockAsymmetricCryptoFacade, crypto_facade::MockCryptoFacade,
++	};
++	use crate::entities::{entity_facade::MockEntityFacade, generated::tutanota::Mail, Entity};
++	use crate::entity_client::MockEntityClient;
++	use crate::instance_mapper::InstanceMapper;
++	use crate::key_loader_facade::MockKeyLoaderFacade;
++	use crate::type_model_provider::TypeModelProvider;
++	use crate::GeneratedId;
++	use crypto_primitives::key::GenericAesKey;
++	use std::sync::Arc;
++
++	#[tokio::test]
++	async fn loads_ciphertext_group_versions_without_requesting_a_session_key() {
++		let provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost".into(),
++		));
++		let mut model = (*provider.resolve_server_type_ref(&Mail::type_ref()).unwrap()).clone();
++		model.id = 99999.into(); // No mail sender-authentication step in this key-loading test.
++		model.associations.clear();
++		let mut subject = model.values[&105.into()].clone();
++		subject.id = 106.into();
++		model.values.insert(106.into(), subject);
++		let entity = ParsedEntity::from([
++			("105".into(), ElementValue::Bytes(vec![2, 0, 7])),
++			("106".into(), ElementValue::Bytes(vec![2, 0, 8])),
++			(
++				"587".into(),
++				ElementValue::IdGeneratedId(GeneratedId("owner".into())),
++			),
++			("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++		]);
++		let mut loader = MockKeyLoaderFacade::default();
++		for version in [7, 8] {
++			loader
++				.expect_load_sym_group_key()
++				.withf(move |owner, requested, current| {
++					owner.as_str() == "owner" && *requested == version && current.is_none()
++				})
++				.times(1)
++				.returning(move |_, _, _| {
++					Ok(GenericAesKey::from_bytes(&[version as u8; 32]).unwrap())
++				});
++		}
++		let mut facade = MockEntityFacade::default();
++		facade
++			.expect_decrypt_and_map_with_keys()
++			.times(1)
++			.withf(|_, _, keys| {
++				keys.session_key.is_none()
++					&& keys.group_keys.len() == 2
++					&& keys.group_keys.contains_key(&7)
++					&& keys.group_keys.contains_key(&8)
++			})
++			.returning(|_, entity, _| Ok(entity));
++		let client = CryptoEntityClient::new(
++			Arc::new(MockEntityClient::default()),
++			Arc::new(facade),
++			Arc::new(MockCryptoFacade::default()),
++			Arc::new(InstanceMapper::new(provider)),
++			Arc::new(MockAsymmetricCryptoFacade::default()),
++			Arc::new(loader),
++		);
++		client
++			.process_entity_with_group_keys(&model, entity, None)
++			.await
++			.unwrap();
++	}
++}
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+index 3802cbe2f5..6317589c74 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
+@@ -1,5 +1,7 @@
+ mod decryption;
++mod decryption_keys;
+ use decryption::InstanceDecryptor;
++pub use decryption_keys::{has_kdf_nonce, EntityDecryptionKeys, EntityDecryptionRequirements};
+ 
+ use crate::crypto::crypto_facade::ResolvedSessionKey;
+ use crate::date::DateTime;
+@@ -65,6 +67,23 @@ pub trait EntityFacade: Send + Sync {
+ 		resolved_session_key: ResolvedSessionKey,
+ 	) -> Result<ParsedEntity, ApiCallError>;
+ 
++	fn decrypt_and_map_with_keys(
++		&self,
++		type_model: &TypeModel,
++		entity: ParsedEntity,
++		keys: EntityDecryptionKeys,
++	) -> Result<ParsedEntity, ApiCallError> {
++		if !keys.group_keys.is_empty() {
++			return Err(ApiCallError::internal(
++				"This entity decoder does not support group-key attributes".into(),
++			));
++		}
++		let session = keys.session_key.ok_or_else(|| {
++			ApiCallError::internal("This entity decoder requires a session key".into())
++		})?;
++		self.decrypt_and_map(type_model, entity, session)
++	}
++
+ 	fn encrypt_and_map(
+ 		&self,
+ 		type_model: &TypeModel,
+@@ -556,13 +575,36 @@ impl EntityFacade for EntityFacadeImpl {
+ 		entity: ParsedEntity,
+ 		resolved_session_key: ResolvedSessionKey,
+ 	) -> Result<ParsedEntity, ApiCallError> {
+-		let decryptor = InstanceDecryptor::new(
+-			&resolved_session_key.session_key,
++		self.decrypt_and_map_with_keys(
++			type_model,
++			entity,
++			EntityDecryptionKeys {
++				session_key: Some(resolved_session_key),
++				group_keys: Default::default(),
++			},
++		)
++	}
++
++	fn decrypt_and_map_with_keys(
++		&self,
++		type_model: &TypeModel,
++		entity: ParsedEntity,
++		keys: EntityDecryptionKeys,
++	) -> Result<ParsedEntity, ApiCallError> {
++		let nonce = decryption_keys::kdf_nonce(type_model, &entity)?.map(<[u8]>::to_vec);
++		let decryptor = InstanceDecryptor::with_group_keys(
++			keys.session_key.as_ref().map(|key| &key.session_key),
++			&keys.group_keys,
++			nonce.as_deref(),
+ 			format!("{}/{}", type_model.app, String::from(type_model.id)),
+ 			self.randomizer_facade.clone(),
+ 		);
++		// The nonce is metadata. Own it so the parsed instance can be moved into traversal.
+ 		let mut mapped_decrypted =
+ 			self.decrypt_and_map_inner(type_model, entity, &decryptor, Some(""))?;
++		let Some(resolved_session_key) = keys.session_key.as_ref() else {
++			return Ok(mapped_decrypted);
++		};
+ 
+ 		let owner_enc_session_key_attribute_id: String = type_model
+             .get_attribute_id_by_attribute_name(OWNER_ENC_SESSION_KEY_FIELD)
+@@ -602,6 +644,11 @@ impl EntityFacade for EntityFacadeImpl {
+ 		instance: &ParsedEntity,
+ 		sk: &GenericAesKey,
+ 	) -> Result<ParsedEntity, ApiCallError> {
++		if has_kdf_nonce(type_model, instance) {
++			return Err(ApiCallError::internal(
++				"AEAD instance writes are not supported".into(),
++			));
++		}
+ 		self.encrypt_and_map_inner(type_model, instance, sk)
+ 	}
+ }
+@@ -1616,10 +1663,7 @@ mod tests {
+ 		let aead = AeadFacade::new(RandomizerFacade::from_core(rand_core::OsRng));
+ 		let sender = entity.get_mut("111").unwrap().assert_array_mut_ref()[0].assert_dict_mut_ref();
+ 		// IDs are protocol IDs, checked against the official Mail/MailAddress models.
+-		sender.insert(
+-			"93".into(),
+-			ElementValue::String("sender-id".into()),
+-		);
++		sender.insert("93".into(), ElementValue::String("sender-id".into()));
+ 		sender.insert(
+ 			"94".into(),
+ 			ElementValue::Bytes(
+@@ -1647,10 +1691,7 @@ mod tests {
+ 			ElementValue::String("Alice".into())
+ 		);
+ 		let sender = entity.get_mut("111").unwrap().assert_array_mut_ref()[0].assert_dict_mut_ref();
+-		sender.insert(
+-			"93".into(),
+-			ElementValue::String("moved".into()),
+-		);
++		sender.insert("93".into(), ElementValue::String("moved".into()));
+ 		assert!(decoder
+ 			.decrypt_and_map(&model, entity.clone(), keys.clone())
+ 			.is_err());
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
+index 62d50b6f3a..76224bc64e 100644
+--- a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
+@@ -3,7 +3,9 @@ use crate::ApiCallError;
+ use crypto_primitives::aead_facade::{AeadFacade, AeadSubKeys};
+ use crypto_primitives::key::GenericAesKey;
+ use crypto_primitives::randomizer_facade::RandomizerFacade;
+-use std::cell::OnceCell;
++use crypto_primitives::versioned::Versioned;
++use std::cell::{OnceCell, RefCell};
++use std::collections::HashMap;
+ 
+ #[derive(Debug, PartialEq, Eq)]
+ pub(crate) enum CipherVersion {
+@@ -35,26 +37,57 @@ pub(crate) fn cipher_version(bytes: &[u8]) -> Result<CipherVersion, ApiCallError
+ }
+ 
+ pub(super) struct InstanceDecryptor<'a> {
+-	session_key: &'a GenericAesKey,
++	session_key: Option<&'a GenericAesKey>,
++	group_keys: Option<&'a HashMap<u64, GenericAesKey>>,
++	kdf_nonce: Option<&'a [u8]>,
++	group_subkeys: RefCell<HashMap<u64, AeadSubKeys>>,
+ 	instance_type: String,
+ 	aead: AeadFacade,
+ 	session_subkeys: OnceCell<AeadSubKeys>,
+ }
+ 
+ impl<'a> InstanceDecryptor<'a> {
++	#[cfg(test)]
+ 	pub(super) fn new(
+ 		session_key: &'a GenericAesKey,
+ 		instance_type: String,
+ 		randomizer: RandomizerFacade,
++	) -> Self {
++		Self {
++			session_key: Some(session_key),
++			group_keys: None,
++			kdf_nonce: None,
++			group_subkeys: RefCell::new(HashMap::new()),
++			instance_type,
++			aead: AeadFacade::new(randomizer),
++			session_subkeys: OnceCell::new(),
++		}
++	}
++
++	pub(super) fn with_group_keys(
++		session_key: Option<&'a GenericAesKey>,
++		group_keys: &'a HashMap<u64, GenericAesKey>,
++		kdf_nonce: Option<&'a [u8]>,
++		instance_type: String,
++		randomizer: RandomizerFacade,
+ 	) -> Self {
+ 		Self {
+ 			session_key,
++			group_keys: Some(group_keys),
++			kdf_nonce,
+ 			instance_type,
+ 			aead: AeadFacade::new(randomizer),
+ 			session_subkeys: OnceCell::new(),
++			group_subkeys: RefCell::new(HashMap::new()),
+ 		}
+ 	}
+ 
++	fn session_key(&self) -> Result<&GenericAesKey, ApiCallError> {
++		self.session_key.ok_or_else(|| {
++			ApiCallError::internal("Missing session key for encrypted attribute".into())
++		})
++	}
++
+ 	pub(super) fn decrypt(
+ 		&self,
+ 		ciphertext: &[u8],
+@@ -62,11 +95,11 @@ impl<'a> InstanceDecryptor<'a> {
+ 	) -> Result<Vec<u8>, ApiCallError> {
+ 		match cipher_version(ciphertext)? {
+ 			CipherVersion::Legacy => self
+-				.session_key
++				.session_key()?
+ 				.decrypt_data(ciphertext)
+ 				.map_err(|e| ApiCallError::internal(e.to_string())),
+ 			CipherVersion::SessionKey => {
+-				let GenericAesKey::Aes256(key) = self.session_key else {
++				let GenericAesKey::Aes256(key) = self.session_key()? else {
+ 					return Err(ApiCallError::internal(
+ 						"AEAD session keys must be 256 bits".into(),
+ 					));
+@@ -85,9 +118,41 @@ impl<'a> InstanceDecryptor<'a> {
+ 					)
+ 					.map_err(|e| ApiCallError::internal(format!("AEAD session attribute: {e}")))
+ 			},
+-			CipherVersion::GroupKey(_) => Err(ApiCallError::internal(
+-				"AEAD group key context is required".into(),
+-			)),
++			CipherVersion::GroupKey(version) => {
++				let key = self
++					.group_keys
++					.and_then(|keys| keys.get(&version))
++					.ok_or_else(|| {
++						ApiCallError::internal(format!("Missing AEAD group key version {version}"))
++					})?;
++				let nonce = self
++					.kdf_nonce
++					.filter(|nonce| nonce.len() == 32)
++					.ok_or_else(|| {
++						ApiCallError::internal("Missing or invalid AEAD KDF nonce".into())
++					})?;
++				let path = field_path.ok_or_else(|| {
++					ApiCallError::internal("Missing aggregate ID for AEAD field path".into())
++				})?;
++				let mut cache = self.group_subkeys.borrow_mut();
++				let keys = cache.entry(version).or_insert_with(|| {
++					AeadSubKeys::derive_from_group_key(
++						&Versioned {
++							object: key.clone(),
++							version,
++						},
++						nonce,
++						&self.instance_type,
++					)
++				});
++				self.aead
++					.decrypt(
++						keys,
++						ciphertext,
++						format!("attributeEncGK\u{001f}{path}").as_bytes(),
++					)
++					.map_err(|e| ApiCallError::internal(format!("AEAD group attribute: {e}")))
++			},
+ 		}
+ 	}
+ }
+@@ -183,4 +248,105 @@ mod tests {
+ 			assert!(decryptor.decrypt(&vec![3; len], Some("105")).is_err());
+ 		}
+ 	}
++	#[test]
++	fn group_vectors_require_the_correct_nonce_version_and_key() {
++		let vectors: Vec<Value> = serde_json::from_str(include_str!(
++			"../../../tests/fixtures/aead_attributes_ts.json"
++		))
++		.unwrap();
++		for vector in vectors.iter().filter(|v| v["version"] == 2) {
++			let key = GenericAesKey::from_bytes(
++				&BASE64_STANDARD
++					.decode(vector["key"].as_str().unwrap())
++					.unwrap(),
++			)
++			.unwrap();
++			let ciphertext = BASE64_STANDARD
++				.decode(vector["ciphertext"].as_str().unwrap())
++				.unwrap();
++			let nonce = BASE64_STANDARD
++				.decode(vector["kdf_nonce"].as_str().unwrap())
++				.unwrap();
++			let keys = HashMap::from([(7, key.clone())]);
++			let make = |nonce| {
++				InstanceDecryptor::with_group_keys(
++					None,
++					&keys,
++					nonce,
++					"tutanota/97".into(),
++					RandomizerFacade::from_core(rand_core::OsRng),
++				)
++			};
++			let decryptor = make(Some(nonce.as_slice()));
++			assert_eq!(
++				decryptor
++					.decrypt(&ciphertext, vector["path"].as_str())
++					.unwrap(),
++				vector["plaintext"].as_str().unwrap().as_bytes()
++			);
++			assert!(make(None)
++				.decrypt(&ciphertext, vector["path"].as_str())
++				.is_err());
++			let wrong_nonce = [0x33; 32];
++			assert!(make(Some(&wrong_nonce))
++				.decrypt(&ciphertext, vector["path"].as_str())
++				.is_err());
++			let wrong_keys = HashMap::from([(8, key)]);
++			let decryptor = InstanceDecryptor::with_group_keys(
++				None,
++				&wrong_keys,
++				Some(&nonce),
++				"tutanota/97".into(),
++				RandomizerFacade::from_core(rand_core::OsRng),
++			);
++			assert!(decryptor
++				.decrypt(&ciphertext, vector["path"].as_str())
++				.is_err());
++		}
++	}
++
++	#[test]
++	fn mixed_versions_share_context_without_reusing_the_wrong_subkeys() {
++		let session = GenericAesKey::from_bytes(&[0x11; 32]).unwrap();
++		let keys = HashMap::from([
++			(7, GenericAesKey::from_bytes(&[0x44; 32]).unwrap()),
++			(8, GenericAesKey::from_bytes(&[0x55; 32]).unwrap()),
++		]);
++		let nonce = [0x22; 32];
++		let decryptor = InstanceDecryptor::with_group_keys(
++			Some(&session),
++			&keys,
++			Some(&nonce),
++			"tutanota/97".into(),
++			RandomizerFacade::from_core(rand_core::OsRng),
++		);
++		let facade = AeadFacade::new(RandomizerFacade::from_core(rand_core::OsRng));
++		for version in [7, 8, 7] {
++			let subkeys = AeadSubKeys::derive_from_group_key(
++				&Versioned {
++					object: keys[&version].clone(),
++					version,
++				},
++				&nonce,
++				"tutanota/97",
++			);
++			let ct = facade
++				.encrypt(&subkeys, b"group".to_vec(), b"attributeEncGK\x1f105")
++				.unwrap();
++			assert_eq!(decryptor.decrypt(&ct, Some("105")).unwrap(), b"group");
++		}
++		assert_eq!(decryptor.group_subkeys.borrow().len(), 2);
++		let vectors: Vec<Value> = serde_json::from_str(include_str!(
++			"../../../tests/fixtures/aead_attributes_ts.json"
++		))
++		.unwrap();
++		let v = vectors.iter().find(|v| v["version"] == 3).unwrap();
++		let ct = BASE64_STANDARD
++			.decode(v["ciphertext"].as_str().unwrap())
++			.unwrap();
++		assert_eq!(
++			decryptor.decrypt(&ct, v["path"].as_str()).unwrap(),
++			v["plaintext"].as_str().unwrap().as_bytes()
++		);
++	}
+ }
+diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
+new file mode 100644
+index 0000000000..7684035884
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
+@@ -0,0 +1,197 @@
++use super::{
++	decryption::{cipher_version, CipherVersion},
++	ID_FIELD, KDF_NONCE_FIELD,
++};
++use crate::crypto::crypto_facade::ResolvedSessionKey;
++use crate::element_value::{ElementValue, ParsedEntity};
++use crate::metamodel::{AssociationType, TypeModel};
++use crate::type_model_provider::TypeModelProvider;
++use crate::{ApiCallError, TypeRef};
++use crypto_primitives::key::GenericAesKey;
++use std::collections::{BTreeSet, HashMap};
++
++/// Keys loaded for this instance only; group keys are indexed by the ciphertext's version.
++#[derive(Default)]
++pub struct EntityDecryptionKeys {
++	pub session_key: Option<ResolvedSessionKey>,
++	pub group_keys: HashMap<u64, GenericAesKey>,
++}
++
++#[derive(Default)]
++pub struct EntityDecryptionRequirements {
++	pub session_key: bool,
++	pub group_key_versions: BTreeSet<u64>,
++}
++
++impl EntityDecryptionRequirements {
++	/// Inspect encrypted attributes and aggregates, never arbitrary byte-valued metadata.
++	pub fn for_entity(
++		model: &TypeModel,
++		entity: &ParsedEntity,
++		provider: &TypeModelProvider,
++	) -> Result<Self, ApiCallError> {
++		Self::with_resolver(model, entity, &|reference| {
++			provider
++				.resolve_server_type_ref(reference)
++				.ok_or_else(|| ApiCallError::internal("Missing aggregate type model".into()))
++		})
++	}
++
++	pub(crate) fn with_resolver<F>(
++		model: &TypeModel,
++		entity: &ParsedEntity,
++		resolve: &F,
++	) -> Result<Self, ApiCallError>
++	where
++		F: Fn(&TypeRef) -> Result<std::sync::Arc<TypeModel>, ApiCallError>,
++	{
++		kdf_nonce(model, entity)?;
++		let mut result = Self::default();
++		result.visit(model, entity, resolve)?;
++		Ok(result)
++	}
++
++	fn visit<F>(
++		&mut self,
++		model: &TypeModel,
++		entity: &ParsedEntity,
++		resolve: &F,
++	) -> Result<(), ApiCallError>
++	where
++		F: Fn(&TypeRef) -> Result<std::sync::Arc<TypeModel>, ApiCallError>,
++	{
++		for (id, value) in &model.values {
++			if !value.encrypted || value.name == ID_FIELD {
++				continue;
++			}
++			if let Some(ElementValue::Bytes(bytes)) = entity.get(&String::from(*id)) {
++				match cipher_version(bytes)? {
++					CipherVersion::Legacy | CipherVersion::SessionKey => self.session_key = true,
++					CipherVersion::GroupKey(version) => {
++						self.group_key_versions.insert(version);
++					},
++				}
++			}
++		}
++		for (id, association) in &model.associations {
++			if association.association_type != AssociationType::Aggregation {
++				continue;
++			}
++			let child_model = resolve(&TypeRef::new(
++				association.dependency.unwrap_or(model.app),
++				association.ref_type_id,
++			))?;
++			match entity.get(&String::from(*id)) {
++				Some(ElementValue::Array(aggregates)) => {
++					for aggregate in aggregates {
++						let ElementValue::Dict(child) = aggregate else {
++							return Err(ApiCallError::internal("Invalid aggregate value".into()));
++						};
++						self.visit(&child_model, child, resolve)?;
++					}
++				},
++				None | Some(ElementValue::Null) => {},
++				_ => {
++					return Err(ApiCallError::internal(
++						"Invalid aggregate collection".into(),
++					))
++				},
++			}
++		}
++		Ok(())
++	}
++}
++
++#[must_use]
++pub fn has_kdf_nonce(model: &TypeModel, entity: &ParsedEntity) -> bool {
++	model
++		.get_attribute_id_by_attribute_name(KDF_NONCE_FIELD)
++		.ok()
++		.and_then(|id| entity.get(&id))
++		.is_some_and(|value| !matches!(value, ElementValue::Null))
++}
++
++pub(super) fn kdf_nonce<'a>(
++	model: &TypeModel,
++	entity: &'a ParsedEntity,
++) -> Result<Option<&'a [u8]>, ApiCallError> {
++	let value = model
++		.get_attribute_id_by_attribute_name(KDF_NONCE_FIELD)
++		.ok()
++		.and_then(|id| entity.get(&id));
++	match value {
++		None | Some(ElementValue::Null) => Ok(None),
++		Some(ElementValue::Bytes(bytes)) if bytes.len() == 32 => Ok(Some(bytes)),
++		_ => Err(ApiCallError::internal(
++			"Invalid AEAD KDF nonce length or type".into(),
++		)),
++	}
++}
++
++#[cfg(test)]
++mod tests {
++	use super::*;
++	use crate::bindings::{file_client::MockFileClient, rest_client::MockRestClient};
++	use crate::entities::entity_facade::{EntityFacade, EntityFacadeImpl};
++	use crate::entities::{generated::tutanota::Mail, Entity};
++	use crypto_primitives::randomizer_facade::RandomizerFacade;
++	use std::sync::Arc;
++
++	#[test]
++	fn requirements_ignore_unencrypted_key_metadata_and_deduplicate_versions() {
++		let provider = TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost".into(),
++		);
++		let mut model = (*provider.resolve_server_type_ref(&Mail::type_ref()).unwrap()).clone();
++		model.associations.clear();
++		let mut subject = model.values[&105.into()].clone();
++		subject.id = 106.into();
++		model.values.insert(106.into(), subject);
++		let mut entity = ParsedEntity::from([
++			("105".into(), ElementValue::Bytes(vec![2, 0, 7])),
++			("106".into(), ElementValue::Bytes(vec![2, 0, 7])),
++			("102".into(), ElementValue::Bytes(vec![2, 0, 99])),
++			("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++		]);
++		let requirements =
++			EntityDecryptionRequirements::for_entity(&model, &entity, &provider).unwrap();
++		assert!(!requirements.session_key);
++		assert_eq!(requirements.group_key_versions, BTreeSet::from([7]));
++		entity.insert("106".into(), ElementValue::Bytes(vec![3; 53]));
++		assert!(
++			EntityDecryptionRequirements::for_entity(&model, &entity, &provider)
++				.unwrap()
++				.session_key
++		);
++	}
++
++	#[test]
++	fn invalid_nonce_is_rejected_and_group_key_entities_are_not_written_as_cbc() {
++		let provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost".into(),
++		));
++		let model = provider.resolve_server_type_ref(&Mail::type_ref()).unwrap();
++		let mut entity = ParsedEntity::new();
++		for value in [
++			ElementValue::Bytes(vec![]),
++			ElementValue::Bytes(vec![0; 31]),
++			ElementValue::String("invalid".into()),
++		] {
++			entity.insert("1839".into(), value);
++			assert!(kdf_nonce(&model, &entity).is_err());
++		}
++		entity.insert("1839".into(), ElementValue::Bytes(vec![0x22; 32]));
++		let decoder =
++			EntityFacadeImpl::new(provider, RandomizerFacade::from_core(rand_core::OsRng));
++		let key = GenericAesKey::from_bytes(&[0x11; 32]).unwrap();
++		assert!(decoder
++			.encrypt_and_map(&model, &entity, &key)
++			.unwrap_err()
++			.to_string()
++			.contains("writes are not supported"));
++	}
++}

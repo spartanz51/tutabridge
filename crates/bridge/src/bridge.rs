@@ -62,13 +62,13 @@ pub enum WsStatus {
     Reconnecting,
 }
 
-impl From<tutasdk::event_bus::WsState> for WsStatus {
-    fn from(s: tutasdk::event_bus::WsState) -> Self {
+impl From<tutabridge_tuta::event_bus::WsState> for WsStatus {
+    fn from(s: tutabridge_tuta::event_bus::WsState) -> Self {
         match s {
-            tutasdk::event_bus::WsState::Stopped => Self::Stopped,
-            tutasdk::event_bus::WsState::Connecting => Self::Connecting,
-            tutasdk::event_bus::WsState::Connected => Self::Connected,
-            tutasdk::event_bus::WsState::Reconnecting => Self::Reconnecting,
+            tutabridge_tuta::event_bus::WsState::Stopped => Self::Stopped,
+            tutabridge_tuta::event_bus::WsState::Connecting => Self::Connecting,
+            tutabridge_tuta::event_bus::WsState::Connected => Self::Connected,
+            tutabridge_tuta::event_bus::WsState::Reconnecting => Self::Reconnecting,
         }
     }
 }
@@ -96,7 +96,7 @@ pub struct BridgeHandle {
     local_store: Option<Arc<LocalStore>>,
     task: Option<tokio::task::JoinHandle<()>>,
     /// Latest event-bus state, populated at `start` and observed by `stats`.
-    ws_state_rx: Option<watch::Receiver<tutasdk::event_bus::WsState>>,
+    ws_state_rx: Option<watch::Receiver<tutabridge_tuta::event_bus::WsState>>,
 }
 
 impl BridgeHandle {
@@ -256,7 +256,7 @@ impl BridgeHandle {
 
         // Build the realtime event bus and hydrate its catch-up state from
         // disk so the next reconnect resumes from the last processed batch.
-        let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
+        let bus_client = Arc::new(tutabridge_tuta::event_bus::EventBusClient::new(
             bus_base_url,
             sys_model_version(),
             tutanota_model_version(),
@@ -272,7 +272,7 @@ impl BridgeHandle {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
-            let expire_ms = tutasdk::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
+            let expire_ms = tutabridge_tuta::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
             if let Ok(Some(min_ms)) = local_store.event_bus_state_min_updated_at_ms() {
                 if now_ms - min_ms > expire_ms {
                     self.emit_log(
@@ -363,7 +363,7 @@ impl BridgeHandle {
                 tokio::spawn(async move {
                     if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
                         match e {
-                            tutasdk::event_bus::EventBusError::Stopped => {}
+                            tutabridge_tuta::event_bus::EventBusError::Stopped => {}
                             _ => log::warn!("Event bus exited: {e}"),
                         }
                     }

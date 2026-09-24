@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bridge", "src-tauri"]
+members = ["crates/bridge", "crates/tuta", "src-tauri"]
 exclude = ["tuta-repo"]
 resolver = "2"
 
@@ -11,6 +11,7 @@ rust-version = "1.84.0"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+tutabridge-tuta = { path = "crates/tuta" }
 tutabridge-core = { path = "crates/bridge" }
 tuta-sdk = { path = "tuta-repo/tuta-sdk/rust/sdk", features = ["net"] }
 tokio = { version = "1.43", features = ["full"] }

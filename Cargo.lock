@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-primitives"
-version = "359.260904.0"
+version = "360.260921.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -5870,7 +5870,7 @@ dependencies = [
 
 [[package]]
 name = "tuta-sdk"
-version = "359.260904.0"
+version = "360.260921.0"
 dependencies = [
  "android_log",
  "argon2",
@@ -5907,7 +5907,6 @@ dependencies = [
  "time",
  "time-tz",
  "tokio",
- "tokio-tungstenite",
  "uniffi",
  "util",
  "x25519-dalek",
@@ -5926,6 +5925,7 @@ dependencies = [
  "tokio-rustls",
  "tuta-sdk",
  "tutabridge-core",
+ "tutabridge-tuta",
 ]
 
 [[package]]
@@ -5954,6 +5954,7 @@ dependencies = [
  "tokio-rustls",
  "toml 0.8.2",
  "tuta-sdk",
+ "tutabridge-tuta",
 ]
 
 [[package]]
@@ -5971,6 +5972,27 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tutabridge-core",
+]
+
+[[package]]
+name = "tutabridge-tuta"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "crypto-primitives",
+ "form_urlencoded",
+ "futures",
+ "log 0.4.29",
+ "num_enum",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tuta-sdk",
 ]
 
 [[package]]
@@ -6237,7 +6259,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "util"
-version = "359.260904.0"
+version = "360.260921.0"
 dependencies = [
  "thiserror 2.0.18",
 ]

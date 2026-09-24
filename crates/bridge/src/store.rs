@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crypto_primitives::aes::Iv;
+use crypto_primitives::aes::InitializationVector;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use log::{debug, warn};
@@ -383,7 +383,7 @@ impl LocalStore {
 
     pub fn write_eml(&self, element_id: &str, rfc2822: &str) -> Result<(), StoreError> {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
-        let iv = Iv::generate(&randomizer);
+        let iv = InitializationVector::generate(&randomizer);
         let encrypted = self
             .storage_key
             .encrypt_data(rfc2822.as_bytes(), iv)

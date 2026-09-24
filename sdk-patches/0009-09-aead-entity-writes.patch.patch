@@ -1,0 +1,522 @@
+From 27e7a9a622f5d5efa4fed8de161a6991959ada00 Mon Sep 17 00:00:00 2001
+From: lab <lab@invalid>
+Date: Wed, 23 Sep 2026 15:38:44 +0200
+Subject: [PATCH 09/11] 09-aead-entity-writes.patch
+
+---
+ tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  12 +-
+ .../src/crypto_entity_client/aead_write.rs    | 231 +++++++++++++++++
+ tuta-sdk/rust/sdk/tests/aead_writes.rs        | 238 ++++++++++++++++++
+ 3 files changed, 478 insertions(+), 3 deletions(-)
+ create mode 100644 tuta-sdk/rust/sdk/src/crypto_entity_client/aead_write.rs
+ create mode 100644 tuta-sdk/rust/sdk/tests/aead_writes.rs
+
+diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
+index 88e0d8d996..a57d01a662 100644
+--- a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
++++ b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
+@@ -1,4 +1,6 @@
+ mod aead;
++mod aead_write;
++pub use aead_write::AeadEntityWriter;
+ 
+ use std::sync::Arc;
+ 
+@@ -194,9 +196,13 @@ impl CryptoEntityClient {
+ 		let type_model = self.entity_client.resolve_client_type_ref(&type_ref)?;
+ 
+ 		if crate::entities::entity_facade::has_kdf_nonce(type_model, &parsed_entity) {
+-			return Err(ApiCallError::internal(
+-				"AEAD instance writes are not supported".into(),
+-			));
++			let encrypted = self
++				.encrypt_group_key_instance(type_model, &parsed_entity)
++				.await?;
++			return self
++				.entity_client
++				.update_instance(&type_ref, encrypted)
++				.await;
+ 		}
+ 		let parsed_instance = if type_model.is_encrypted() {
+ 			let session_key = self
+diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client/aead_write.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead_write.rs
+new file mode 100644
+index 0000000000..c855eda76c
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead_write.rs
+@@ -0,0 +1,231 @@
++use super::CryptoEntityClient;
++use crate::element_value::{ElementValue, ParsedEntity};
++use crate::entities::entity_facade::{
++	make_random_aggregate_id, AeadEncryptionKey, ID_FIELD, KDF_NONCE_FIELD, OWNER_GROUP_FIELD,
++};
++use crate::entities::generated::base::PersistenceResourcePostReturn;
++use crate::entities::generated::sys::{InstanceKdfNonce, TypeInfo, UpdateKdfNoncePostIn};
++use crate::entities::Entity;
++use crate::metamodel::TypeModel;
++use crate::services::generated::sys::UpdateKdfNonceService;
++#[cfg_attr(test, mockall_double::double)]
++use crate::services::service_executor::ServiceExecutor;
++use crate::services::ExtraServiceParams;
++use crate::ApiCallError;
++use crypto_primitives::randomizer_facade::RandomizerFacade;
++use crypto_primitives::versioned::VersionedAesKey;
++use serde::Serialize;
++
++/// Writes persistent entities after the caller has selected AEAD for the account.
++/// Service payloads retain their existing session-key CBC path, as in TypeScript.
++/// The optional owner key is a caller-resolved key, for shared-owner contexts.
++/// On update, a supplied key must use the version selected by the owner key
++/// provider (the instance's owner-key version in the TypeScript path).
++/// This facade does not enable account rollout flags or change the default
++/// encryption scheme for new entities.
++pub struct AeadEntityWriter<'a> {
++	client: &'a CryptoEntityClient,
++	service_executor: &'a ServiceExecutor,
++	randomizer: RandomizerFacade,
++}
++
++impl<'a> AeadEntityWriter<'a> {
++	#[must_use]
++	pub fn new(
++		client: &'a CryptoEntityClient,
++		service_executor: &'a ServiceExecutor,
++		randomizer: RandomizerFacade,
++	) -> Self {
++		Self {
++			client,
++			service_executor,
++			randomizer,
++		}
++	}
++
++	pub async fn create_instance<T: Entity + Serialize>(
++		&self,
++		instance: T,
++		owner_key: Option<VersionedAesKey>,
++	) -> Result<PersistenceResourcePostReturn, ApiCallError> {
++		let type_ref = T::type_ref();
++		let model = self
++			.client
++			.entity_client
++			.resolve_client_type_ref(&type_ref)?;
++		let mut entity = self
++			.client
++			.instance_mapper
++			.serialize_entity(instance)
++			.map_err(|error| {
++				ApiCallError::internal_with_err(error, "Failed to map AEAD instance")
++			})?;
++		if model.is_encrypted() {
++			let key = self
++				.client
++				.aead_owner_key(model, &entity, owner_key)
++				.await?;
++			let nonce_id = model.get_attribute_id_by_attribute_name(KDF_NONCE_FIELD)?;
++			// A new instance must not inherit a copied instance's key derivation nonce.
++			entity.insert(
++				nonce_id,
++				ElementValue::Bytes(self.randomizer.generate_random_array::<32>().to_vec()),
++			);
++			entity = self.client.entity_facade.encrypt_and_map_with_aead(
++				model,
++				&entity,
++				&AeadEncryptionKey::GroupKey(key),
++			)?;
++		}
++		self.client
++			.entity_client
++			.create_instance(&type_ref, entity, &self.client.instance_mapper)
++			.await
++	}
++
++	pub async fn update_instance<T: Entity + Serialize>(
++		&self,
++		instance: T,
++		owner_key: Option<VersionedAesKey>,
++	) -> Result<(), ApiCallError> {
++		let type_ref = T::type_ref();
++		let model = self
++			.client
++			.entity_client
++			.resolve_client_type_ref(&type_ref)?;
++		let mut entity = self
++			.client
++			.instance_mapper
++			.serialize_entity(instance)
++			.map_err(|error| {
++				ApiCallError::internal_with_err(error, "Failed to map AEAD instance")
++			})?;
++		if model.is_encrypted() {
++			let key = self
++				.client
++				.aead_owner_key(model, &entity, owner_key)
++				.await?;
++			let nonce_id = model.get_attribute_id_by_attribute_name(KDF_NONCE_FIELD)?;
++			match entity.get(&nonce_id) {
++				Some(ElementValue::Bytes(nonce)) if nonce.len() == 32 => {},
++				None | Some(ElementValue::Null) => {
++					let nonce = self.register_nonce(model, &entity).await?;
++					entity.insert(nonce_id, ElementValue::Bytes(nonce));
++				},
++				_ => return Err(ApiCallError::internal("Invalid AEAD KDF nonce".into())),
++			}
++			entity = self.client.entity_facade.encrypt_and_map_with_aead(
++				model,
++				&entity,
++				&AeadEncryptionKey::GroupKey(key),
++			)?;
++		}
++		self.client
++			.entity_client
++			.update_instance(&type_ref, entity)
++			.await
++	}
++
++	async fn register_nonce(
++		&self,
++		model: &TypeModel,
++		entity: &ParsedEntity,
++	) -> Result<Vec<u8>, ApiCallError> {
++		let id = model.get_attribute_id_by_attribute_name(ID_FIELD)?;
++		let (instance_list, instance_id) = match entity.get(&id) {
++			Some(ElementValue::IdGeneratedId(id)) => (None, id.clone()),
++			Some(ElementValue::IdTupleGeneratedElementId(id)) => {
++				(Some(id.list_id.clone()), id.element_id.clone())
++			},
++			_ => {
++				return Err(ApiCallError::internal(
++					"Nonce migration requires a persistent generated ID".into(),
++				))
++			},
++		};
++		let type_info = TypeInfo {
++			_id: Some(
++				make_random_aggregate_id(&self.randomizer)
++					.assert_custom_id()
++					.clone(),
++			),
++			application: model.app.to_string(),
++			typeId: String::from(model.id)
++				.parse()
++				.map_err(|error| ApiCallError::internal_with_err(error, "Invalid type ID"))?,
++		};
++		let input = UpdateKdfNoncePostIn {
++			_format: 0,
++			instanceKdfNonce: InstanceKdfNonce {
++				_id: Some(
++					make_random_aggregate_id(&self.randomizer)
++						.assert_custom_id()
++						.clone(),
++				),
++				instanceList: instance_list,
++				instanceId: instance_id,
++				kdfNonce: self.randomizer.generate_random_array::<32>().to_vec(),
++				typeInfo: type_info,
++			},
++		};
++		let response = self
++			.service_executor
++			.post::<UpdateKdfNonceService>(input, ExtraServiceParams::default())
++			.await?;
++		if response.kdfNonce.len() != 32 {
++			return Err(ApiCallError::internal(
++				"Invalid AEAD nonce returned by server".into(),
++			));
++		}
++		// Another writer may already have registered a different nonce.
++		// Always use the authoritative server response, not our proposal.
++		Ok(response.kdfNonce)
++	}
++}
++
++impl CryptoEntityClient {
++	async fn aead_owner_key(
++		&self,
++		model: &TypeModel,
++		entity: &ParsedEntity,
++		owner_key: Option<VersionedAesKey>,
++	) -> Result<VersionedAesKey, ApiCallError> {
++		let key = match owner_key {
++			Some(key) => key,
++			None => {
++				let owner_id = model.get_attribute_id_by_attribute_name(OWNER_GROUP_FIELD)?;
++				let Some(ElementValue::IdGeneratedId(owner)) = entity.get(&owner_id) else {
++					return Err(ApiCallError::internal("Missing AEAD owner group".into()));
++				};
++				self.key_loader_facade
++					.get_current_sym_group_key(owner)
++					.await
++					.map_err(|error| {
++						ApiCallError::internal_with_err(
++							error,
++							"Failed to load current AEAD owner key",
++						)
++					})?
++			},
++		};
++		if key.version > u64::from(u8::MAX) {
++			return Err(ApiCallError::internal(
++				"Unsupported AEAD group key version".into(),
++			));
++		}
++		Ok(key)
++	}
++
++	pub(super) async fn encrypt_group_key_instance(
++		&self,
++		model: &TypeModel,
++		entity: &ParsedEntity,
++	) -> Result<ParsedEntity, ApiCallError> {
++		let key = self.aead_owner_key(model, entity, None).await?;
++		self.entity_facade.encrypt_and_map_with_aead(
++			model,
++			entity,
++			&AeadEncryptionKey::GroupKey(key),
++		)
++	}
++}
+diff --git a/tuta-sdk/rust/sdk/tests/aead_writes.rs b/tuta-sdk/rust/sdk/tests/aead_writes.rs
+new file mode 100644
+index 0000000000..8fd9f59285
+--- /dev/null
++++ b/tuta-sdk/rust/sdk/tests/aead_writes.rs
+@@ -0,0 +1,238 @@
++//! AEAD writes through the real model mapper, serializer and request pipeline.
++//! All transport responses and login credentials are public upstream test fixtures.
++use base64::{prelude::BASE64_STANDARD, Engine};
++use crypto_primitives::key::GenericAesKey;
++use crypto_primitives::randomizer_facade::{test_util::DeterministicRng, RandomizerFacade};
++use crypto_primitives::versioned::Versioned;
++use std::collections::HashMap;
++use std::sync::{
++	atomic::{AtomicU32, Ordering},
++	Arc, Mutex,
++};
++use tutasdk::bindings::rest_client::{
++	HttpMethod, RestClient, RestClientError, RestClientOptions, RestResponse,
++};
++use tutasdk::bindings::test_file_client::TestFileClient;
++use tutasdk::bindings::test_rest_client::TestRestClient;
++use tutasdk::crypto_entity_client::AeadEntityWriter;
++use tutasdk::entities::generated::tutanota::Mail;
++use tutasdk::login::{CredentialType, Credentials};
++use tutasdk::{GeneratedId, IdTupleGenerated, LoggedInSdk, Sdk};
++
++struct Transport {
++	fixtures: Arc<dyn RestClient>,
++	mail: Mutex<serde_json::Value>,
++	requests: Mutex<Vec<(String, HttpMethod, serde_json::Value)>>,
++	nonce: Mutex<Vec<u8>>,
++	nonce_status: AtomicU32,
++}
++
++#[async_trait::async_trait]
++impl RestClient for Transport {
++	async fn request_binary(
++		&self,
++		url: String,
++		method: HttpMethod,
++		options: RestClientOptions,
++	) -> Result<RestResponse, RestClientError> {
++		if url.ends_with("/rest/sys/updatekdfnonceservice") {
++			let body = serde_json::from_slice(options.body.as_ref().unwrap()).unwrap();
++			self.requests.lock().unwrap().push((url, method, body));
++			return Ok(RestResponse {
++				status: self.nonce_status.load(Ordering::SeqCst),
++				headers: HashMap::new(),
++				body: Some(
++					serde_json::to_vec(
++						&serde_json::json!({"2756":"0", "2757":BASE64_STANDARD.encode(&*self.nonce.lock().unwrap())}),
++					)
++					.unwrap(),
++				),
++			});
++		}
++		if url.contains("/rest/tutanota/Mail/") || url.contains("/rest/tutanota/mail/") {
++			if method == HttpMethod::GET {
++				return Ok(RestResponse {
++					status: 200,
++					headers: HashMap::new(),
++					body: Some(serde_json::to_vec(&*self.mail.lock().unwrap()).unwrap()),
++				});
++			}
++			let body: serde_json::Value =
++				serde_json::from_slice(options.body.as_ref().unwrap()).unwrap();
++			let status = if method == HttpMethod::POST { 201 } else { 204 };
++			let mut stored = body.clone();
++			if method == HttpMethod::POST {
++				stored["99"] = serde_json::json!(["O1qC705-17-0", "O1qC7an--3-0"]);
++				stored["100"] = self.mail.lock().unwrap()["100"].clone();
++			}
++			*self.mail.lock().unwrap() = stored;
++			self.requests.lock().unwrap().push((url, method, body));
++			return Ok(RestResponse {
++				status,
++				headers: HashMap::new(),
++				body: Some(br#"{"1":"0","2":"created","3":"permissions"}"#.to_vec()),
++			});
++		}
++		self.fixtures.request_binary(url, method, options).await
++	}
++}
++
++async fn session() -> (Arc<LoggedInSdk>, Arc<Transport>) {
++	let mut fixtures = TestRestClient::new("http://localhost:9000");
++	fixtures.insert_response("http://localhost:9000/rest/sys/Session/O1qC702-1J-0/3u3i8Lr9_7TnDDdAVw7w3TypTD2k1L00vIUTMF0SIPY", HttpMethod::GET, 200, HashMap::new(), Some(include_bytes!("download_mail_test/session.json")));
++	fixtures.insert_response(
++		"http://localhost:9000/rest/sys/User/O1qC700----0",
++		HttpMethod::GET,
++		200,
++		HashMap::new(),
++		Some(include_bytes!("download_mail_test/user.json")),
++	);
++	let rest = Arc::new(Transport {
++		fixtures: Arc::new(fixtures),
++		mail: Mutex::new(
++			serde_json::from_str(include_str!("download_mail_test/mail.json")).unwrap(),
++		),
++		requests: Mutex::new(vec![]),
++		nonce: Mutex::new(vec![0x55; 32]),
++		nonce_status: AtomicU32::new(200),
++	});
++	let credentials = Credentials {
++		login:"bed-free@tutanota.de".into(), user_id:GeneratedId("O1qC700----0".into()), access_token:"ZC2NIBDACUABAdJhibIwclzaPU3fEu-NzQ".into(),
++		encrypted_passphrase_key: BASE64_STANDARD.decode("AZWEA/KTrHu0bW52CsctsBTTV4U3jrU51TadSxf6Nqs3xbEs3WfoOpPtxUDCNjHNppt6LHCfgTioejjGUJ2cCsXosZAysUiau5Nvyi8mtjLz").unwrap(), credential_type:CredentialType::Internal,
++	};
++	let sdk = Sdk::new(
++		"http://localhost:9000".into(),
++		rest.clone(),
++		Arc::new(TestFileClient::default()),
++	);
++	(sdk.login(credentials).await.unwrap(), rest)
++}
++fn mail_id() -> IdTupleGenerated {
++	IdTupleGenerated::new(
++		GeneratedId("O1qC705-17-0".into()),
++		GeneratedId("O1qC7an--3-0".into()),
++	)
++}
++fn randomizer() -> RandomizerFacade {
++	RandomizerFacade::from_core(DeterministicRng(0x44))
++}
++
++#[tokio::test]
++async fn migration_uses_server_nonce_then_existing_nonce_update_skips_service() {
++	let (logged, rest) = session().await;
++	let client = logged.mail_facade().get_crypto_entity_client();
++	let mut mail: Mail = client.load(&mail_id()).await.unwrap();
++	let sender = mail.sender.clone();
++	mail.subject = "AEAD écrit en Rust — 🦀".into();
++	let writer = AeadEntityWriter::new(&client, logged.get_service_executor(), randomizer());
++	let mut expected = mail.clone();
++	expected._kdfNonce = Some(vec![0x55; 32]);
++	writer.update_instance(mail, None).await.unwrap();
++	{
++		let requests = rest.requests.lock().unwrap();
++		assert_eq!(requests.len(), 2);
++		let migration = &requests[0].2["2754"][0];
++		assert_eq!(migration["2749"], "O1qC705-17-0");
++		assert_eq!(migration["2750"], "O1qC7an--3-0");
++		assert_eq!(migration["2748"][0]["1871"], "tutanota");
++		assert_eq!(migration["2748"][0]["1872"], "97");
++		assert_eq!(
++			BASE64_STANDARD
++				.decode(migration["2751"].as_str().unwrap())
++				.unwrap(),
++			[0x44; 32]
++		);
++		assert_eq!(
++			BASE64_STANDARD
++				.decode(requests[1].2["1839"].as_str().unwrap())
++				.unwrap(),
++			[0x55; 32]
++		);
++		assert_eq!(
++			BASE64_STANDARD
++				.decode(requests[1].2["105"].as_str().unwrap())
++				.unwrap()[0],
++			2
++		);
++	}
++	let mut read: Mail = client.load(&mail_id()).await.unwrap();
++	assert_eq!(read, expected);
++	assert_eq!(read.subject, "AEAD écrit en Rust — 🦀");
++	assert_eq!(read.sender, sender);
++	read.subject = String::new();
++	// Existing public update entry point must preserve AEAD, including empty values.
++	client.update_instance(read).await.unwrap();
++	let read: Mail = client.load(&mail_id()).await.unwrap();
++	assert_eq!(read.subject, "");
++	assert_eq!(rest.requests.lock().unwrap().len(), 3);
++	assert_eq!(
++		BASE64_STANDARD
++			.decode(rest.mail.lock().unwrap()["105"].as_str().unwrap())
++			.unwrap()[0],
++		2
++	);
++}
++
++#[tokio::test]
++async fn create_replaces_copied_nonce_and_generates_aggregate_id() {
++	let (logged, rest) = session().await;
++	let client = logged.mail_facade().get_crypto_entity_client();
++	let mut mail: Mail = client.load(&mail_id()).await.unwrap();
++	mail._kdfNonce = Some(vec![0x22; 32]);
++	mail.sender._id = None;
++	let writer = AeadEntityWriter::new(&client, logged.get_service_executor(), randomizer());
++	let created = writer.create_instance(mail, None).await.unwrap();
++	assert_eq!(created.generatedId.unwrap().as_str(), "created");
++	assert_eq!(rest.requests.lock().unwrap().len(), 1);
++	let raw = rest.mail.lock().unwrap().clone();
++	assert_eq!(
++		BASE64_STANDARD
++			.decode(raw["1839"].as_str().unwrap())
++			.unwrap(),
++		[0x44; 32]
++	);
++	assert!(raw["111"][0]["93"]
++		.as_str()
++		.is_some_and(|id| !id.is_empty()));
++	let read: Mail = client.load(&mail_id()).await.unwrap();
++	assert_eq!(read.sender.name, "Matthias");
++	assert_eq!(read.subject, "Html email features");
++}
++
++#[tokio::test]
++async fn failed_or_invalid_nonce_registration_never_puts_the_entity() {
++	for (status, nonce) in [(500, vec![0x55; 32]), (200, vec![0x55; 31])] {
++		let (logged, rest) = session().await;
++		rest.nonce_status.store(status, Ordering::SeqCst);
++		*rest.nonce.lock().unwrap() = nonce;
++		let client = logged.mail_facade().get_crypto_entity_client();
++		let mail: Mail = client.load(&mail_id()).await.unwrap();
++		let writer = AeadEntityWriter::new(&client, logged.get_service_executor(), randomizer());
++		assert!(writer.update_instance(mail, None).await.is_err());
++		let requests = rest.requests.lock().unwrap();
++		assert_eq!(requests.len(), 1);
++		assert!(requests[0].0.ends_with("updatekdfnonceservice"));
++	}
++}
++
++#[tokio::test]
++async fn malformed_nonce_and_unsupported_key_version_do_not_register_or_write() {
++	let (logged, rest) = session().await;
++	let client = logged.mail_facade().get_crypto_entity_client();
++	let mut mail: Mail = client.load(&mail_id()).await.unwrap();
++	mail._kdfNonce = Some(vec![0; 31]);
++	let writer = AeadEntityWriter::new(&client, logged.get_service_executor(), randomizer());
++	assert!(writer.update_instance(mail.clone(), None).await.is_err());
++	mail._kdfNonce = None;
++	assert!(writer
++		.update_instance(
++			mail,
++			Some(Versioned {
++				object: GenericAesKey::from_bytes(&[0x11; 32]).unwrap(),
++				version: 256
++			})
++		)
++		.await
++		.is_err());
++	assert!(rest.requests.lock().unwrap().is_empty());
++}

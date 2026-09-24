@@ -296,7 +296,7 @@ mod tests {
     use tutasdk::entities::generated::tutanota::{
         Body, Mail, MailAddress, MailDetails, MailSetEntry, Recipients,
     };
-    use tutasdk::folder_system::MailSetKind;
+    use tutabridge_tuta::folder_system::MailSetKind;
     use tutasdk::{GeneratedId, IdTupleGenerated};
 
     fn gid(s: &str) -> GeneratedId {

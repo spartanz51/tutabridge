@@ -1,5 +1,5 @@
 use base64::Engine;
-use crypto_primitives::aes::{Aes256Key, Iv, AES_256_KEY_SIZE};
+use crypto_primitives::aes::{Aes256Key, InitializationVector, AES_256_KEY_SIZE};
 use crypto_primitives::blake3::blake3_kdf;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
@@ -15,7 +15,8 @@ use tutasdk::entities::generated::tutanota::{
     DraftRecipient, Mail, MailBox, MailDetails, MailDetailsBlob, MailSetEntry, NewDraftAttachment,
     SendDraftData, SendDraftParameters, TutanotaFile,
 };
-use tutasdk::folder_system::{FolderSystem, MailSetKind};
+use tutabridge_tuta::folder_system::{FolderSystem, MailSetKind, MailSetExt};
+use tutabridge_tuta::mail::MailExtensions;
 use tutasdk::services::generated::tutanota::{DraftService, SendDraftService};
 use tutasdk::services::ExtraServiceParams;
 use tutasdk::tutanota_constants::ArchiveDataType;
@@ -202,8 +203,7 @@ impl TutaSession {
     }
 
     pub async fn load_folders(&self, mailbox: &MailBox) -> Result<FolderSystem, ApiCallError> {
-        self.logged_in
-            .mail_facade()
+        MailExtensions::new(self.logged_in.clone())
             .load_folders_for_mailbox(mailbox)
             .await
     }
@@ -357,7 +357,7 @@ impl TutaSession {
         // Tuta stores a mail's body in two different places depending on
         // whether the mail is received or a draft. Match the TS routing
         // (`isDraft(mail) ? loadMailDetailsDraft : loadMailDetailsBlob`).
-        let mail_facade = self.logged_in.mail_facade();
+        let mail_facade = MailExtensions::new(self.logged_in.clone());
         if mail.mailDetailsDraft.is_some() {
             match mail_facade.load_mail_details_draft(mail).await {
                 Ok(details) => Ok(Some(details)),
@@ -396,7 +396,7 @@ impl TutaSession {
         if let Some(cached) = self.try_self_send_cache(mail).await {
             return Ok(cached);
         }
-        let mail_facade = self.logged_in.mail_facade();
+        let mail_facade = MailExtensions::new(self.logged_in.clone());
         let mut out: Vec<(TutanotaFile, Vec<u8>)> = Vec::with_capacity(mail.attachments.len());
         for file_id in &mail.attachments {
             let file = self.load_file_with_retry(file_id).await?;
@@ -512,16 +512,16 @@ impl TutaSession {
             .zip(tokens_per_file.into_iter())
         {
             let enc_file_name = file_sk
-                .encrypt_data(att.filename.as_bytes(), Iv::generate(randomizer))
+                .encrypt_data(att.filename.as_bytes(), InitializationVector::generate(randomizer))
                 .map_err(|e| {
                     ApiCallError::internal(format!("Failed to encrypt attachment name: {e}"))
                 })?;
             let enc_mime_type = file_sk
-                .encrypt_data(att.mime_type.as_bytes(), Iv::generate(randomizer))
+                .encrypt_data(att.mime_type.as_bytes(), InitializationVector::generate(randomizer))
                 .map_err(|e| {
                     ApiCallError::internal(format!("Failed to encrypt attachment mime type: {e}"))
                 })?;
-            let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, Iv::generate(randomizer));
+            let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, InitializationVector::generate(randomizer));
 
             let new_draft = NewDraftAttachment {
                 _id: Some(random_custom_id(randomizer)),
@@ -649,7 +649,7 @@ impl TutaSession {
 
         let owner_enc_session_key = group_key
             .object
-            .encrypt_key(&session_key, Iv::generate(&randomizer));
+            .encrypt_key(&session_key, InitializationVector::generate(&randomizer));
         let owner_key_version = group_key.version as i64;
 
         // Upload every attachment first — the resulting `DraftAttachment`
@@ -1000,7 +1000,7 @@ impl MailBackend for TutaSession {
     }
 
     async fn decrypt_inline_mail(&self, json: &str) -> Result<Option<Mail>, String> {
-        self.crypto_client()
+        MailExtensions::new(self.logged_in.clone())
             .decrypt_inline_and_parse::<Mail>(json)
             .await
             .map_err(|e| format!("{e}"))
@@ -1010,7 +1010,7 @@ impl MailBackend for TutaSession {
         &self,
         json: &str,
     ) -> Result<Option<MailSetEntry>, String> {
-        self.crypto_client()
+        MailExtensions::new(self.logged_in.clone())
             .decrypt_inline_and_parse::<MailSetEntry>(json)
             .await
             .map_err(|e| format!("{e}"))
@@ -1023,7 +1023,7 @@ impl MailBackend for TutaSession {
         // `event.blob_instance` is the encrypted MailDetailsBlob. We decrypt
         // it through the same inline pipeline as the Mail itself and pull out
         // its `details` aggregate, which is what consumers actually want.
-        self.crypto_client()
+        MailExtensions::new(self.logged_in.clone())
             .decrypt_inline_and_parse::<MailDetailsBlob>(json)
             .await
             .map(|opt| opt.map(|blob| blob.details))
@@ -1052,7 +1052,7 @@ impl MailBackend for TutaSession {
         let mut result = Vec::new();
         for indented in folder_system.indented_list() {
             let folder = indented.folder;
-            let kind = folder.mail_set_kind();
+            let kind = folder.bridge_mail_set_kind();
 
             // Only expose folder types we support over IMAP.
             let is_custom = kind == MailSetKind::Custom;
@@ -1071,7 +1071,7 @@ impl MailBackend for TutaSession {
             // Build the IMAP path by mapping each ancestor segment.
             let mut segments: Vec<String> = Vec::new();
             for ancestor in folder_system.path_to_folder(&tutasdk::GeneratedId(elem_id.clone())) {
-                let akind = ancestor.mail_set_kind();
+                let akind = ancestor.bridge_mail_set_kind();
                 if let Some(name) = system_imap_name(akind) {
                     segments.push(name.to_string());
                 } else {
@@ -1125,8 +1125,7 @@ impl MailBackend for TutaSession {
             tutasdk::GeneratedId(target.list_id.clone()),
             tutasdk::GeneratedId(target.id.clone()),
         );
-        self.logged_in
-            .mail_facade()
+        MailExtensions::new(self.logged_in.clone())
             .move_mails(mail_ids, target_folder)
             .await
             .map_err(|e| format!("{e}"))
@@ -1232,7 +1231,7 @@ pub async fn login_with_2fa(
 
     log::info!("Authenticating with Tuta servers...");
     let session = sdk
-        .initiate_session(&cfg.email, password)
+        .initiate_session(&cfg.email, password, "TutaBridge")
         .await
         .map_err(|e| {
             Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))

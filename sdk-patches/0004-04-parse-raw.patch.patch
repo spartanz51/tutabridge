@@ -1,0 +1,41 @@
+From e8f4118f6fcd52a3454f61e9292bcac2898375c7 Mon Sep 17 00:00:00 2001
+From: lab <lab@invalid>
+Date: Wed, 23 Sep 2026 15:38:44 +0200
+Subject: [PATCH 04/11] 04-parse-raw.patch
+
+---
+ tuta-sdk/rust/sdk/src/entity_client.rs | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/tuta-sdk/rust/sdk/src/entity_client.rs b/tuta-sdk/rust/sdk/src/entity_client.rs
+index 1882b24468..af333ec5cc 100644
+--- a/tuta-sdk/rust/sdk/src/entity_client.rs
++++ b/tuta-sdk/rust/sdk/src/entity_client.rs
+@@ -45,6 +45,19 @@ impl EntityClient {
+ 		}
+ 	}
+ 
++	/// Apply the server type model to a raw JSON entity, producing the
++	/// `ParsedEntity` representation used by the rest of the SDK. Exposed so
++	/// that consumers of inline event-bus payloads (or any other transport
++	/// that delivers an already-deserialised JSON object) can feed it into
++	/// the same decryption pipeline `load` uses internally.
++	pub fn parse_raw(
++		&self,
++		type_ref: &TypeRef,
++		raw_entity: RawEntity,
++	) -> Result<ParsedEntity, ApiCallError> {
++		Ok(self.json_serializer.parse(type_ref, raw_entity)?)
++	}
++
+ 	#[allow(clippy::unused_async, unused)]
+ 	/// Gets an entity/instance of type `type_ref` from the backend
+ 	pub async fn load<Id: IdType>(
+@@ -430,6 +443,7 @@ mockall::mock! {
+ 		pub fn get_type_model_provider() -> Arc<TypeModelProvider>;
+ 		pub fn resolve_client_type_ref<'a>(&'a self, type_ref: &TypeRef) -> Result<&'a TypeModel, ApiCallError>;
+ 		pub fn resolve_server_type_ref(&self, type_ref: &TypeRef) -> Result<Arc<TypeModel>, ApiCallError>;
++		pub fn parse_raw(&self, type_ref: &TypeRef, raw_entity: RawEntity) -> Result<ParsedEntity, ApiCallError>;
+ 		pub async fn load<Id: IdType>(
+ 			&self,
+ 			type_ref: &TypeRef,
