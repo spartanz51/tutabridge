@@ -1,5 +1,5 @@
 use base64::Engine;
-use crypto_primitives::aes::{Aes256Key, Iv, AES_256_KEY_SIZE};
+use crypto_primitives::aes::{Aes256Key, InitializationVector, AES_256_KEY_SIZE};
 use crypto_primitives::blake3::blake3_kdf;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
@@ -512,16 +512,23 @@ impl TutaSession {
             .zip(tokens_per_file.into_iter())
         {
             let enc_file_name = file_sk
-                .encrypt_data(att.filename.as_bytes(), Iv::generate(randomizer))
+                .encrypt_data(
+                    att.filename.as_bytes(),
+                    InitializationVector::generate(randomizer),
+                )
                 .map_err(|e| {
                     ApiCallError::internal(format!("Failed to encrypt attachment name: {e}"))
                 })?;
             let enc_mime_type = file_sk
-                .encrypt_data(att.mime_type.as_bytes(), Iv::generate(randomizer))
+                .encrypt_data(
+                    att.mime_type.as_bytes(),
+                    InitializationVector::generate(randomizer),
+                )
                 .map_err(|e| {
                     ApiCallError::internal(format!("Failed to encrypt attachment mime type: {e}"))
                 })?;
-            let owner_enc_file_sk = mail_group_key.encrypt_key(file_sk, Iv::generate(randomizer));
+            let owner_enc_file_sk =
+                mail_group_key.encrypt_key(file_sk, InitializationVector::generate(randomizer));
 
             let new_draft = NewDraftAttachment {
                 _id: Some(random_custom_id(randomizer)),
@@ -649,7 +656,7 @@ impl TutaSession {
 
         let owner_enc_session_key = group_key
             .object
-            .encrypt_key(&session_key, Iv::generate(&randomizer));
+            .encrypt_key(&session_key, InitializationVector::generate(&randomizer));
         let owner_key_version = group_key.version as i64;
 
         // Upload every attachment first — the resulting `DraftAttachment`
