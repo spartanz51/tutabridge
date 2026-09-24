@@ -47,6 +47,9 @@ to log in.
 
 ## The patches
 
+Which of them are meant for Tuta, and their status there, is tracked in
+[`SDK_UPSTREAM.md`](SDK_UPSTREAM.md).
+
 | Patch | Adds | Why it lives in the SDK |
 |---|---|---|
 | 01 batch | `load_multiple`: list elements by id, 100 per request | Transport and parsing are partly private; avoids one request per mail. |

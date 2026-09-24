@@ -116,20 +116,19 @@ the client talks to.
 
 ## Architecture
 
-Syncer-driven, store-backed. The IMAP server never makes a network call to read:
+Store-backed: the IMAP server never makes a network call to read.
 
 ```
-Tuta API  <-  Syncer (background)  ->  MailStore (in-memory)  <-  IMAP server  <-  mail client
-                                                              <-  GUI (stats)
+Tuta API / WebSocket  ->  Syncer + event bus  ->  MailStore (in-memory)  <-  IMAP server  <-  mail client
+                                                                         <-  GUI (stats)
 ```
 
-* The **syncer** pulls from the Tuta API and populates an in-memory `MailStore`,
-  backed by the on-disk encrypted cache.
-* The **IMAP server** only ever reads from the store. It never makes an API call
-  for reads.
-* The only IMAP-to-network calls are mutations: mark read/unread (`STORE \Seen`)
-  and trash (`EXPUNGE`). Sending goes through SMTP to Tuta's `DraftService` and
-  `SendDraftService`.
+* At startup the **syncer** loads the on-disk encrypted cache into an
+  in-memory `MailStore`; after that, Tuta's **event bus** keeps it current in
+  real time (new mail, moves, deletions, read state).
+* The **IMAP server** only ever reads from the store. The only IMAP-to-network
+  calls are mutations: mark read/unread, move and trash. Sending goes through
+  SMTP to Tuta's `DraftService` and `SendDraftService`.
 
 The storage key is derived from your Tuta session, so there is no extra password
 to manage, and the cache is encrypted at rest.
@@ -215,10 +214,11 @@ from `config.toml` automatically.
 
 ## SDK
 
-TutaBridge depends on a few additions to Tuta's Rust SDK, vendored as the
-`tuta-repo` submodule. Each change is kept as its own single-commit branch off
-upstream for easy review and upstreaming. See [`SDK_PRS.md`](SDK_PRS.md) for the
-status of each.
+TutaBridge builds on Tuta's official Rust SDK release plus a small series of
+patches, generated into the `tuta-repo` submodule by
+`scripts/sdk-generate.sh`. See [`docs/SDK_PATCHES.md`](docs/SDK_PATCHES.md)
+for the patches and [`docs/SDK_UPSTREAM.md`](docs/SDK_UPSTREAM.md) for the
+ones proposed to Tuta.
 
 ---
 

@@ -4,29 +4,32 @@
 
 TutaBridge is an IMAP/SMTP bridge for Tuta encrypted email. It exposes a local IMAP+SMTP server that mail clients (Thunderbird, etc.) connect to.
 
-### Core principle: syncer-driven, store-backed
+### Core principle: store-backed, kept current by the event bus
 
 ```
-Tuta API  ←──  Syncer (background)  ──→  MailStore (in-memory)  ←──  IMAP server  ──→  Thunderbird
-                                                                 ←──  Tauri UI (stats)
+Tuta API ──► Syncer (startup, body prefetch) ──► MailStore (in-memory) ◄── IMAP server ◄── mail client
+Tuta WS  ──► Event bus ──► Event handler ────────┘  + encrypted disk cache   ◄── Tauri UI (stats)
 ```
 
-- The **syncer** (`sync.rs`) runs independently in a background tokio task. It pulls emails from the Tuta API and populates the `MailStore`.
-- The **IMAP server** (`imap/`) ONLY reads from the `MailStore`. It NEVER makes API calls for reads.
-- The only IMAP→network calls are **mutations**: marking read/unread (`STORE \Seen`) and trashing (`EXPUNGE`).
-
-### Syncer two-phase cycle
-
-1. **Phase 1 (fast, ~3s)**: Sync mail lists for ALL 6 folders. Store gets populated with mail metadata immediately.
-2. **Phase 2 (slow, ~2min)**: Prefetch mail details (body) one by one with rate limiting (150ms/mail). Bodies become available progressively.
-3. Wait 60s, repeat.
+- **Startup** (`sync.rs`): the syncer loads the folder list and the encrypted
+  disk cache into the `MailStore`, runs a full metadata sync only on first
+  launch or migration, then signals `startup_done`.
+- **Realtime** (`event_handler.rs`): the event bus (WebSocket, `crates/tuta`)
+  delivers entity updates, catch-up included. The handler holds them until
+  the syncer's startup is done (#44), then applies them to memory and disk.
+  There is no periodic re-listing.
+- **Bodies**: the syncer's prefetch loop downloads mail bodies up to
+  `sync_limit`; older bodies are fetched on demand.
+- The **IMAP server** (`imap/`) only reads from the `MailStore`. The only
+  IMAP→network calls are mutations: `STORE \Seen`, `MOVE`, `EXPUNGE` (trash).
+  Sending goes through SMTP to Tuta's draft and send services.
 
 ## Testing
 
 ### Unit tests
 
 ```bash
-cargo test --workspace        # 113 bridge tests + SDK tests
+cargo test --workspace        # bridge, CLI, GUI and crates/tuta
 ```
 
 ### Integration test (IMAP)
@@ -42,7 +45,7 @@ This connects to the local IMAP server and verifies: TLS, auth, folder list, mai
 ### Manual Thunderbird test
 
 1. Start bridge: `./dev.sh` (GUI) or `cargo run` (CLI)
-2. Wait for "Pre-fetching N mail details for Inbox" in logs
+2. Wait for "Event bus initial sync done" in logs
 3. In Thunderbird: IMAP server `127.0.0.1:1143` SSL/TLS, SMTP `127.0.0.1:1025` SSL/TLS
 4. Username: your tuta email, Password: bridge_password from config
 5. Accept self-signed cert
@@ -53,6 +56,10 @@ This connects to the local IMAP server and verifies: TLS, auth, folder list, mai
 cargo build                   # CLI + GUI
 cargo build -p tutabridge-core  # Core library only
 ```
+
+For a live run, use a binary from `cargo build`, not one produced by
+`cargo test`: the test build enables the SDK's `logging` feature, which
+panics at startup next to the bridge's own logger.
 
 ## Vendored SDK (tuta-repo submodule)
 
