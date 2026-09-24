@@ -1,23 +1,26 @@
-From 6fa61cb1552e864b5d8f5bc50c4bde65885329b9 Mon Sep 17 00:00:00 2001
+From eef1a14f34455b43f578d79cd5d6c4a907146e1d Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
-Date: Wed, 23 Sep 2026 15:38:44 +0200
-Subject: [PATCH] [sdk] Decrypt AEAD values encrypted with a group key
+Date: Thu, 24 Sep 2026 12:09:00 +0200
+Subject: [PATCH] [sdk] Decrypt AEAD attribute values encrypted with a group
+ key
 
-Reads AEAD v2 attribute values (359/360 profile): versioned group keys and
-the KDF nonce, resolved through the existing key loader.
-
+Values encrypted with the AEAD v2 scheme (359/360 profile) are decrypted
+with the owner group key of the version recorded in the ciphertext and
+the instance's KDF nonce, as TS AeadWithGroupKeyDecryptor does. Instances
+carrying a KDF nonce go through this path, including decrypt_parsed.
+Writing such instances is refused until AEAD writes are supported.
 ---
- tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  12 ++
- .../rust/sdk/src/crypto_entity_client/aead.rs | 173 +++++++++++++++
- .../rust/sdk/src/entities/entity_facade.rs    |  61 +++++-
+ tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  18 ++
+ .../rust/sdk/src/crypto_entity_client/aead.rs | 160 ++++++++++++++
+ .../rust/sdk/src/entities/entity_facade.rs    |  51 ++++-
  .../src/entities/entity_facade/decryption.rs  | 180 +++++++++++++++-
  .../entities/entity_facade/decryption_keys.rs | 197 ++++++++++++++++++
- 5 files changed, 606 insertions(+), 17 deletions(-)
+ 5 files changed, 597 insertions(+), 9 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
  create mode 100644 tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
 
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
-index 2eb766ebb1..88e0d8d996 100644
+index 2db05dd505..c1593a4baf 100644
 --- a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 @@ -1,3 +1,5 @@
@@ -50,12 +53,25 @@ index 2eb766ebb1..88e0d8d996 100644
  		let possible_session_key = self
  			.crypto_facade
  			.resolve_session_key(&parsed_entity, type_model)
+@@ -303,6 +315,12 @@ impl CryptoEntityClient {
+ 		inherited_session_key: Option<ResolvedSessionKey>,
+ 	) -> Result<ParsedEntity, ApiCallError> {
+ 		let type_model = self.entity_client.resolve_server_type_ref(type_ref)?;
++		// Group-key attributes use their instance owner and ciphertext key version.
++		if crate::entities::entity_facade::has_kdf_nonce(&type_model, &parsed_entity) {
++			return self
++				.process_entity_with_group_keys(&type_model, parsed_entity, inherited_session_key)
++				.await;
++		}
+ 		if !type_model.marked_encrypted() {
+ 			return Ok(parsed_entity);
+ 		}
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
 new file mode 100644
-index 0000000000..5fff9fd9ec
+index 0000000000..ddd0ec12c5
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,160 @@
 +use super::CryptoEntityClient;
 +use crate::element_value::{ElementValue, ParsedEntity};
 +use crate::entities::entity_facade::{
@@ -65,19 +81,6 @@ index 0000000000..5fff9fd9ec
 +use crate::ApiCallError;
 +
 +impl CryptoEntityClient {
-+	/// Decrypt an already parsed response, optionally using an inherited session key.
-+	/// Group-key attributes use their own instance owner and ciphertext key version.
-+	pub async fn decrypt_parsed(
-+		&self,
-+		type_ref: &crate::TypeRef,
-+		entity: ParsedEntity,
-+		inherited_session_key: Option<crate::crypto::crypto_facade::ResolvedSessionKey>,
-+	) -> Result<ParsedEntity, ApiCallError> {
-+		let model = self.entity_client.resolve_server_type_ref(type_ref)?;
-+		self.process_entity_with_group_keys(&model, entity, inherited_session_key)
-+			.await
-+	}
-+
 +	/// Group-key attributes do not require an owner-encrypted session key.
 +	pub(super) async fn process_entity_with_group_keys(
 +		&self,
@@ -230,7 +233,7 @@ index 0000000000..5fff9fd9ec
 +	}
 +}
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
-index 3802cbe2f5..6317589c74 100644
+index 339cf61ef0..6317589c74 100644
 --- a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
 @@ -1,5 +1,7 @@
@@ -316,30 +319,6 @@ index 3802cbe2f5..6317589c74 100644
  		self.encrypt_and_map_inner(type_model, instance, sk)
  	}
  }
-@@ -1616,10 +1663,7 @@ mod tests {
- 		let aead = AeadFacade::new(RandomizerFacade::from_core(rand_core::OsRng));
- 		let sender = entity.get_mut("111").unwrap().assert_array_mut_ref()[0].assert_dict_mut_ref();
- 		// IDs are protocol IDs, checked against the official Mail/MailAddress models.
--		sender.insert(
--			"93".into(),
--			ElementValue::String("sender-id".into()),
--		);
-+		sender.insert("93".into(), ElementValue::String("sender-id".into()));
- 		sender.insert(
- 			"94".into(),
- 			ElementValue::Bytes(
-@@ -1647,10 +1691,7 @@ mod tests {
- 			ElementValue::String("Alice".into())
- 		);
- 		let sender = entity.get_mut("111").unwrap().assert_array_mut_ref()[0].assert_dict_mut_ref();
--		sender.insert(
--			"93".into(),
--			ElementValue::String("moved".into()),
--		);
-+		sender.insert("93".into(), ElementValue::String("moved".into()));
- 		assert!(decoder
- 			.decrypt_and_map(&model, entity.clone(), keys.clone())
- 			.is_err());
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
 index 62d50b6f3a..76224bc64e 100644
 --- a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs

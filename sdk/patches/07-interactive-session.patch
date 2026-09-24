@@ -1,24 +1,28 @@
-From 42e775776f00f8e473326488bb33e87710d4a1bc Mon Sep 17 00:00:00 2001
+From 4afe2e705b1f590e7abafa42339ad518bb7ff363 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
-Date: Wed, 23 Sep 2026 15:38:44 +0200
-Subject: [PATCH] [sdk] Create an interactive session with a second factor
+Date: Thu, 24 Sep 2026 12:06:00 +0200
+Subject: [PATCH] [sdk] Create a session interactively with a second factor
 
-Session creation that can wait for a TOTP code, poll a pending second factor
-and cancel it, mirroring the TS LoginFacade.
-
+create_session fails for accounts with a second factor. Adds
+initiate_session, which creates the session and returns its pending
+challenges, authenticate_with_second_factor_totp, is_second_factor_pending
+and cancel_create_session, mirroring TS LoginFacade.createSession,
+authenticateWithSecondFactor, waitUntilSecondFactorApproved and
+cancelCreateSession. create_session now delegates to initiate_session and
+reports a required second factor instead of failing later.
 ---
- tuta-sdk/rust/sdk/src/lib.rs                  |  77 ++-----
+ tuta-sdk/rust/sdk/src/lib.rs                  |  89 +-------
  tuta-sdk/rust/sdk/src/login.rs                |   3 +
  tuta-sdk/rust/sdk/src/login/login_facade.rs   |   2 +-
  tuta-sdk/rust/sdk/src/login/session.rs        | 202 ++++++++++++++++++
  tuta-sdk/rust/sdk/src/tutanota_constants.rs   |  14 ++
  .../sdk/tests/interactive_session_test.rs     | 138 ++++++++++++
- 6 files changed, 371 insertions(+), 65 deletions(-)
+ 6 files changed, 369 insertions(+), 79 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/login/session.rs
  create mode 100644 tuta-sdk/rust/sdk/tests/interactive_session_test.rs
 
 diff --git a/tuta-sdk/rust/sdk/src/lib.rs b/tuta-sdk/rust/sdk/src/lib.rs
-index ee91fae427..3024be622e 100644
+index 7ce9a9370a..5e66f769e1 100644
 --- a/tuta-sdk/rust/sdk/src/lib.rs
 +++ b/tuta-sdk/rust/sdk/src/lib.rs
 @@ -15,7 +15,6 @@ use crate::blobs::blob_access_token_facade::BlobAccessTokenFacade;
@@ -62,18 +66,14 @@ index ee91fae427..3024be622e 100644
  use crypto_primitives::key::GenericAesKey;
  use crypto_primitives::randomizer_facade::RandomizerFacade;
  use crypto_primitives::versioned::VersionedAesKey;
-@@ -72,6 +69,7 @@ mod key_cache;
- mod key_loader_facade;
- mod logging;
- pub mod login;
-+pub use login::SessionInitResponse;
- mod mail_facade;
- mod metamodel;
- 
-@@ -335,66 +333,17 @@ impl Sdk {
+@@ -335,81 +332,17 @@ impl Sdk {
  		mail_address: &str,
  		passphrase: &str,
  	) -> Result<Arc<LoggedInSdk>, LoginError> {
+-		// Like the TS LoginFacade: the salt and the session are keyed by the
+-		// normalized address.
+-		let mail_address = mail_address.trim().to_lowercase();
+-		let mail_address = mail_address.as_str();
 -		let headers_provider = Arc::new(HeadersProvider::new(None));
 -		let entity_facade = Arc::new(EntityFacadeImpl::new(
 -			self.type_model_provider.clone(),
@@ -100,15 +100,26 @@ index ee91fae427..3024be622e 100644
 +			.initiate_session(mail_address, passphrase, "Linux Desktop")
  			.await?;
 -
--		let Ok(salt) = salt_return.salt.try_into() else {
+-		// Only Argon2id is implemented; deriving it for a Bcrypt account would
+-		// send a wrong verifier and fail as a misleading authentication error.
+-		if !matches!(
+-			KdfType::try_from(salt_return.kdfVersion)?,
+-			KdfType::Argon2id
+-		) {
 -			return Err(LoginError::InvalidKey {
--				error_message: "salt has wrong length".to_string(),
+-				error_message: "unsupported password KDF".to_string(),
 +		if !response.challenges.is_empty() {
 +			return Err(LoginError::ApiCall {
 +				source: ApiCallError::internal(
 +					"second factor authentication required: use initiate_session, authenticate_with_second_factor_totp, then login".to_string(),
 +				),
  			});
+ 		}
+-
+-		let Ok(salt) = salt_return.salt.try_into() else {
+-			return Err(LoginError::InvalidKey {
+-				error_message: "salt has wrong length".to_string(),
+-			});
 -		};
 -
 -		let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
@@ -141,7 +152,6 @@ index ee91fae427..3024be622e 100644
 -			credential_type: CredentialType::Internal,
 -		})
 -		.await
-+		}
 +		self.login(response.credentials).await
  	}
  

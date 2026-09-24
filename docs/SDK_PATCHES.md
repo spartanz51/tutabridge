@@ -31,12 +31,21 @@ give the same commit. It also fails if the patches touch the SDK's
 `Cargo.toml`: the client version Tuta checks must be the release's own,
 never an edit. CI runs this on every pull request.
 
+```sh
+scripts/sdk-generate.sh --verify-each
+```
+
+Also checks every patch on its own: after each one, the SDK must be
+formatted and pass its tests. Slower (about 8 minutes); run it whenever a
+patch changes.
+
 ## Moving to a new Tuta release
 
 1. Put the new tag and its commit in `sdk/BASE`.
-2. `scripts/sdk-generate.sh`. If a patch no longer applies, fix it in
+2. `scripts/sdk-generate.sh`. A patch Tuta has taken is reported as
+   already included: delete it. A patch that no longer applies is fixed in
    `sdk/patches/` (regenerate it with `git format-patch` from a fixed tree),
-   never in `tuta-repo`.
+   never in `tuta-repo`. Then `scripts/sdk-generate.sh --verify-each`.
 3. Run the SDK and bridge test suites, then a live check: log in, list and
    read mail, send one plaintext and one HTML message, read the log.
 4. `scripts/sdk-generate.sh --push`, `git add tuta-repo sdk`, open a PR.
@@ -47,18 +56,23 @@ to log in.
 
 ## The patches
 
-Which of them are meant for Tuta, and their status there, is tracked in
+Each patch is one concern, formatted, and builds and passes the SDK tests
+on its own, with a few focused tests. Patches that could go to Tuta come
+first, internal ones last; which is which, and their status, is tracked in
 [`SDK_UPSTREAM.md`](SDK_UPSTREAM.md).
 
 | Patch | Adds | Why it lives in the SDK |
 |---|---|---|
-| 01 batch | `load_multiple`: list elements by id, 100 per request | Transport and parsing are partly private; avoids one request per mail. |
-| 02 blob reads | Blob-backed entities (`MailDetailsBlob` bodies): scoped read tokens, cache, retries, container checks | Reuses the SDK's blob pipeline instead of a parallel one. |
-| 03 interactive session | Session creation that waits for a TOTP code, polls and cancels a pending second factor | Reuses services, key derivation and session bootstrap. |
-| 04 parse raw | Public entry into the serializer for raw entities | Lets inline event payloads and blob contents use the official parser. |
-| 05 optional empty | An empty optional encrypted value is null, as in TS `CryptoMapper` | Protocol fix, not bridge specific; an upstream candidate. |
-| 06 AEAD session reads | Decrypts AEAD v3 values with the session key and field context | Hooks the existing primitives into the entity decoder. |
-| 07 AEAD group reads | Decrypts AEAD v2 values with versioned group keys and the KDF nonce | Key resolution belongs with the key loader. |
+| 01 optional empty | An empty optional encrypted value is null, as in TS `CryptoMapper` | Protocol fix. |
+| 02 create session KDF | `create_session` normalizes the address and refuses a non-Argon2 KDF instead of sending a wrong verifier | Bug fix in the SDK's own login. |
+| 03 load multiple | `load_multiple`: list elements by id, 100 per request | Transport and parsing are partly private; avoids one request per mail. |
+| 04 blob downloads | `download_blobs`: instance-scoped read tokens, 100 blobs per request, retry and failover | Reuses the SDK's token service and blob servers. Attachments. |
+| 05 blob elements | `load_blob_element`: a blob element (`MailDetailsBlob`) from its archive | Same pipeline as 04. Mail bodies. |
+| 06 parse raw | `parse_raw`: a raw JSON entity through the serializer | Inline event payloads and blob contents use the official parser. |
+| 07 interactive session | `initiate_session` and the TOTP second-factor calls | Reuses services, key derivation and session bootstrap. |
+| 08 owner session key | `decrypt_parsed` with a session key from the owning instance | Blob elements and draft details have no key of their own. |
+| 09 AEAD session reads | Decrypts AEAD v3 values with the session key and field context | Hooks the existing primitives into the entity decoder. |
+| 10 AEAD group reads | Decrypts AEAD v2 values with versioned group keys and the KDF nonce | Key resolution belongs with the key loader. |
 
 What the fork used to carry beyond this (event bus client, folder tree,
 MOVE, `MailSetEntry` id codec, inline event decryption) composes from the

@@ -30,13 +30,16 @@ Status: `planned`, `open #N`, `merged in <release>`, `declined #N`,
 
 | Patch | PR title | Status | Notes |
 |---|---|---|---|
-| 05 optional empty | Treat empty optional encrypted values as null | planned | Bug fix, exact mirror of TS `CryptoMapper.decryptValue`. First candidate. |
-| 01 batch | Add load_multiple to EntityClient | planned | Same scope as declined #10854; only as a hand-written resubmission. |
-| 02 blob reads | Blob read tokens, blob download, BlobElement loading | planned, needs reshaping | Same area as declined #10870. To be split into PR-sized patches in the TS `loadMultiple` shape. |
-| 03 interactive session | KDF check and address normalisation in create_session | planned, needs splitting | The bug fix part only; the 2FA API is the declined #10871 scope and stays internal. |
-| 04 parse raw | | internal | Plumbing with no TS counterpart. |
-| 06 AEAD session reads | | internal | Tuta is reworking AEAD on `crypto/dev` with a different v2 protocol. |
-| 07 AEAD group reads | | internal | Same. Its owner-session-key decryption part may become a separate candidate. |
+| 01 optional empty | Treat an empty optional encrypted value as null | planned | Bug fix, exact mirror of TS `CryptoMapper.decryptValue`. First candidate. |
+| 02 create session KDF | Normalize the address and check the KDF in create_session | planned | Bug fix: a Bcrypt account gets a wrong verifier today. |
+| 03 load multiple | Add load_multiple to EntityClient and CryptoEntityClient | planned | Same scope as declined #10854; only as a hand-written resubmission. |
+| 04 blob downloads | | internal for now | Same area as declined #10870. An upstream version would follow TS, where blob elements load through `loadMultiple`. |
+| 05 blob elements | | internal for now | Same. |
+| 06 parse raw | | internal | Plumbing with no TS counterpart. |
+| 07 interactive session | | internal | The declined #10871 scope. |
+| 08 owner session key | Decrypt a parsed entity with a session key from its owner | maybe | TS passes a key provider (`keyProviderFromInstance`); an upstream version may need that shape. |
+| 09 AEAD session reads | | internal | Tuta is reworking AEAD on `crypto/dev` with a different v2 protocol. |
+| 10 AEAD group reads | | internal | Same. |
 
 ## History
 

@@ -1,0 +1,170 @@
+From 2abab08f328c84f7f20fe11432fd6faa77300d23 Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:04:00 +0200
+Subject: [PATCH] [sdk] Load a blob element from its archive
+
+Adds BlobFacade::load_blob_element for BlobElement types such as
+MailDetailsBlob: requests an archive-scoped read token and fetches the
+element from the blob servers, with the same retry and failover as
+blob downloads. It returns the JSON payload; parsing and decryption
+with the owner's session key are left to the caller.
+---
+ .../sdk/src/blobs/blob_access_token_facade.rs |   2 +
+ .../rust/sdk/src/blobs/blob_facade/read.rs    | 102 +++++++++++++++++-
+ 2 files changed, 103 insertions(+), 1 deletion(-)
+
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
+index 606b25accf..9eda731631 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
+@@ -20,6 +20,7 @@ use std::sync::Arc;
+ #[derive(Clone, Hash, PartialEq, Eq)]
+ #[cfg_attr(test, derive(Debug))]
+ pub(crate) enum ReadTokenKey {
++	Archive(GeneratedId),
+ 	Instance {
+ 		archive: GeneratedId,
+ 		list: GeneratedId,
+@@ -102,6 +103,7 @@ impl BlobAccessTokenFacade {
+ 					))
+ 				};
+ 				let (archive, instance, data_type) = match key {
++					ReadTokenKey::Archive(archive) => (archive, None, None),
+ 					ReadTokenKey::Instance {
+ 						archive,
+ 						list,
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
+index 28961e9233..e2b5baf6cf 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
+@@ -5,15 +5,54 @@ use crate::bindings::rest_client::{
+ use crate::blobs::blob_access_token_facade::ReadTokenKey;
+ use crate::entities::generated::storage::{BlobGetIn, BlobId, BlobServerAccessInfo};
+ use crate::entities::Entity;
++use crate::metamodel::ElementType;
+ use crate::rest_error::HttpError;
+ use crate::tutanota_constants::ArchiveDataType;
+ use crate::util::BASE64_EXT;
+-use crate::{ApiCallError, CustomId, GeneratedId, IdTupleGenerated};
++use crate::{ApiCallError, CustomId, GeneratedId, IdTupleGenerated, TypeRef};
+ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+ use std::collections::HashMap;
+ use std::future::Future;
+ 
+ impl BlobFacade {
++	/// Loads encrypted blob elements from an archive owned by the current user.
++	/// The response is a JSON array, mapped and decrypted by the caller.
++	pub async fn load_blob_element(
++		&self,
++		type_ref: &TypeRef,
++		id: &IdTupleGenerated,
++	) -> Result<Vec<u8>, ApiCallError> {
++		let model = self
++			.type_model_provider
++			.resolve_client_type_ref(type_ref)
++			.ok_or_else(|| ApiCallError::internal(format!("Unknown blob type {type_ref}")))?;
++		if model.element_type != ElementType::BlobElement {
++			return Err(ApiCallError::internal(
++				"Expected a blob element type".to_owned(),
++			));
++		}
++		let path = format!(
++			"/rest/{}/{}/{}",
++			type_ref.app,
++			model.name.to_lowercase(),
++			id.list_id
++		);
++		let path = path.as_str();
++		self.with_read_token(
++			&ReadTokenKey::Archive(id.list_id.clone()),
++			|info| async move {
++				self.read_from_servers(
++					&info,
++					path,
++					model.version,
++					vec![("ids".to_owned(), id.element_id.to_string())],
++				)
++				.await
++			},
++		)
++		.await
++	}
++
+ 	/// Downloads encrypted blobs authorized by a referencing instance, in batches of 100.
+ 	/// This does not require ownership of the archive containing those blobs.
+ 	pub async fn download_blobs(
+@@ -221,6 +260,7 @@ mod tests {
+ 	};
+ 	use crate::blobs::blob_access_token_facade::MockBlobAccessTokenFacade;
+ 	use crate::entities::generated::storage::{BlobServerAccessInfo, BlobServerUrl};
++	use crate::entities::generated::tutanota::MailDetailsBlob;
+ 	use crate::instance_mapper::InstanceMapper;
+ 	use crate::json_serializer::JsonSerializer;
+ 	use crate::type_model_provider::TypeModelProvider;
+@@ -301,6 +341,66 @@ mod tests {
+ 		}
+ 	}
+ 	#[tokio::test]
++	async fn blob_element_retries_transient_server_then_returns_body() {
++		let mut token = MockBlobAccessTokenFacade::default();
++		token
++			.expect_request_read_token()
++			.times(1)
++			.returning(|_| Ok(info()));
++		let mut rest = MockRestClient::new();
++		rest.expect_request_binary()
++			.times(1)
++			.withf(|url, _, _| url.starts_with("https://first/"))
++			.returning(|_, _, _| {
++				Ok(RestResponse {
++					status: 404,
++					headers: HashMap::new(),
++					body: None,
++				})
++			});
++		rest.expect_request_binary()
++			.times(1)
++			.withf(|url, _, _| url.starts_with("https://second/"))
++			.returning(|_, _, _| {
++				Ok(RestResponse {
++					status: 200,
++					headers: HashMap::new(),
++					body: Some(b"[]".to_vec()),
++				})
++			});
++		assert_eq!(
++			facade(rest, token)
++				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
++				.await
++				.unwrap(),
++			b"[]"
++		);
++	}
++	#[tokio::test]
++	async fn permanent_errors_and_empty_bodies_do_not_retry() {
++		for status in [401, 474, 200] {
++			let mut token = MockBlobAccessTokenFacade::default();
++			token
++				.expect_request_read_token()
++				.times(1)
++				.returning(|_| Ok(info()));
++			let mut rest = MockRestClient::new();
++			rest.expect_request_binary()
++				.times(1)
++				.returning(move |_, _, _| {
++					Ok(RestResponse {
++						status,
++						headers: HashMap::new(),
++						body: None,
++					})
++				});
++			assert!(facade(rest, token)
++				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
++				.await
++				.is_err());
++		}
++	}
++	#[tokio::test]
+ 	async fn binary_download_uses_instance_scope_and_chunks_at_100() {
+ 		let mut token = MockBlobAccessTokenFacade::default();
+ 		token.expect_request_read_token().times(1).withf(|key| matches!(key,ReadTokenKey::Instance{archive,list,element,data_type} if archive.as_str()=="archive" && list.as_str()=="files" && element.as_str()=="file" && *data_type==ArchiveDataType::Attachments)).returning(|_|Ok(info()));

@@ -4,6 +4,10 @@
 #   scripts/sdk-generate.sh            apply sdk/patches on sdk/BASE in tuta-repo
 #   scripts/sdk-generate.sh --check    verify the tuta-repo pin is exactly that
 #   scripts/sdk-generate.sh --push     also publish it on the SDK fork
+#   scripts/sdk-generate.sh --verify-each
+#                                      also check every patch on its own: after
+#                                      each one the SDK must be formatted and
+#                                      pass its tests (slow; run before a PR)
 #
 # The fork is only a place to host the result: nothing there is edited by
 # hand. The patches in sdk/patches are the source of truth, and the output
@@ -12,6 +16,7 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
+root=$PWD
 UPSTREAM=https://github.com/tutao/tutanota.git
 FORK=https://github.com/spartanz51/tutanota.git
 
@@ -20,7 +25,8 @@ case "${1:-}" in
 	"") ;;
 	--check) mode=check ;;
 	--push) mode=push ;;
-	*) echo "usage: $0 [--check|--push]" >&2; exit 2 ;;
+	--verify-each) mode=verify-each ;;
+	*) echo "usage: $0 [--check|--push|--verify-each]" >&2; exit 2 ;;
 esac
 
 tag=$(sed -n 's/^tag=//p' sdk/BASE)
@@ -43,11 +49,28 @@ git -C "$sdk" worktree add --quiet --detach "$work" "$base"
 
 export GIT_COMMITTER_NAME="TutaBridge SDK generator"
 export GIT_COMMITTER_EMAIL="a.m@tuta.com"
-if ! git -C "$work" am --quiet --keep-non-patch --committer-date-is-author-date "$PWD"/sdk/patches/*.patch; then
-	echo "sdk/patches do not apply on $tag" >&2
-	git -C "$work" am --abort || true
-	exit 1
-fi
+for patch in "$PWD"/sdk/patches/*.patch; do
+	name=$(basename "$patch")
+	if ! git -C "$work" am --quiet --keep-non-patch --committer-date-is-author-date "$patch"; then
+		git -C "$work" am --abort || true
+		# A patch whose change is already in the release reverses cleanly: Tuta
+		# has taken it (or an equivalent), and it can be deleted.
+		if git -C "$work" apply --check --reverse "$patch" 2>/dev/null; then
+			echo "$name is already included in $tag: remove it from sdk/patches" >&2
+		else
+			echo "$name does not apply on $tag: update it in sdk/patches" >&2
+		fi
+		exit 1
+	fi
+	if [ "$mode" = verify-each ]; then
+		(cd "$work/tuta-sdk/rust" && cargo fmt --check -p tuta-sdk >/dev/null) ||
+			{ echo "$name: not rustfmt-clean" >&2; exit 1; }
+		(cd "$work" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target/sdk-verify}" \
+			cargo test --quiet -p tuta-sdk >/dev/null 2>&1) ||
+			{ echo "$name: the SDK tests fail after it" >&2; exit 1; }
+		echo "$name: formatted, tests pass"
+	fi
+done
 generated=$(git -C "$work" rev-parse HEAD)
 
 # The reported client version must be the release's own, never an edit.
@@ -65,7 +88,7 @@ check)
 	fi
 	echo "tuta-repo matches $tag + $(ls sdk/patches/*.patch | wc -l | tr -d ' ') patches ($generated)"
 	;;
-generate | push)
+generate | push | verify-each)
 	git -C "$sdk" checkout --quiet --detach "$generated"
 	if [ "$mode" = push ]; then
 		git -C "$sdk" push --quiet "$FORK" "$generated:refs/heads/generated/${tag#tutanota-release-}"

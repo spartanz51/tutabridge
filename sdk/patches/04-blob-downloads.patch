@@ -1,21 +1,22 @@
-From 7fb982d6a2382a689ef3d594f6319fe17e94c726 Mon Sep 17 00:00:00 2001
+From eee918b41bd68d5679e3793437e3f4f7ca82c691 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
-Date: Wed, 23 Sep 2026 15:38:44 +0200
-Subject: [PATCH] [sdk] Read blob elements
+Date: Thu, 24 Sep 2026 12:03:00 +0200
+Subject: [PATCH] [sdk] Download blobs referenced by an instance
 
-Loads blob-backed entities such as MailDetailsBlob: scoped read tokens with a
-cache, download with retries and container validation, reusing the SDK's
-blob pipeline.
-
+Adds BlobFacade::download_blobs: requests a read token scoped to the
+referencing instance (as TS requestReadTokenBlobs does, so the archive
+need not be owned), downloads the blobs 100 per request, and returns the
+encrypted payloads by blob id. A 403 evicts the token and restarts the
+read once (doBlobRequestWithRetry); errors specific to one blob server
+fail over to the next (tryServers). Read tokens are cached apart from
+write tokens.
 ---
  .../sdk/src/blobs/blob_access_token_cache.rs  |  17 +-
- .../sdk/src/blobs/blob_access_token_facade.rs | 185 ++++-
+ .../sdk/src/blobs/blob_access_token_facade.rs | 187 +++++++-
  tuta-sdk/rust/sdk/src/blobs/blob_facade.rs    |   2 +
- .../rust/sdk/src/blobs/blob_facade/read.rs    | 750 ++++++++++++++++++
- .../rust/sdk/tests/fixtures/blob_read_ts.json |  26 +
- 5 files changed, 968 insertions(+), 12 deletions(-)
+ .../rust/sdk/src/blobs/blob_facade/read.rs    | 452 ++++++++++++++++++
+ 4 files changed, 646 insertions(+), 12 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
- create mode 100644 tuta-sdk/rust/sdk/tests/fixtures/blob_read_ts.json
 
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs
 index dae127d190..5bf7dfa05f 100644
@@ -78,7 +79,7 @@ index dae127d190..5bf7dfa05f 100644
  		cache.remove(key);
  	}
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
-index a432c6c057..9447f67e33 100644
+index a432c6c057..606b25accf 100644
 --- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
 @@ -1,7 +1,7 @@
@@ -90,7 +91,7 @@ index a432c6c057..9447f67e33 100644
  };
  use crate::services::generated::storage::BlobAccessTokenService;
  #[cfg_attr(test, mockall_double::double)]
-@@ -16,11 +16,25 @@ use base64::Engine;
+@@ -16,11 +16,24 @@ use base64::Engine;
  use crypto_primitives::randomizer_facade::RandomizerFacade;
  use std::sync::Arc;
  
@@ -98,7 +99,6 @@ index a432c6c057..9447f67e33 100644
 +#[derive(Clone, Hash, PartialEq, Eq)]
 +#[cfg_attr(test, derive(Debug))]
 +pub(crate) enum ReadTokenKey {
-+	Archive(GeneratedId),
 +	Instance {
 +		archive: GeneratedId,
 +		list: GeneratedId,
@@ -116,7 +116,7 @@ index a432c6c057..9447f67e33 100644
  	randomizer_facade: RandomizerFacade,
  	service_executor: Arc<ResolvingServiceExecutor>,
  }
-@@ -33,7 +47,8 @@ impl BlobAccessTokenFacade {
+@@ -33,7 +46,8 @@ impl BlobAccessTokenFacade {
  		date_provider: Arc<dyn DateProvider>,
  	) -> Self {
  		Self {
@@ -126,7 +126,7 @@ index a432c6c057..9447f67e33 100644
  			randomizer_facade,
  			service_executor,
  		}
-@@ -74,6 +89,65 @@ impl BlobAccessTokenFacade {
+@@ -74,6 +88,64 @@ impl BlobAccessTokenFacade {
  			.await
  	}
  
@@ -144,7 +144,6 @@ index a432c6c057..9447f67e33 100644
 +					))
 +				};
 +				let (archive, instance, data_type) = match key {
-+					ReadTokenKey::Archive(archive) => (archive, None, None),
 +					ReadTokenKey::Instance {
 +						archive,
 +						list,
@@ -192,7 +191,7 @@ index a432c6c057..9447f67e33 100644
  	/// Remove a given write token from the cache.
  	#[allow(unused)]
  	pub fn evict_access_token(&self, key: &BlobWriteTokenKey) {
-@@ -129,4 +203,111 @@ mod tests {
+@@ -129,4 +201,115 @@ mod tests {
  			.expect("failed to request token");
  		assert_eq!(expected_access_info, cached_access_info);
  	}
@@ -270,7 +269,7 @@ index a432c6c057..9447f67e33 100644
 +	}
 +
 +	#[tokio::test]
-+	async fn archive_read_token_is_refetched_after_eviction() {
++	async fn read_token_is_refetched_after_eviction() {
 +		use crate::blobs::blob_access_token_facade::ReadTokenKey;
 +		let mut executor = MockResolvingServiceExecutor::default();
 +		executor
@@ -278,10 +277,9 @@ index a432c6c057..9447f67e33 100644
 +			.times(2)
 +			.withf(|input, _| {
 +				let read = input.read.as_ref().unwrap();
-+				input.archiveDataType.is_none()
-+					&& input.write.is_none()
-+					&& read.instanceListId.is_none()
-+					&& read.instanceIds.is_empty()
++				input.write.is_none()
++					&& read.instanceListId == Some(GeneratedId("list".into()))
++					&& read.instanceIds.len() == 1
 +			})
 +			.returning(|_, _| {
 +				Ok(BlobAccessTokenPostOut {
@@ -297,7 +295,12 @@ index a432c6c057..9447f67e33 100644
 +			Arc::new(executor),
 +			Arc::new(DateProviderStub::new(0)),
 +		);
-+		let key = ReadTokenKey::Archive(GeneratedId("archive".into()));
++		let key = ReadTokenKey::Instance {
++			archive: GeneratedId("archive".into()),
++			list: GeneratedId("list".into()),
++			element: GeneratedId("element".into()),
++			data_type: ArchiveDataType::Attachments,
++		};
 +		facade.request_read_token(&key).await.unwrap();
 +		facade.request_read_token(&key).await.unwrap();
 +		facade.evict_read_token(&key);
@@ -316,10 +319,10 @@ index 992e87c3df..34917c23d5 100644
  use crate::bindings::rest_client::RestClient;
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
 new file mode 100644
-index 0000000000..bfab729835
+index 0000000000..28961e9233
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
-@@ -0,0 +1,750 @@
+@@ -0,0 +1,452 @@
 +use super::BlobFacade;
 +use crate::bindings::rest_client::{
 +	encode_query_params, HttpMethod, RestClientError, RestClientOptions,
@@ -327,54 +330,15 @@ index 0000000000..bfab729835
 +use crate::blobs::blob_access_token_facade::ReadTokenKey;
 +use crate::entities::generated::storage::{BlobGetIn, BlobId, BlobServerAccessInfo};
 +use crate::entities::Entity;
-+use crate::metamodel::ElementType;
 +use crate::rest_error::HttpError;
 +use crate::tutanota_constants::ArchiveDataType;
 +use crate::util::BASE64_EXT;
-+use crate::{ApiCallError, CustomId, GeneratedId, IdTupleGenerated, TypeRef};
++use crate::{ApiCallError, CustomId, GeneratedId, IdTupleGenerated};
 +use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 +use std::collections::HashMap;
 +use std::future::Future;
 +
 +impl BlobFacade {
-+	/// Loads encrypted blob elements from an archive owned by the current user.
-+	/// The response is a JSON array, mapped and decrypted by the caller.
-+	pub async fn load_blob_element(
-+		&self,
-+		type_ref: &TypeRef,
-+		id: &IdTupleGenerated,
-+	) -> Result<Vec<u8>, ApiCallError> {
-+		let model = self
-+			.type_model_provider
-+			.resolve_client_type_ref(type_ref)
-+			.ok_or_else(|| ApiCallError::internal(format!("Unknown blob type {type_ref}")))?;
-+		if model.element_type != ElementType::BlobElement {
-+			return Err(ApiCallError::internal(
-+				"Expected a blob element type".to_owned(),
-+			));
-+		}
-+		let path = format!(
-+			"/rest/{}/{}/{}",
-+			type_ref.app,
-+			model.name.to_lowercase(),
-+			id.list_id
-+		);
-+		let path = path.as_str();
-+		self.with_read_token(
-+			&ReadTokenKey::Archive(id.list_id.clone()),
-+			|info| async move {
-+				self.read_from_servers(
-+					&info,
-+					path,
-+					model.version,
-+					vec![("ids".to_owned(), id.element_id.to_string())],
-+				)
-+				.await
-+			},
-+		)
-+		.await
-+	}
-+
 +	/// Downloads encrypted blobs authorized by a referencing instance, in batches of 100.
 +	/// This does not require ownership of the archive containing those blobs.
 +	pub async fn download_blobs(
@@ -582,7 +546,6 @@ index 0000000000..bfab729835
 +	};
 +	use crate::blobs::blob_access_token_facade::MockBlobAccessTokenFacade;
 +	use crate::entities::generated::storage::{BlobServerAccessInfo, BlobServerUrl};
-+	use crate::entities::generated::tutanota::MailDetailsBlob;
 +	use crate::instance_mapper::InstanceMapper;
 +	use crate::json_serializer::JsonSerializer;
 +	use crate::type_model_provider::TypeModelProvider;
@@ -660,102 +623,6 @@ index 0000000000..bfab729835
 +			duplicate,
 +		] {
 +			assert!(parse_multiple_blobs_response(&bad).is_err());
-+		}
-+	}
-+	#[tokio::test]
-+	async fn blob_element_failover_and_token_refresh_are_bounded() {
-+		let mut token = MockBlobAccessTokenFacade::default();
-+		token
-+			.expect_request_read_token()
-+			.times(2)
-+			.withf(|key| matches!(key, ReadTokenKey::Archive(_)))
-+			.returning(|_| Ok(info()));
-+		token.expect_evict_read_token().times(1).return_const(());
-+		let statuses = Arc::new(Mutex::new(vec![500, 403, 500, 403].into_iter()));
-+		let mut rest = MockRestClient::new();
-+		rest.expect_request_binary()
-+			.times(4)
-+			.returning(move |url, method, options| {
-+				assert!(url.contains("/rest/tutanota/maildetailsblob/archive?"));
-+				assert!(url.contains("ids=element"));
-+				assert!(url.contains("cv="));
-+				assert_eq!(method, HttpMethod::GET);
-+				assert!(options.body.is_none());
-+				Ok(RestResponse {
-+					status: statuses.lock().unwrap().next().unwrap(),
-+					headers: HashMap::new(),
-+					body: None,
-+				})
-+			});
-+		let error = facade(rest, token)
-+			.load_blob_element(&MailDetailsBlob::type_ref(), &id())
-+			.await
-+			.unwrap_err();
-+		assert!(matches!(
-+			error,
-+			ApiCallError::ServerResponseError {
-+				source: HttpError::NotAuthorizedError
-+			}
-+		));
-+	}
-+	#[tokio::test]
-+	async fn blob_element_retries_transient_server_then_returns_body() {
-+		let mut token = MockBlobAccessTokenFacade::default();
-+		token
-+			.expect_request_read_token()
-+			.times(1)
-+			.returning(|_| Ok(info()));
-+		let mut rest = MockRestClient::new();
-+		rest.expect_request_binary()
-+			.times(1)
-+			.withf(|url, _, _| url.starts_with("https://first/"))
-+			.returning(|_, _, _| {
-+				Ok(RestResponse {
-+					status: 404,
-+					headers: HashMap::new(),
-+					body: None,
-+				})
-+			});
-+		rest.expect_request_binary()
-+			.times(1)
-+			.withf(|url, _, _| url.starts_with("https://second/"))
-+			.returning(|_, _, _| {
-+				Ok(RestResponse {
-+					status: 200,
-+					headers: HashMap::new(),
-+					body: Some(b"[]".to_vec()),
-+				})
-+			});
-+		assert_eq!(
-+			facade(rest, token)
-+				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
-+				.await
-+				.unwrap(),
-+			b"[]"
-+		);
-+	}
-+	#[tokio::test]
-+	async fn permanent_errors_and_empty_bodies_do_not_retry() {
-+		for status in [401, 474, 200] {
-+			let mut token = MockBlobAccessTokenFacade::default();
-+			token
-+				.expect_request_read_token()
-+				.times(1)
-+				.returning(|_| Ok(info()));
-+			let mut rest = MockRestClient::new();
-+			rest.expect_request_binary()
-+				.times(1)
-+				.returning(move |_, _, _| {
-+					Ok(RestResponse {
-+						status,
-+						headers: HashMap::new(),
-+						body: None,
-+					})
-+				});
-+			assert!(facade(rest, token)
-+				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
-+				.await
-+				.is_err());
 +		}
 +	}
 +	#[tokio::test]
@@ -857,108 +724,6 @@ index 0000000000..bfab729835
 +		}
 +	}
 +	// Expectations obtained by executing the upstream TS functions at the fixture's commit.
-+	fn ts_vectors() -> serde_json::Value {
-+		serde_json::from_str(include_str!(concat!(
-+			env!("CARGO_MANIFEST_DIR"),
-+			"/tests/fixtures/blob_read_ts.json"
-+		)))
-+		.unwrap()
-+	}
-+	fn from_hex(hex: &str) -> Vec<u8> {
-+		hex.as_bytes()
-+			.chunks_exact(2)
-+			.map(|bytes| u8::from_str_radix(std::str::from_utf8(bytes).unwrap(), 16).unwrap())
-+			.collect()
-+	}
-+	#[test]
-+	fn binary_parser_matches_ts_vectors_with_explicit_stricter_framing() {
-+		for case in ts_vectors()["binary"].as_array().unwrap() {
-+			let result = parse_multiple_blobs_response(&from_hex(case["hex"].as_str().unwrap()));
-+			assert_eq!(
-+				result.is_ok(),
-+				case["rust_accept"].as_bool().unwrap(),
-+				"{}",
-+				case["name"]
-+			);
-+			if let Ok(result) = result {
-+				let expected = case["entries"].as_array().unwrap();
-+				assert_eq!(result.len(), expected.len());
-+				for entry in expected {
-+					assert_eq!(
-+						result[&GeneratedId(entry[0].as_str().unwrap().into())],
-+						from_hex(entry[1].as_str().unwrap())
-+					);
-+				}
-+			}
-+		}
-+	}
-+	#[tokio::test]
-+	async fn server_failover_and_refresh_match_ts_vectors() {
-+		for case in ts_vectors()["retries"].as_array().unwrap() {
-+			let evictions = case["evictions"].as_u64().unwrap() as usize;
-+			let mut token = MockBlobAccessTokenFacade::default();
-+			token
-+				.expect_request_read_token()
-+				.times(evictions + 1)
-+				.returning(|_| Ok(info()));
-+			token
-+				.expect_evict_read_token()
-+				.times(evictions)
-+				.return_const(());
-+			let statuses: Vec<u32> = case["statuses"]
-+				.as_array()
-+				.unwrap()
-+				.iter()
-+				.map(|s| s.as_u64().unwrap() as u32)
-+				.collect();
-+			let statuses = Arc::new(Mutex::new(statuses.into_iter()));
-+			let seen = Arc::new(Mutex::new(Vec::new()));
-+			let calls = seen.clone();
-+			let mut rest = MockRestClient::new();
-+			rest.expect_request_binary()
-+				.times(case["calls"].as_array().unwrap().len())
-+				.returning(move |url, _, _| {
-+					calls
-+						.lock()
-+						.unwrap()
-+						.push(url.split('/').nth(2).unwrap().to_owned());
-+					let status = statuses.lock().unwrap().next().unwrap();
-+					if status == 0 {
-+						return Err(RestClientError::NetworkError);
-+					}
-+					Ok(RestResponse {
-+						status,
-+						headers: HashMap::new(),
-+						body: Some(b"[]".to_vec()),
-+					})
-+				});
-+			let result = facade(rest, token)
-+				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
-+				.await;
-+			let error = match result {
-+				Ok(bytes) => {
-+					assert_eq!(bytes, b"[]");
-+					serde_json::Value::Null
-+				},
-+				Err(ApiCallError::ServerResponseError { source }) => serde_json::Value::String(
-+					match source {
-+						HttpError::NotAuthorizedError => "NotAuthorizedError",
-+						HttpError::NotAuthenticatedError => "NotAuthenticatedError",
-+						HttpError::InvalidSoftwareVersionError => "InvalidSoftwareVersionError",
-+						HttpError::NotFoundError => "NotFoundError",
-+						other => panic!("Unexpected error: {other:?}"),
-+					}
-+					.into(),
-+				),
-+				Err(other) => panic!("Unexpected error: {other:?}"),
-+			};
-+			assert_eq!(error, case["error"]);
-+			assert_eq!(
-+				serde_json::to_value(&*seen.lock().unwrap()).unwrap(),
-+				case["calls"]
-+			);
-+		}
-+	}
 +	#[tokio::test]
 +	async fn binary_refresh_restarts_the_complete_archive_read_once() {
 +		let mut token = MockBlobAccessTokenFacade::default();
@@ -1009,96 +774,4 @@ index 0000000000..bfab729835
 +		assert_eq!(result.len(), 101);
 +		assert_eq!(*sizes.lock().unwrap(), vec![100, 1, 100, 1]);
 +	}
-+	#[tokio::test]
-+	async fn token_service_403_also_gets_one_refresh() {
-+		let mut sequence = mockall::Sequence::new();
-+		let mut token = MockBlobAccessTokenFacade::default();
-+		token
-+			.expect_request_read_token()
-+			.times(1)
-+			.in_sequence(&mut sequence)
-+			.returning(|_| Err(HttpError::NotAuthorizedError.into()));
-+		token
-+			.expect_evict_read_token()
-+			.times(1)
-+			.in_sequence(&mut sequence)
-+			.return_const(());
-+		token
-+			.expect_request_read_token()
-+			.times(1)
-+			.in_sequence(&mut sequence)
-+			.returning(|_| Ok(info()));
-+		let mut rest = MockRestClient::new();
-+		rest.expect_request_binary().times(1).returning(|_, _, _| {
-+			Ok(RestResponse {
-+				status: 200,
-+				headers: HashMap::new(),
-+				body: Some(b"[]".to_vec()),
-+			})
-+		});
-+		assert_eq!(
-+			facade(rest, token)
-+				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
-+				.await
-+				.unwrap(),
-+			b"[]"
-+		);
-+	}
-+	#[tokio::test]
-+	async fn get_rejects_unexpected_success_statuses() {
-+		// RestClient.ts accepts 201 only for POST; blob reads are GETs.
-+		for status in [201, 204, 206] {
-+			let mut token = MockBlobAccessTokenFacade::default();
-+			token
-+				.expect_request_read_token()
-+				.times(1)
-+				.returning(|_| Ok(info()));
-+			let mut rest = MockRestClient::new();
-+			rest.expect_request_binary()
-+				.times(1)
-+				.returning(move |_, _, _| {
-+					Ok(RestResponse {
-+						status,
-+						headers: HashMap::new(),
-+						body: Some(b"[]".to_vec()),
-+					})
-+				});
-+			assert!(facade(rest, token)
-+				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
-+				.await
-+				.is_err());
-+		}
-+	}
-+}
-diff --git a/tuta-sdk/rust/sdk/tests/fixtures/blob_read_ts.json b/tuta-sdk/rust/sdk/tests/fixtures/blob_read_ts.json
-new file mode 100644
-index 0000000000..86dd29bcda
---- /dev/null
-+++ b/tuta-sdk/rust/sdk/tests/fixtures/blob_read_ts.json
-@@ -0,0 +1,26 @@
-+{
-+"reference":"46270557c251d1a31157d72e0aaf0cc63bb33ecf",
-+"binary":[
-+{"name":"empty","hex":"00000000","ts_accept":true,"rust_accept":true,"entries":[]},
-+{"name":"one","hex":"0000000101010101010101010100000000000000000003007fff","ts_accept":true,"rust_accept":true,"entries":[["-F30-F30-F30","007fff"]]},
-+{"name":"two","hex":"000000020202020202020202020000000000000000000001010101010101010100000000000000000003007fff","ts_accept":true,"rust_accept":true,"entries":[["-V71-V71-V71",""],["-F30-F30-F30","007fff"]]},
-+{"name":"truncated-count","hex":"000000","ts_accept":false,"rust_accept":false,"error":"RangeError"},
-+{"name":"negative-count","hex":"ffffffff","ts_accept":false,"rust_accept":false,"error":"Error"},
-+{"name":"huge-count","hex":"7fffffff","ts_accept":false,"rust_accept":false,"error":"Error"},
-+{"name":"wrong-count","hex":"000000020101010101010101010000000000000000000101","ts_accept":false,"rust_accept":false,"error":"Error"},
-+{"name":"truncated-payload","hex":"0000000101010101010101010100000000000000000003007f","ts_accept":false,"rust_accept":false,"error":"Error"},
-+{"name":"negative-size","hex":"00000001010101010101010101000000000000ffffffff007fff","ts_accept":false,"rust_accept":false,"error":"Error"},
-+{"name":"zero-with-trailing","hex":"0000000001","ts_accept":true,"rust_accept":false,"entries":[]},
-+{"name":"duplicate-hidden-by-map","hex":"0000000101010101010101010100000000000000000001010101010101010101010000000000000000000102","ts_accept":true,"rust_accept":false,"entries":[["-F30-F30-F30","02"]]}
-+],
-+"retries":[
-+{"statuses":[500,403,500,403],"calls":["first","second","first","second"],"evictions":1,"error":"NotAuthorizedError"},
-+{"statuses":[404,200],"calls":["first","second"],"evictions":0,"error":null},
-+{"statuses":[401,200],"calls":["first"],"evictions":0,"error":"NotAuthenticatedError"},
-+{"statuses":[474,200],"calls":["first"],"evictions":0,"error":"InvalidSoftwareVersionError"},
-+{"statuses":[403,200],"calls":["first","first"],"evictions":1,"error":null},
-+{"statuses":[500,404],"calls":["first","second"],"evictions":0,"error":"NotFoundError"},
-+{"statuses":[0,200],"calls":["first","second"],"evictions":0,"error":null},
-+{"statuses":[403,403],"calls":["first","first"],"evictions":1,"error":"NotAuthorizedError"}
-+]
 +}

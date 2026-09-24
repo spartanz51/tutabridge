@@ -1,0 +1,122 @@
+From 6d38327ac1d1783d4466244f878c13160f130f4c Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:01:00 +0200
+Subject: [PATCH] [sdk] Normalize the address and check the KDF in
+ create_session
+
+create_session always derived the passphrase key with Argon2id,
+whatever KDF the salt service reports, so a Bcrypt account got a wrong
+verifier and a misleading authentication error. It now refuses an
+unsupported KDF before creating a session. It also trims and lowercases
+the mail address, as the TS LoginFacade does, so the salt and the
+session are keyed like the web client's.
+---
+ tuta-sdk/rust/sdk/src/lib.rs              | 15 ++++++
+ tuta-sdk/rust/sdk/tests/create_session.rs | 58 ++++++++++++++++++++++-
+ 2 files changed, 72 insertions(+), 1 deletion(-)
+
+diff --git a/tuta-sdk/rust/sdk/src/lib.rs b/tuta-sdk/rust/sdk/src/lib.rs
+index ee91fae427..7ce9a9370a 100644
+--- a/tuta-sdk/rust/sdk/src/lib.rs
++++ b/tuta-sdk/rust/sdk/src/lib.rs
+@@ -335,6 +335,10 @@ impl Sdk {
+ 		mail_address: &str,
+ 		passphrase: &str,
+ 	) -> Result<Arc<LoggedInSdk>, LoginError> {
++		// Like the TS LoginFacade: the salt and the session are keyed by the
++		// normalized address.
++		let mail_address = mail_address.trim().to_lowercase();
++		let mail_address = mail_address.as_str();
+ 		let headers_provider = Arc::new(HeadersProvider::new(None));
+ 		let entity_facade = Arc::new(EntityFacadeImpl::new(
+ 			self.type_model_provider.clone(),
+@@ -359,6 +363,17 @@ impl Sdk {
+ 			.get::<SaltService>(salt_get_input, ExtraServiceParams::default())
+ 			.await?;
+ 
++		// Only Argon2id is implemented; deriving it for a Bcrypt account would
++		// send a wrong verifier and fail as a misleading authentication error.
++		if !matches!(
++			KdfType::try_from(salt_return.kdfVersion)?,
++			KdfType::Argon2id
++		) {
++			return Err(LoginError::InvalidKey {
++				error_message: "unsupported password KDF".to_string(),
++			});
++		}
++
+ 		let Ok(salt) = salt_return.salt.try_into() else {
+ 			return Err(LoginError::InvalidKey {
+ 				error_message: "salt has wrong length".to_string(),
+diff --git a/tuta-sdk/rust/sdk/tests/create_session.rs b/tuta-sdk/rust/sdk/tests/create_session.rs
+index fc17f81123..2e7848c6a0 100644
+--- a/tuta-sdk/rust/sdk/tests/create_session.rs
++++ b/tuta-sdk/rust/sdk/tests/create_session.rs
+@@ -1,6 +1,12 @@
++use std::collections::HashMap;
+ use std::error::Error;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
++use tutasdk::bindings::rest_client::{
++	HttpMethod, RestClient, RestClientError, RestClientOptions, RestResponse,
++};
+ use tutasdk::bindings::test_file_client::TestFileClient;
++use tutasdk::bindings::test_rest_client::TestRestClient;
++use tutasdk::login::LoginError;
+ use tutasdk::net::native_rest_client::NativeRestClient;
+ use tutasdk::Sdk;
+ 
+@@ -26,3 +32,53 @@ async fn sdk_can_create_new_session() -> Result<(), Box<dyn Error>> {
+ 
+ 	Ok(())
+ }
++
++/// Answers the salt request with a Bcrypt account and records every request.
++struct BcryptSaltServer {
++	model: TestRestClient,
++	requests: Mutex<Vec<String>>,
++}
++
++#[async_trait::async_trait]
++impl RestClient for BcryptSaltServer {
++	async fn request_binary(
++		&self,
++		url: String,
++		method: HttpMethod,
++		options: RestClientOptions,
++	) -> Result<RestResponse, RestClientError> {
++		if !url.contains("/saltservice") {
++			self.requests.lock().unwrap().push(url.clone());
++			return self.model.request_binary(url, method, options).await;
++		}
++		self.requests.lock().unwrap().push(url.replace("%40", "@"));
++		let salt = serde_json::json!({"421": "0", "422": "BwcHBwcHBwcHBwcHBwcHBw==", "2133": "0"});
++		Ok(RestResponse {
++			status: 200,
++			headers: HashMap::new(),
++			body: Some(serde_json::to_vec(&salt).unwrap()),
++		})
++	}
++}
++
++#[tokio::test]
++async fn create_session_refuses_a_bcrypt_account_before_creating_a_session() {
++	let server = Arc::new(BcryptSaltServer {
++		model: TestRestClient::new("http://test"),
++		requests: Mutex::new(vec![]),
++	});
++	let sdk = Sdk::new(
++		"http://test".to_string(),
++		server.clone(),
++		Arc::new(TestFileClient::default()),
++	);
++
++	let result = sdk.create_session(" Map-Free@Tutanota.de ", "map").await;
++
++	assert!(matches!(result, Err(LoginError::InvalidKey { .. })));
++	let requests = server.requests.lock().unwrap();
++	assert!(requests
++		.iter()
++		.any(|url| url.contains("map-free@tutanota.de")));
++	assert!(!requests.iter().any(|url| url.contains("/sessionservice")));
++}

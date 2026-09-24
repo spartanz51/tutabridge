@@ -1,0 +1,60 @@
+From 923e8a031293e764ddd178b4a72a392b6a02e3f9 Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:05:00 +0200
+Subject: [PATCH] [sdk] Expose parsing of a raw entity
+
+EntityClient::parse_raw runs a raw JSON entity through the serializer
+with the server type model, as load does internally, so payloads that
+arrive another way (inline event bus data, blob elements) enter the same
+decryption pipeline.
+---
+ tuta-sdk/rust/sdk/src/entity_client.rs | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/tuta-sdk/rust/sdk/src/entity_client.rs b/tuta-sdk/rust/sdk/src/entity_client.rs
+index 168a260212..485dae305e 100644
+--- a/tuta-sdk/rust/sdk/src/entity_client.rs
++++ b/tuta-sdk/rust/sdk/src/entity_client.rs
+@@ -48,6 +48,16 @@ impl EntityClient {
+ 		}
+ 	}
+ 
++	/// Parses a raw JSON entity with the server type model, as `load` does, for
++	/// payloads that arrive by another way (inline event bus data, blobs).
++	pub fn parse_raw(
++		&self,
++		type_ref: &TypeRef,
++		raw_entity: RawEntity,
++	) -> Result<ParsedEntity, ApiCallError> {
++		Ok(self.json_serializer.parse(type_ref, raw_entity)?)
++	}
++
+ 	#[allow(clippy::unused_async, unused)]
+ 	/// Gets an entity/instance of type `type_ref` from the backend
+ 	pub async fn load<Id: IdType>(
+@@ -481,6 +491,7 @@ mockall::mock! {
+ 		pub fn get_type_model_provider() -> Arc<TypeModelProvider>;
+ 		pub fn resolve_client_type_ref<'a>(&'a self, type_ref: &TypeRef) -> Result<&'a TypeModel, ApiCallError>;
+ 		pub fn resolve_server_type_ref(&self, type_ref: &TypeRef) -> Result<Arc<TypeModel>, ApiCallError>;
++		pub fn parse_raw(&self, type_ref: &TypeRef, raw_entity: RawEntity) -> Result<ParsedEntity, ApiCallError>;
+ 		pub async fn load<Id: IdType>(
+ 			&self,
+ 			type_ref: &TypeRef,
+@@ -703,6 +714,17 @@ mod stests {
+ 		assert!(result.is_empty());
+ 	}
+ 
++	#[test]
++	fn test_parse_raw_uses_the_server_type_model() {
++		let raw: RawEntity =
++			serde_json::from_str(r#"{"101":["list_id","element_id"],"102":"AQID"}"#).unwrap();
++
++		let parsed = load_multiple_client(MockRestClient::new())
++			.parse_raw(&TestListGeneratedElementIdEntity::type_ref(), raw)
++			.expect("success");
++		assert_eq!(parsed["102"], ElementValue::Bytes(vec![1, 2, 3]));
++	}
++
+ 	#[tokio::test]
+ 	async fn test_load_multiple_without_ids_sends_no_request() {
+ 		let mut rest_client = MockRestClient::new();
