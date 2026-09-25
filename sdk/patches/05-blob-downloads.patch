@@ -1,4 +1,4 @@
-From c27883d150baaabaac93ef38522c830b6e07cd3b Mon Sep 17 00:00:00 2001
+From 34e33c17690bcaa4d76090c453792ae6fb43d010 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:03:00 +0200
 Subject: [PATCH] [sdk] Download blobs referenced by an instance
@@ -14,8 +14,8 @@ write tokens.
  .../sdk/src/blobs/blob_access_token_cache.rs  |  17 +-
  .../sdk/src/blobs/blob_access_token_facade.rs | 177 +++++-
  tuta-sdk/rust/sdk/src/blobs/blob_facade.rs    |   2 +
- .../rust/sdk/src/blobs/blob_facade/read.rs    | 519 ++++++++++++++++++
- 4 files changed, 703 insertions(+), 12 deletions(-)
+ .../rust/sdk/src/blobs/blob_facade/read.rs    | 564 ++++++++++++++++++
+ 4 files changed, 748 insertions(+), 12 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
 
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_cache.rs
@@ -309,10 +309,10 @@ index 992e87c3df..34917c23d5 100644
  use crate::bindings::rest_client::RestClient;
 diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
 new file mode 100644
-index 0000000000..d8bdc61afc
+index 0000000000..85093cbbff
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,564 @@
 +use super::BlobFacade;
 +use crate::bindings::rest_client::{
 +	encode_query_params, HttpMethod, RestClientError, RestClientOptions,
@@ -614,6 +614,7 @@ index 0000000000..d8bdc61afc
 +			vec![],
 +			vec![0; 3],
 +			vec![255; 4],
++			vec![0, 0, 0, 1],
 +			vec![0, 0, 0, 0, 1],
 +			good[..good.len() - 1].to_vec(),
 +			trailing,
@@ -830,5 +831,49 @@ index 0000000000..d8bdc61afc
 +			.await
 +			.unwrap();
 +		assert_eq!(result[&blob], vec![42]);
++	}
++
++	#[tokio::test]
++	async fn binary_download_returns_the_last_error_when_every_server_fails() {
++		let mut token = MockBlobAccessTokenFacade::default();
++		token
++			.expect_request_read_token()
++			.times(1)
++			.returning(|_| Ok(info()));
++		let mut rest = MockRestClient::new();
++		let mut sequence = mockall::Sequence::new();
++		rest.expect_request_binary()
++			.times(1)
++			.in_sequence(&mut sequence)
++			.withf(|url, _, _| url.starts_with("https://first/"))
++			.returning(|_, _, _| Err(RestClientError::NetworkError));
++		rest.expect_request_binary()
++			.times(1)
++			.in_sequence(&mut sequence)
++			.withf(|url, _, _| url.starts_with("https://second/"))
++			.returning(|_, _, _| {
++				Ok(RestResponse {
++					status: 500,
++					headers: HashMap::new(),
++					body: None,
++				})
++			});
++		let blob = GeneratedId(BASE64_EXT.encode([1; 9]));
++
++		let error = facade(rest, token)
++			.download_blobs(
++				&id().list_id,
++				&id(),
++				ArchiveDataType::Attachments,
++				std::slice::from_ref(&blob),
++			)
++			.await
++			.unwrap_err();
++		assert!(matches!(
++			error,
++			ApiCallError::ServerResponseError {
++				source: HttpError::InternalServerError
++			}
++		));
 +	}
 +}

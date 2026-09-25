@@ -1,4 +1,4 @@
-From cb1a790ed5819556dc2145c0e3764f74b8679010 Mon Sep 17 00:00:00 2001
+From 19ce5e59d37806a4e376b6c73b21d06d89503963 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:07:00 +0200
 Subject: [PATCH] [sdk] Decrypt AEAD attribute values encrypted with the

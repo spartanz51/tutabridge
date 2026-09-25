@@ -11,6 +11,7 @@ use crypto_primitives::aes::{Aes256Key, InitializationVector};
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use crypto_primitives::versioned::Versioned;
+use tutabridge_tuta::folder_system::MailSetKind;
 use tutabridge_tuta::mail::MailExtensions;
 use tutasdk::bindings::rest_client::{
     HttpMethod, RestClient, RestClientError, RestClientOptions, RestResponse,
@@ -20,7 +21,8 @@ use tutasdk::bindings::test_rest_client::TestRestClient;
 use tutasdk::date::DateTime;
 use tutasdk::entities::generated::sys::Blob;
 use tutasdk::entities::generated::tutanota::{
-    Body, Mail, MailDetails, MailDetailsDraft, Recipients, TutanotaFile,
+    Body, Mail, MailBox, MailDetails, MailDetailsDraft, MailSet, MailSetEntry, Recipients,
+    TutanotaFile,
 };
 use tutasdk::entities::Entity;
 use tutasdk::login::{CredentialType, Credentials};
@@ -676,4 +678,171 @@ async fn aead_v2_draft_body_needs_no_mail_key_and_rejects_a_wrong_nonce() {
         session.ext.load_mail_details_draft(&mail).await.is_err(),
         "a wrong nonce must not produce a body"
     );
+
+    raw["1830"] = serde_json::Value::String(BASE64_STANDARD.encode([0x22; 31]));
+    session.server.respond(DRAFT_URL, &raw);
+    let error = session
+        .ext
+        .load_mail_details_draft(&mail)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("KDF nonce"), "{error}");
+}
+
+/// A mailbox whose only field of interest is its folder list id.
+fn mailbox_with_folder_list(list: &str) -> MailBox {
+    serde_json::from_value(serde_json::json!({
+        "127": null, "128": "permissions", "129": 0, "569": 0,
+        "590": null, "591": null, "1396": null, "1840": null,
+        "133": "sent", "134": "received",
+        "443": {"441": null, "442": list},
+        "1220": {"1218": null, "1219": "spam"},
+        "1318": null, "1463": [], "1464": null,
+        "1512": "imported", "1585": "states", "1710": "features",
+        "1754": "training", "1755": "index", "1962": null, "1963": null,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn folders_load_and_nest_under_their_parents() {
+    let session = session().await;
+    let mail = fixture_mail(&session).await;
+    let group_key = mail_group_key(&session, &mail).await;
+    let key = test_session_key();
+    let folder = |id: &str, name: &str, folder_type: i64, parent: Option<&str>| {
+        let set = MailSet {
+            _id: Some(IdTupleGenerated::new(
+                GeneratedId("folders".into()),
+                GeneratedId(id.into()),
+            )),
+            _permissions: GeneratedId("permissions".into()),
+            _format: 0,
+            _ownerEncSessionKey: Some(wrap(&group_key, &key)),
+            name: name.into(),
+            folderType: folder_type,
+            _ownerGroup: mail._ownerGroup.clone(),
+            _ownerKeyVersion: Some(group_key.version as i64),
+            color: None,
+            _kdfNonce: None,
+            parentFolder: parent.map(|p| {
+                IdTupleGenerated::new(GeneratedId("folders".into()), GeneratedId(p.into()))
+            }),
+            entries: GeneratedId(format!("entries-{id}")),
+            _errors: Default::default(),
+        };
+        let json = session
+            .sdk
+            .serialize_instance_to_json(set, key.clone())
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()
+    };
+    let sets = serde_json::json!([
+        folder("inbox", "", 1, None),
+        folder("work", "Work", 0, None),
+        folder("projects", "Projects", 0, Some("work")),
+    ]);
+    session.server.respond(
+        "http://localhost:9000/rest/tutanota/MailSet/folders?start=------------&count=100&reverse=false",
+        &sets,
+    );
+
+    let folders = session
+        .ext
+        .load_folders_for_mailbox(&mailbox_with_folder_list("folders"))
+        .await
+        .unwrap();
+
+    let tree: Vec<(String, usize)> = folders
+        .indented_list()
+        .iter()
+        .map(|f| (f.folder.name.clone(), f.level))
+        .collect();
+    assert_eq!(
+        tree,
+        vec![
+            (String::new(), 0),
+            ("Work".to_owned(), 0),
+            ("Projects".to_owned(), 1),
+        ]
+    );
+    assert_eq!(
+        folders
+            .system_folder_by_type(MailSetKind::Inbox)
+            .map(|f| f.entries.as_str()),
+        Some("entries-inbox")
+    );
+}
+
+#[tokio::test]
+async fn received_body_reader_rejects_a_draft_before_fetching() {
+    let session = session().await;
+    let mut mail = fixture_mail(&session).await;
+    mail.mailDetailsDraft = Some(IdTupleGenerated::new(
+        GeneratedId("draft-list".into()),
+        GeneratedId("draft-id".into()),
+    ));
+
+    let err = session.ext.load_mail_details_blob(&mail).await.unwrap_err();
+
+    assert!(err.to_string().contains("Expected received mail"), "{err}");
+    assert!(session.server.token_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_attachment_without_blobs_is_empty() {
+    let session = session().await;
+    let mail = fixture_mail(&session).await;
+    let group_key = mail_group_key(&session, &mail).await;
+    let file = TutanotaFile {
+        _id: Some(IdTupleGenerated::new(
+            GeneratedId("files".into()),
+            GeneratedId("file".into()),
+        )),
+        _permissions: GeneratedId("permissions".into()),
+        _format: 0,
+        _ownerGroup: mail._ownerGroup.clone(),
+        _ownerKeyVersion: mail._ownerKeyVersion,
+        _ownerEncSessionKey: Some(wrap(&group_key, &test_session_key())),
+        _kdfNonce: None,
+        name: "empty.txt".into(),
+        size: 0,
+        mimeType: Some("text/plain".into()),
+        cid: None,
+        parent: None,
+        subFiles: None,
+        blobs: vec![],
+        _errors: Default::default(),
+    };
+
+    assert!(session
+        .ext
+        .load_file_attachment_data(&file)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(session.server.token_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unencrypted_inline_entity_is_mapped_without_a_key() {
+    let session = session().await;
+    // MailSetEntry: _id, _permissions, _format, _ownerGroup, mail.
+    let json = serde_json::json!({
+        "1452": ["entries", "entry"],
+        "1453": "permissions",
+        "1454": "0",
+        "1455": "owner",
+        // Associations are arrays on the wire.
+        "1456": [["mail-list", "mail-id"]],
+    });
+
+    let entry = session
+        .ext
+        .decrypt_inline_and_parse::<MailSetEntry>(&json.to_string())
+        .await
+        .unwrap()
+        .expect("an unencrypted entity needs no session key");
+
+    assert_eq!(entry.mail.element_id.as_str(), "mail-id");
 }

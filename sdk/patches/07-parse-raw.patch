@@ -1,4 +1,4 @@
-From 9dc13566963137f50471ee1d41fe97c935d5d927 Mon Sep 17 00:00:00 2001
+From 462b49cb35db664719081ade7f12feeea1576807 Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:05:00 +0200
 Subject: [PATCH] [sdk] Expose parsing of a raw entity
@@ -12,7 +12,7 @@ decryption pipeline.
  1 file changed, 22 insertions(+)
 
 diff --git a/tuta-sdk/rust/sdk/src/entity_client.rs b/tuta-sdk/rust/sdk/src/entity_client.rs
-index 7f4f042e50..06b8a86636 100644
+index 3e2ad33b73..650c56cd0f 100644
 --- a/tuta-sdk/rust/sdk/src/entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/entity_client.rs
 @@ -48,6 +48,16 @@ impl EntityClient {
@@ -40,7 +40,7 @@ index 7f4f042e50..06b8a86636 100644
  		pub async fn load<Id: IdType>(
  			&self,
  			type_ref: &TypeRef,
-@@ -719,6 +730,17 @@ mod stests {
+@@ -740,6 +751,17 @@ mod stests {
  		assert!(result.is_empty());
  	}
  

@@ -392,6 +392,51 @@ mod tests {
     }
 
     #[test]
+    fn path_to_folder_searches_every_subtree() {
+        let fs = FolderSystem::new(vec![
+            mail_set("inbox", MailSetKind::Inbox, "", None),
+            mail_set("sub", MailSetKind::Custom, "Sub", Some("inbox")),
+            mail_set("alpha", MailSetKind::Custom, "Alpha", None),
+            mail_set("beta", MailSetKind::Custom, "Beta", None),
+            mail_set("leaf", MailSetKind::Custom, "Leaf", Some("beta")),
+        ]);
+        let path = |elem: &str| -> Vec<String> {
+            fs.path_to_folder(&GeneratedId(elem.to_owned()))
+                .into_iter()
+                .map(|f| f.name.clone())
+                .collect()
+        };
+        assert_eq!(path("sub"), vec!["", "Sub"]);
+        assert_eq!(path("leaf"), vec!["Beta", "Leaf"]);
+        assert!(path("missing").is_empty());
+    }
+
+    #[test]
+    fn system_folders_follow_the_ts_order() {
+        let order = [
+            MailSetKind::Inbox,
+            MailSetKind::Draft,
+            MailSetKind::Scheduled,
+            MailSetKind::Sent,
+            MailSetKind::Trash,
+            MailSetKind::Archive,
+            MailSetKind::Spam,
+        ];
+        let fs = FolderSystem::new(
+            order
+                .iter()
+                .rev()
+                .map(|&kind| mail_set(&format!("{kind:?}"), kind, "", None))
+                .collect(),
+        );
+        let kinds: Vec<_> = fs.indented_list().iter().map(|f| f.folder.kind()).collect();
+        assert_eq!(kinds, order);
+        for kind in order {
+            assert_eq!(fs.system_folder_by_type(kind).map(|f| f.kind()), Some(kind));
+        }
+    }
+
+    #[test]
     fn folder_by_mail_uses_sets() {
         let fs = FolderSystem::new(vec![mail_set("inbox", MailSetKind::Inbox, "", None)]);
         let mail = Mail {

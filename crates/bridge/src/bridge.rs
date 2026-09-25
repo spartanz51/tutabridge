@@ -551,6 +551,19 @@ fn server_exit_message(
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_event_bus_state_maps_to_its_ui_status() {
+        use tutabridge_tuta::event_bus::WsState;
+        for (state, status) in [
+            (WsState::Stopped, WsStatus::Stopped),
+            (WsState::Connecting, WsStatus::Connecting),
+            (WsState::Connected, WsStatus::Connected),
+            (WsState::Reconnecting, WsStatus::Reconnecting),
+        ] {
+            assert_eq!(WsStatus::from(state), status);
+        }
+    }
+
     #[tokio::test]
     async fn a_server_that_returns_an_error_is_reported() {
         // The case that used to tear the bridge down silently: the task did

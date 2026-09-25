@@ -1,4 +1,4 @@
-From a20ab51bd8a6b3b8242ba15ad5ec2ad4c77c9051 Mon Sep 17 00:00:00 2001
+From d569a04db16a830b29a3a201ee2f2cb96c120e8c Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:02:00 +0200
 Subject: [PATCH] [sdk] Load list elements by id in batches
@@ -10,12 +10,12 @@ ids the server does not return are omitted. Only list element types are
 supported. Avoids one request per element when a caller needs many
 known ids from one list.
 ---
- tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  14 ++
- tuta-sdk/rust/sdk/src/entity_client.rs        | 149 +++++++++++++++++-
- 2 files changed, 162 insertions(+), 1 deletion(-)
+ tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  93 ++++++++++
+ tuta-sdk/rust/sdk/src/entity_client.rs        | 170 +++++++++++++++++-
+ 2 files changed, 262 insertions(+), 1 deletion(-)
 
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
-index e3f114c748..1dbd37291c 100644
+index e3f114c748..65ff2bf617 100644
 --- a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 @@ -130,6 +130,20 @@ impl CryptoEntityClient {
@@ -39,8 +39,94 @@ index e3f114c748..1dbd37291c 100644
  	pub fn serialize_entity<Instance: Entity + Serialize>(
  		&self,
  		instance: Instance,
+@@ -537,6 +551,85 @@ mod tests {
+ 		assert_eq!(accounting_info, accounting_info_input);
+ 	}
+ 
++	#[tokio::test]
++	async fn load_multiple_decrypts_every_returned_element() {
++		let sk = GenericAesKey::Aes256(Aes256Key::from_bytes(&random::<[u8; 32]>()).unwrap());
++		let iv = InitializationVector::from_bytes(&random::<[u8; 16]>()).unwrap();
++		let mails: Vec<_> = ["First", "Second"]
++			.into_iter()
++			.map(|subject| {
++				generate_email_entity(
++					&sk,
++					&iv,
++					false,
++					subject.to_owned(),
++					"Sender".to_owned(),
++					"Recipient".to_owned(),
++					None,
++				)
++				.0
++			})
++			.collect();
++		let type_model_provider: &'static TypeModelProvider = leak(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"http://localhost:9000".to_string(),
++		));
++		let mail_type_model = type_model_provider
++			.resolve_server_type_ref(&Mail::type_ref())
++			.expect("Error in type_model_provider");
++		let ids = vec![
++			GeneratedId("first".to_owned()),
++			GeneratedId("second".to_owned()),
++		];
++		let requested = ids.clone();
++		let mut mock_entity_client = MockEntityClient::default();
++		mock_entity_client
++			.expect_resolve_server_type_ref()
++			.returning(move |_| Ok(mail_type_model.clone()));
++		mock_entity_client
++			.expect_load_multiple()
++			.withf(move |type_ref, list_id, element_ids| {
++				*type_ref == Mail::type_ref()
++					&& list_id.as_str() == "list"
++					&& element_ids == requested
++			})
++			.times(1)
++			.returning(move |_, _, _| Ok(mails.clone()));
++		let mut mock_crypto_facade = MockCryptoFacade::default();
++		mock_crypto_facade
++			.expect_resolve_session_key()
++			.times(2)
++			.returning(move |_, _| {
++				Ok(Some(ResolvedSessionKey {
++					session_key: sk.clone(),
++					owner_enc_session_key: vec![1, 2, 3],
++					owner_key_version: 0u64,
++					sender_identity_pub_key: None,
++				}))
++			});
++		let type_model_provider = Arc::new(mock_type_model_provider());
++		let crypto_entity_client = CryptoEntityClient::new(
++			Arc::new(mock_entity_client),
++			Arc::new(EntityFacadeImpl::new(
++				Arc::clone(&type_model_provider),
++				RandomizerFacade::from_core(rand_core::OsRng),
++			)),
++			Arc::new(mock_crypto_facade),
++			Arc::new(InstanceMapper::new(type_model_provider.clone())),
++			Arc::new(MockAsymmetricCryptoFacade::default()),
++			Arc::new(MockKeyLoaderFacade::default()),
++		);
++
++		let loaded: Vec<Mail> = crypto_entity_client
++			.load_multiple(&GeneratedId("list".to_owned()), &ids)
++			.await
++			.unwrap();
++
++		let subjects: Vec<&str> = loaded.iter().map(|mail| mail.subject.as_str()).collect();
++		assert_eq!(subjects, ["First", "Second"]);
++	}
++
+ 	#[tokio::test]
+ 	async fn can_load_mail() {
+ 		// Generate an encrypted type to feed into a mock of the entity client
 diff --git a/tuta-sdk/rust/sdk/src/entity_client.rs b/tuta-sdk/rust/sdk/src/entity_client.rs
-index bc1786b191..7f4f042e50 100644
+index bc1786b191..3e2ad33b73 100644
 --- a/tuta-sdk/rust/sdk/src/entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/entity_client.rs
 @@ -1,4 +1,6 @@
@@ -129,7 +215,15 @@ index bc1786b191..7f4f042e50 100644
  		pub async fn setup_element(&self, type_ref: &TypeRef, entity: RawEntity) -> Vec<String>;
  		pub async fn setup_list_element(
  			&self,
-@@ -572,6 +631,94 @@ mod stests {
+@@ -469,6 +528,7 @@ mockall::mock! {
+ mod stests {
+ 	use super::*;
+ 	use crate::bindings::rest_client::{MockRestClient, RestResponse};
++	use crate::entities::generated::tutanota::MailBox;
+ 	use crate::entities::Entity;
+ 	use crate::metamodel::{AppName, TypeId};
+ 	use crate::util::test_utils::*;
+@@ -572,6 +632,114 @@ mod stests {
  		assert_eq!(result_entity, vec![entity_map]);
  	}
  
@@ -203,6 +297,26 @@ index bc1786b191..7f4f042e50 100644
 +			.await
 +			.expect("success");
 +		assert!(result.is_empty());
++	}
++
++	#[tokio::test]
++	async fn test_load_multiple_rejects_unknown_and_non_list_types() {
++		let mut rest_client = MockRestClient::new();
++		rest_client.expect_request_binary().times(0);
++		let entity_client = test_entity_client(rest_client);
++		let list_id = GeneratedId("list_id".to_owned());
++		let ids = [GeneratedId("first".to_owned())];
++		let unknown = TypeRef {
++			app: AppName::EntityClientTestApp,
++			type_id: TypeId::from(99),
++		};
++
++		for type_ref in [unknown, MailBox::type_ref()] {
++			assert!(entity_client
++				.load_multiple(&type_ref, &list_id, &ids)
++				.await
++				.is_err());
++		}
 +	}
 +
 +	#[tokio::test]

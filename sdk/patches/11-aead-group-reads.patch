@@ -1,4 +1,4 @@
-From 46e41ee14e0e7761a00a15990d4f406142df2489 Mon Sep 17 00:00:00 2001
+From aa4507dc7317f0948bbda2657b7ac287afba9f7f Mon Sep 17 00:00:00 2001
 From: spartanz51 <a.m@tuta.com>
 Date: Thu, 24 Sep 2026 12:09:00 +0200
 Subject: [PATCH] [sdk] Decrypt AEAD attribute values encrypted with a group
@@ -10,18 +10,18 @@ the instance's KDF nonce, as TS AeadWithGroupKeyDecryptor does. Instances
 carrying a KDF nonce go through this path, including decrypt_parsed.
 Writing such instances is refused until AEAD writes are supported.
 ---
- tuta-sdk/rust/sdk/src/crypto_entity_client.rs |  20 +-
- .../rust/sdk/src/crypto_entity_client/aead.rs | 162 ++++++++++++++
- .../rust/sdk/src/entities/entity_facade.rs    |  41 +++-
- .../src/entities/entity_facade/decryption.rs  | 178 +++++++++++++++-
- .../entities/entity_facade/decryption_keys.rs | 197 ++++++++++++++++++
- .../sdk/test_data/aead_attributes_ts.json     |  16 ++
- 6 files changed, 604 insertions(+), 10 deletions(-)
+ tuta-sdk/rust/sdk/src/crypto_entity_client.rs | 200 +++++++++-
+ .../rust/sdk/src/crypto_entity_client/aead.rs | 362 ++++++++++++++++++
+ .../rust/sdk/src/entities/entity_facade.rs    |  41 +-
+ .../src/entities/entity_facade/decryption.rs  | 199 +++++++++-
+ .../entities/entity_facade/decryption_keys.rs | 240 ++++++++++++
+ .../sdk/test_data/aead_attributes_ts.json     |  16 +
+ 6 files changed, 1047 insertions(+), 11 deletions(-)
  create mode 100644 tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
  create mode 100644 tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
 
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
-index 2db05dd505..04293715f9 100644
+index df4624f878..531ac9601d 100644
 --- a/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client.rs
 @@ -1,3 +1,5 @@
@@ -76,12 +76,211 @@ index 2db05dd505..04293715f9 100644
  		if !type_model.marked_encrypted() {
  			return Ok(parsed_entity);
  		}
+@@ -539,6 +557,7 @@ mod tests {
+ 	use crate::crypto::{TutaCryptKeyPairs, X25519PublicKey};
+ 	use crate::crypto_entity_client::CryptoEntityClient;
+ 	use crate::date::DateTime;
++	use crate::element_value::ElementValue;
+ 	use crate::entities::entity_facade::{EntityFacadeImpl, MockEntityFacade, ID_FIELD};
+ 	use crate::entities::generated::sys::{AccountingInfo, BucketKey};
+ 	use crate::entities::generated::tutanota::{Mail, MailSetEntry};
+@@ -551,7 +570,9 @@ mod tests {
+ 	};
+ 	use crate::type_model_provider::TypeModelProvider;
+ 	use crate::util::entity_test_utils::generate_email_entity;
+-	use crate::util::test_utils::{create_test_entity_dict, leak, mock_type_model_provider};
++	use crate::util::test_utils::{
++		create_test_entity, create_test_entity_dict, leak, mock_type_model_provider,
++	};
+ 	use crate::{GeneratedId, IdTupleGenerated};
+ 	use crypto_primitives::aes::{Aes256Key, InitializationVector};
+ 	use crypto_primitives::key::GenericAesKey;
+@@ -1620,4 +1641,179 @@ mod tests {
+ 			result.encryptionAuthStatus
+ 		)
+ 	}
++
++	#[tokio::test]
++	async fn an_aead_mail_is_loaded_with_its_bucket_key_and_authenticated() {
++		let sk = GenericAesKey::Aes256(Aes256Key::from_bytes(&random::<[u8; 32]>()).unwrap());
++		let iv = InitializationVector::from_bytes(&random::<[u8; 16]>()).unwrap();
++		let recipient_group = GeneratedId::test_random();
++		let bucket_key = BucketKey {
++			_id: None,
++			groupEncBucketKey: None,
++			protocolVersion: CryptoProtocolVersion::TutaCrypt as i64,
++			pubEncBucketKey: Some(vec![9, 8, 7]),
++			recipientKeyVersion: 2,
++			senderKeyVersion: None,
++			bucketEncSessionKeys: vec![],
++			keyGroup: Some(recipient_group.clone()),
++		};
++		let (mut encrypted_mail, ..) = generate_email_entity(
++			&sk,
++			&iv,
++			true,
++			"Subject".to_owned(),
++			"Sender".to_owned(),
++			"Recipient".to_owned(),
++			Some(bucket_key),
++		);
++		// A KDF nonce sends the mail down the AEAD path.
++		encrypted_mail.insert("1839".to_owned(), ElementValue::Bytes(vec![0x22; 32]));
++		let type_model_provider: &'static TypeModelProvider = leak(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost:9000".to_string(),
++		));
++		let mail_type_model = type_model_provider
++			.resolve_server_type_ref(&Mail::type_ref())
++			.expect("Error in type_model_provider");
++		let raw_mail_id = encrypted_mail
++			.get(
++				&mail_type_model
++					.get_attribute_id_by_attribute_name(ID_FIELD)
++					.unwrap(),
++			)
++			.unwrap()
++			.assert_tuple_id_generated();
++		let mail_id =
++			IdTupleGenerated::new(raw_mail_id.list_id.clone(), raw_mail_id.element_id.clone());
++		let mut mock_entity_client = MockEntityClient::default();
++		mock_entity_client
++			.expect_resolve_server_type_ref()
++			.returning(move |type_ref| {
++				Ok(type_model_provider
++					.resolve_server_type_ref(type_ref)
++					.unwrap())
++			});
++		mock_entity_client
++			.expect_load()
++			.returning(move |_, _: &IdTupleGenerated| Ok(encrypted_mail.clone()));
++		let mut mock_crypto_facade = MockCryptoFacade::default();
++		mock_crypto_facade
++			.expect_resolve_session_key()
++			.times(1)
++			.returning(move |_, _| {
++				Ok(Some(ResolvedSessionKey {
++					session_key: sk.clone(),
++					owner_enc_session_key: vec![1, 2, 3],
++					owner_key_version: 0u64,
++					sender_identity_pub_key: None,
++				}))
++			});
++		let mut key_loader_facade = MockKeyLoaderFacade::default();
++		key_loader_facade
++			.expect_load_current_key_pair()
++			.with(eq(recipient_group))
++			.returning(|_| {
++				Ok(Versioned {
++					object: AsymmetricKeyPair::RSAKeyPair(RSAKeyPair::generate(
++						&make_thread_rng_facade(),
++					)),
++					version: 0,
++				})
++			});
++		let type_model_provider = Arc::new(mock_type_model_provider());
++		let crypto_entity_client = CryptoEntityClient::new(
++			Arc::new(mock_entity_client),
++			Arc::new(EntityFacadeImpl::new(
++				Arc::clone(&type_model_provider),
++				RandomizerFacade::from_core(rand_core::OsRng),
++			)),
++			Arc::new(mock_crypto_facade),
++			Arc::new(InstanceMapper::new(type_model_provider)),
++			Arc::new(MockAsymmetricCryptoFacade::default()),
++			Arc::new(key_loader_facade),
++		);
++
++		let result: Mail = crypto_entity_client.load(&mail_id).await.unwrap();
++
++		assert_eq!("Subject", result.subject);
++		assert_eq!(
++			Some(EncryptionAuthStatus::RSANoAuthentication as i64),
++			result.encryptionAuthStatus
++		);
++	}
++
++	#[tokio::test]
++	async fn aead_instances_are_not_updated() {
++		let type_model_provider: &'static TypeModelProvider = leak(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost:9000".to_string(),
++		));
++		let mut mock_entity_client = MockEntityClient::default();
++		mock_entity_client
++			.expect_resolve_client_type_ref()
++			.returning(move |type_ref| {
++				Ok(type_model_provider
++					.resolve_client_type_ref(type_ref)
++					.unwrap())
++			});
++		mock_entity_client.expect_update_instance().times(0);
++		let crypto_entity_client = CryptoEntityClient::new(
++			Arc::new(mock_entity_client),
++			Arc::new(MockEntityFacade::default()),
++			Arc::new(MockCryptoFacade::default()),
++			Arc::new(InstanceMapper::new(Arc::new(mock_type_model_provider()))),
++			Arc::new(MockAsymmetricCryptoFacade::default()),
++			Arc::new(MockKeyLoaderFacade::default()),
++		);
++		let mail = Mail {
++			_kdfNonce: Some(vec![0x22; 32]),
++			..create_test_entity()
++		};
++
++		let error = crypto_entity_client
++			.update_instance(mail)
++			.await
++			.unwrap_err();
++
++		assert!(error
++			.to_string()
++			.contains("AEAD instance writes are not supported"));
++	}
++
++	#[tokio::test]
++	async fn instances_without_a_kdf_nonce_are_still_updated() {
++		let type_model_provider: &'static TypeModelProvider = leak(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost:9000".to_string(),
++		));
++		let mut mock_entity_client = MockEntityClient::default();
++		mock_entity_client
++			.expect_resolve_client_type_ref()
++			.returning(move |type_ref| {
++				Ok(type_model_provider
++					.resolve_client_type_ref(type_ref)
++					.unwrap())
++			});
++		mock_entity_client
++			.expect_update_instance()
++			.withf(|type_ref, _| *type_ref == MailSetEntry::type_ref())
++			.times(1)
++			.returning(|_, _| Ok(()));
++		let crypto_entity_client = CryptoEntityClient::new(
++			Arc::new(mock_entity_client),
++			Arc::new(MockEntityFacade::default()),
++			Arc::new(MockCryptoFacade::default()),
++			Arc::new(InstanceMapper::new(Arc::new(mock_type_model_provider()))),
++			Arc::new(MockAsymmetricCryptoFacade::default()),
++			Arc::new(MockKeyLoaderFacade::default()),
++		);
++
++		crypto_entity_client
++			.update_instance(create_test_entity::<MailSetEntry>())
++			.await
++			.unwrap();
++	}
+ }
 diff --git a/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
 new file mode 100644
-index 0000000000..49e100f8fa
+index 0000000000..bc28ee518d
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/crypto_entity_client/aead.rs
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,362 @@
 +use super::CryptoEntityClient;
 +use crate::element_value::{ElementValue, ParsedEntity};
 +use crate::entities::entity_facade::{
@@ -173,9 +372,12 @@ index 0000000000..49e100f8fa
 +mod tests {
 +	use super::*;
 +	use crate::bindings::{file_client::MockFileClient, rest_client::MockRestClient};
++	use crate::crypto::crypto_facade::{ResolvedSessionKey, SessionKeyResolutionError};
++	use crate::crypto::key::KeyLoadError;
 +	use crate::crypto::{
 +		asymmetric_crypto_facade::MockAsymmetricCryptoFacade, crypto_facade::MockCryptoFacade,
 +	};
++	use crate::entities::generated::sys::BucketKey;
 +	use crate::entities::{entity_facade::MockEntityFacade, generated::tutanota::Mail, Entity};
 +	use crate::entity_client::MockEntityClient;
 +	use crate::instance_mapper::InstanceMapper;
@@ -184,6 +386,57 @@ index 0000000000..49e100f8fa
 +	use crate::GeneratedId;
 +	use crypto_primitives::key::GenericAesKey;
 +	use std::sync::Arc;
++
++	fn provider() -> Arc<TypeModelProvider> {
++		Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost".into(),
++		))
++	}
++
++	/// A Mail model without aggregates and without the sender authentication step.
++	fn plain_model(provider: &TypeModelProvider) -> TypeModel {
++		let mut model = (*provider.resolve_server_type_ref(&Mail::type_ref()).unwrap()).clone();
++		model.id = 99999.into();
++		model.associations.clear();
++		model
++	}
++
++	fn session_key() -> ResolvedSessionKey {
++		ResolvedSessionKey {
++			session_key: GenericAesKey::from_bytes(&[0x11; 32]).unwrap(),
++			owner_enc_session_key: vec![1, 2, 3],
++			owner_key_version: 0,
++			sender_identity_pub_key: None,
++		}
++	}
++
++	fn client(
++		entity_client: MockEntityClient,
++		crypto_facade: MockCryptoFacade,
++		entity_facade: MockEntityFacade,
++		key_loader: MockKeyLoaderFacade,
++	) -> CryptoEntityClient {
++		CryptoEntityClient::new(
++			Arc::new(entity_client),
++			Arc::new(entity_facade),
++			Arc::new(crypto_facade),
++			Arc::new(InstanceMapper::new(provider())),
++			Arc::new(MockAsymmetricCryptoFacade::default()),
++			Arc::new(key_loader),
++		)
++	}
++
++	/// Passes the entity through once it is given a session key and no group key.
++	fn facade_expecting_only_a_session_key() -> MockEntityFacade {
++		let mut facade = MockEntityFacade::default();
++		facade
++			.expect_decrypt_and_map_with_keys()
++			.withf(|_, _, keys| keys.session_key.is_some() && keys.group_keys.is_empty())
++			.returning(|_, entity, _| Ok(entity));
++		facade
++	}
 +
 +	#[tokio::test]
 +	async fn loads_ciphertext_group_versions_without_requesting_a_session_key() {
@@ -242,6 +495,152 @@ index 0000000000..49e100f8fa
 +			.process_entity_with_group_keys(&model, entity, None)
 +			.await
 +			.unwrap();
++	}
++
++	#[tokio::test]
++	async fn a_session_key_attribute_uses_the_inherited_key_or_resolves_one() {
++		let model = plain_model(&provider());
++		let entity = ParsedEntity::from([
++			("105".into(), ElementValue::Bytes(vec![3; 53])),
++			("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++		]);
++
++		// An inherited key is used as is.
++		let mut crypto_facade = MockCryptoFacade::default();
++		crypto_facade.expect_resolve_session_key().times(0);
++		client(
++			MockEntityClient::default(),
++			crypto_facade,
++			facade_expecting_only_a_session_key(),
++			MockKeyLoaderFacade::default(),
++		)
++		.process_entity_with_group_keys(&model, entity.clone(), Some(session_key()))
++		.await
++		.unwrap();
++
++		// Without one, it is resolved from the entity.
++		let mut crypto_facade = MockCryptoFacade::default();
++		crypto_facade
++			.expect_resolve_session_key()
++			.times(1)
++			.returning(|_, _| Ok(Some(session_key())));
++		client(
++			MockEntityClient::default(),
++			crypto_facade,
++			facade_expecting_only_a_session_key(),
++			MockKeyLoaderFacade::default(),
++		)
++		.process_entity_with_group_keys(&model, entity.clone(), None)
++		.await
++		.unwrap();
++
++		// Nothing is decrypted when no key can be resolved.
++		for (resolution, message) in [
++			(Ok(None), "Missing required attribute session key"),
++			(
++				Err(SessionKeyResolutionError::from(KeyLoadError {
++					reason: "offline".into(),
++				})),
++				"Failed to resolve required attribute session key",
++			),
++		] {
++			let mut crypto_facade = MockCryptoFacade::default();
++			crypto_facade
++				.expect_resolve_session_key()
++				.times(1)
++				.return_once(move |_, _| resolution);
++			let error = client(
++				MockEntityClient::default(),
++				crypto_facade,
++				MockEntityFacade::default(),
++				MockKeyLoaderFacade::default(),
++			)
++			.process_entity_with_group_keys(&model, entity.clone(), None)
++			.await
++			.unwrap_err();
++			assert!(error.to_string().contains(message), "{error}");
++		}
++	}
++
++	#[tokio::test]
++	async fn a_bucket_key_is_resolved_even_with_an_inherited_key() {
++		let provider = provider();
++		let mut model = (*provider.resolve_server_type_ref(&Mail::type_ref()).unwrap()).clone();
++		model.id = 99999.into();
++		model.associations.retain(|id, _| *id == 1310.into());
++		let entity = ParsedEntity::from([
++			("105".into(), ElementValue::Bytes(vec![3; 53])),
++			("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++			(
++				"1310".into(),
++				ElementValue::Array(vec![ElementValue::Dict(ParsedEntity::new())]),
++			),
++		]);
++		let bucket_key_model = provider
++			.resolve_server_type_ref(&BucketKey::type_ref())
++			.unwrap();
++		let mut entity_client = MockEntityClient::default();
++		entity_client
++			.expect_resolve_server_type_ref()
++			.returning(move |_| Ok(bucket_key_model.clone()));
++		let mut crypto_facade = MockCryptoFacade::default();
++		crypto_facade
++			.expect_resolve_session_key()
++			.times(1)
++			.returning(|_, _| Ok(Some(session_key())));
++
++		client(
++			entity_client,
++			crypto_facade,
++			facade_expecting_only_a_session_key(),
++			MockKeyLoaderFacade::default(),
++		)
++		.process_entity_with_group_keys(&model, entity, Some(session_key()))
++		.await
++		.unwrap();
++	}
++
++	#[tokio::test]
++	async fn group_keys_need_the_owner_group_and_name_the_failing_version() {
++		let model = plain_model(&provider());
++		let mut entity = ParsedEntity::from([
++			("105".into(), ElementValue::Bytes(vec![2, 0, 7])),
++			("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++		]);
++		let error = client(
++			MockEntityClient::default(),
++			MockCryptoFacade::default(),
++			MockEntityFacade::default(),
++			MockKeyLoaderFacade::default(),
++		)
++		.process_entity_with_group_keys(&model, entity.clone(), None)
++		.await
++		.unwrap_err();
++		assert!(error.to_string().contains("Missing AEAD owner group"));
++
++		entity.insert(
++			"587".into(),
++			ElementValue::IdGeneratedId(GeneratedId("owner".into())),
++		);
++		let mut loader = MockKeyLoaderFacade::default();
++		loader
++			.expect_load_sym_group_key()
++			.times(1)
++			.returning(|_, _, _| {
++				Err(KeyLoadError {
++					reason: "offline".into(),
++				})
++			});
++		let error = client(
++			MockEntityClient::default(),
++			MockCryptoFacade::default(),
++			MockEntityFacade::default(),
++			loader,
++		)
++		.process_entity_with_group_keys(&model, entity, None)
++		.await
++		.unwrap_err();
++		assert!(error.to_string().contains("AEAD group key version 7"));
 +	}
 +}
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade.rs
@@ -322,7 +721,7 @@ index d735acf692..9748cf3686 100644
  	}
  }
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
-index 7350ca57e6..d20a25cd11 100644
+index 7350ca57e6..a16f1eab7c 100644
 --- a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption.rs
 @@ -3,7 +3,9 @@ use crate::ApiCallError;
@@ -454,10 +853,30 @@ index 7350ca57e6..d20a25cd11 100644
  		}
  	}
  }
-@@ -182,4 +247,103 @@ mod tests {
+@@ -182,4 +247,124 @@ mod tests {
  			assert!(decryptor.decrypt(&vec![3; len], Some("105")).is_err());
  		}
  	}
++	#[test]
++	fn values_under_the_session_key_need_one() {
++		let keys = HashMap::new();
++		let nonce = [0x22; 32];
++		let decryptor = InstanceDecryptor::with_group_keys(
++			None,
++			&keys,
++			Some(&nonce),
++			"tutanota/97".into(),
++			RandomizerFacade::from_core(rand_core::OsRng),
++		);
++		for ciphertext in [vec![1; 32], vec![3; 53]] {
++			assert!(decryptor
++				.decrypt(&ciphertext, Some("105"))
++				.unwrap_err()
++				.to_string()
++				.contains("Missing session key"));
++		}
++	}
++
 +	#[test]
 +	fn group_vectors_require_the_correct_nonce_version_and_key() {
 +		let vectors: Vec<Value> =
@@ -493,6 +912,7 @@ index 7350ca57e6..d20a25cd11 100644
 +					.unwrap(),
 +				vector["plaintext"].as_str().unwrap().as_bytes()
 +			);
++			assert!(decryptor.decrypt(&ciphertext, None).is_err());
 +			assert!(make(None)
 +				.decrypt(&ciphertext, vector["path"].as_str())
 +				.is_err());
@@ -560,10 +980,10 @@ index 7350ca57e6..d20a25cd11 100644
  }
 diff --git a/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
 new file mode 100644
-index 0000000000..7684035884
+index 0000000000..82ae2680dc
 --- /dev/null
 +++ b/tuta-sdk/rust/sdk/src/entities/entity_facade/decryption_keys.rs
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,240 @@
 +use super::{
 +	decryption::{cipher_version, CipherVersion},
 +	ID_FIELD, KDF_NONCE_FIELD,
@@ -731,6 +1151,49 @@ index 0000000000..7684035884
 +				.unwrap()
 +				.session_key
 +		);
++	}
++
++	#[test]
++	fn aggregates_are_inspected_and_malformed_ones_rejected() {
++		let provider = TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost".into(),
++		);
++		let model = provider.resolve_server_type_ref(&Mail::type_ref()).unwrap();
++		// The sender (111) is a MailAddress aggregate with an encrypted name (94).
++		let mut entity = ParsedEntity::from([
++			("1839".into(), ElementValue::Bytes(vec![0x22; 32])),
++			(
++				"111".into(),
++				ElementValue::Array(vec![ElementValue::Dict(ParsedEntity::from([(
++					"94".into(),
++					ElementValue::Bytes(vec![2, 0, 9]),
++				)]))]),
++			),
++			("1306".into(), ElementValue::Null),
++		]);
++		let requirements =
++			EntityDecryptionRequirements::for_entity(&model, &entity, &provider).unwrap();
++		assert!(!requirements.session_key);
++		assert_eq!(requirements.group_key_versions, BTreeSet::from([9]));
++
++		for (value, message) in [
++			(
++				ElementValue::Array(vec![ElementValue::Bytes(vec![1])]),
++				"Invalid aggregate value",
++			),
++			(ElementValue::Bytes(vec![1]), "Invalid aggregate collection"),
++		] {
++			entity.insert("111".into(), value);
++			assert!(
++				EntityDecryptionRequirements::for_entity(&model, &entity, &provider)
++					.err()
++					.unwrap()
++					.to_string()
++					.contains(message)
++			);
++		}
 +	}
 +
 +	#[test]

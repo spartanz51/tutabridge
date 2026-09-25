@@ -599,6 +599,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_operation_status_update_as_raw_value() {
+        match parse_message(r#"operationStatusUpdate;{"a":1}"#).unwrap() {
+            EventBusMessage::OperationStatusUpdate(v) => assert_eq!(v["a"], 1),
+            other => panic!("wrong variant {:?}", other),
+        }
+        assert!(parse_message("operationStatusUpdate;{").is_err());
+    }
+
+    #[test]
+    fn rejects_an_entity_update_without_its_updates() {
+        assert!(matches!(
+            parse_message(r#"entityUpdate;{"1485":"batch","1486":"group"}"#),
+            Err(EventBusError::InvalidMessage(_))
+        ));
+    }
+
+    #[test]
     fn unknown_type_is_exposed_for_forward_compat() {
         match parse_message("somethingNew;{\"a\":1}").unwrap() {
             EventBusMessage::Unknown { kind, payload } => {
@@ -846,10 +863,12 @@ mod tests {
             "v".to_string(),
             String::new(),
         );
-        {
-            let mut ids = client.last_batch_ids.lock().unwrap();
-            ids.insert("g1".to_string(), "b1".to_string());
-        }
+        // The shared map the caller advances as it processes batches.
+        client
+            .last_batch_ids()
+            .lock()
+            .unwrap()
+            .insert("g1".to_string(), "b1".to_string());
         let path = client.build_path("t", "u");
         assert!(
             path.contains("groupsToLastEventBatchIds=g1=b1;"),
@@ -936,5 +955,291 @@ mod tests {
             "got: {}",
             url
         );
+    }
+
+    // The run loop against a local WebSocket server.
+
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::WebSocketStream;
+
+    type ServerSocket = WebSocketStream<tokio::net::TcpStream>;
+
+    const BATCH: &str = r#"entityUpdate;{"1485":"batch","1486":"group","1487":[]}"#;
+
+    fn client_for(port: u16) -> EventBusClient {
+        EventBusClient::new(
+            format!("http://127.0.0.1:{port}"),
+            155,
+            99,
+            "v".to_string(),
+            String::new(),
+        )
+    }
+
+    /// Accepts one connection, hands the socket to `script`, and returns the
+    /// path the client asked for.
+    // The handshake callback's error type is tungstenite's, large by design.
+    #[allow(clippy::result_large_err)]
+    async fn serve_once<F, Fut>(script: F) -> (u16, tokio::task::JoinHandle<String>)
+    where
+        F: FnOnce(ServerSocket) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let path = Arc::new(Mutex::new(String::new()));
+            let seen = Arc::clone(&path);
+            let socket = tokio_tungstenite::accept_hdr_async(
+                tcp,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    *seen.lock().unwrap() = request.uri().to_string();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            script(socket).await;
+            let path = path.lock().unwrap().clone();
+            path
+        });
+        (port, server)
+    }
+
+    async fn wait_for(state: &mut watch::Receiver<WsState>, wanted: WsState) {
+        while *state.borrow_and_update() != wanted {
+            state.changed().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn run_forwards_messages_answers_pings_and_closes_on_shutdown() {
+        let (port, server) = serve_once(|mut socket| async move {
+            socket
+                .send(Message::Text("initialSyncDone".into()))
+                .await
+                .unwrap();
+            socket.send(Message::Text(BATCH.into())).await.unwrap();
+            socket.send(Message::Ping(vec![1, 2, 3])).await.unwrap();
+            // An unreadable message, a pong and a binary frame are skipped.
+            socket
+                .send(Message::Text("entityUpdate;{".into()))
+                .await
+                .unwrap();
+            socket.send(Message::Pong(vec![9])).await.unwrap();
+            socket.send(Message::Binary(vec![1])).await.unwrap();
+            socket
+                .send(Message::Text("initialSyncWorkEstimate;7".into()))
+                .await
+                .unwrap();
+            let mut pong = None;
+            while let Some(Ok(frame)) = socket.next().await {
+                match frame {
+                    Message::Pong(payload) => pong = Some(payload),
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(pong, Some(vec![1, 2, 3]));
+        })
+        .await;
+        let client = Arc::new(client_for(port));
+        let mut state = client.state();
+        let (tx, mut rx) = mpsc::channel(8);
+        let (stop, shutdown) = watch::channel(false);
+        let running = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .run("token".into(), "user".into(), tx, shutdown)
+                    .await
+            })
+        };
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(EventBusMessage::InitialSyncDone)
+        ));
+        match rx.recv().await {
+            Some(EventBusMessage::EntityUpdate(batch)) => {
+                assert_eq!(
+                    (batch.batch_id.as_str(), batch.group_id.as_str()),
+                    ("batch", "group")
+                );
+            }
+            other => panic!("expected the batch, got {other:?}"),
+        }
+        assert!(matches!(
+            rx.recv().await,
+            Some(EventBusMessage::InitialSyncWorkEstimate(7))
+        ));
+        wait_for(&mut state, WsState::Connected).await;
+
+        stop.send(true).unwrap();
+        assert!(matches!(
+            running.await.unwrap(),
+            Err(EventBusError::Stopped)
+        ));
+        let path = server.await.unwrap();
+        assert!(path.starts_with("/event?modelVersions=155.99"), "{path}");
+        assert!(path.contains("&userId=user&accessToken=token"), "{path}");
+        assert_eq!(*state.borrow_and_update(), WsState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn run_stops_when_the_server_rejects_the_session() {
+        let (port, server) = serve_once(|mut socket| async move {
+            let frame = CloseFrame {
+                code: CloseCode::from(4401),
+                reason: "".into(),
+            };
+            socket.send(Message::Close(Some(frame))).await.unwrap();
+        })
+        .await;
+        let (tx, _rx) = mpsc::channel(8);
+        let (_stop, shutdown) = watch::channel(false);
+
+        let result = client_for(port)
+            .run("token".into(), "user".into(), tx, shutdown)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(EventBusError::AuthenticationRejected(401))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_waits_to_reconnect_after_a_normal_close_until_shutdown() {
+        let (port, server) = serve_once(|mut socket| async move {
+            let frame = CloseFrame {
+                code: CloseCode::from(4001),
+                reason: "".into(),
+            };
+            socket.send(Message::Close(Some(frame))).await.unwrap();
+        })
+        .await;
+        let client = Arc::new(client_for(port));
+        let mut state = client.state();
+        let (tx, _rx) = mpsc::channel(8);
+        let (stop, shutdown) = watch::channel(false);
+        let running = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .run("token".into(), "user".into(), tx, shutdown)
+                    .await
+            })
+        };
+
+        wait_for(&mut state, WsState::Reconnecting).await;
+        stop.send(true).unwrap();
+
+        assert!(matches!(
+            running.await.unwrap(),
+            Err(EventBusError::Stopped)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_waits_to_reconnect_when_the_connection_drops_without_a_close() {
+        // The server goes away without a closing handshake, as a network
+        // failure or a sleeping machine does.
+        let (port, server) = serve_once(|socket| async move { drop(socket) }).await;
+        let client = Arc::new(client_for(port));
+        let mut state = client.state();
+        let (tx, _rx) = mpsc::channel(8);
+        let (stop, shutdown) = watch::channel(false);
+        let running = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .run("token".into(), "user".into(), tx, shutdown)
+                    .await
+            })
+        };
+
+        wait_for(&mut state, WsState::Reconnecting).await;
+        stop.send(true).unwrap();
+
+        assert!(matches!(
+            running.await.unwrap(),
+            Err(EventBusError::Stopped)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_retries_a_failed_connection_until_shutdown() {
+        // A port nobody listens on.
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let client = Arc::new(client_for(port));
+        let mut state = client.state();
+        let (tx, _rx) = mpsc::channel(8);
+        let (stop, shutdown) = watch::channel(false);
+        let running = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .run("token".into(), "user".into(), tx, shutdown)
+                    .await
+            })
+        };
+
+        wait_for(&mut state, WsState::Reconnecting).await;
+        stop.send(true).unwrap();
+
+        assert!(matches!(
+            running.await.unwrap(),
+            Err(EventBusError::Stopped)
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_ends_when_nobody_reads_its_messages() {
+        let (port, server) = serve_once(|mut socket| async move {
+            socket.send(Message::Text(BATCH.into())).await.unwrap();
+            while let Some(Ok(frame)) = socket.next().await {
+                if matches!(frame, Message::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx);
+        let (_stop, shutdown) = watch::channel(false);
+
+        let result = client_for(port)
+            .run("token".into(), "user".into(), tx, shutdown)
+            .await;
+
+        assert!(matches!(result, Err(EventBusError::Stopped)));
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn run_does_not_connect_once_stopped() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, _rx) = mpsc::channel(8);
+        let (_stop, shutdown) = watch::channel(true);
+
+        let result = client_for(port)
+            .run("token".into(), "user".into(), tx, shutdown)
+            .await;
+
+        assert!(matches!(result, Err(EventBusError::Stopped)));
+        let accepted = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        assert!(accepted.is_err(), "the client connected after shutdown");
     }
 }
