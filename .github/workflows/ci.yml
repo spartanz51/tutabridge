@@ -30,6 +30,11 @@ jobs:
           # a shallow fetch can miss it.
           fetch-depth: 0
 
+      # The vendored SDK is generated, never edited: it must be exactly the
+      # official Tuta release named in sdk/BASE plus sdk/patches.
+      - name: Verify vendored SDK
+        run: scripts/sdk-generate.sh --check
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -63,7 +68,7 @@ jobs:
       # Scope to our crates explicitly — `--all` would descend into the
       # vendored SDK submodule (its own workspace), which we don't format.
       - name: Rustfmt
-        run: cargo fmt --check -p tutabridge -p tutabridge-core -p tutabridge-gui
+        run: cargo fmt --check -p tutabridge -p tutabridge-core -p tutabridge-gui -p tutabridge-tuta
 
       # Advisory for now — the codebase still has a handful of clippy lints.
       # Tighten to `-- -D warnings` once they're cleared.
@@ -100,5 +105,10 @@ jobs:
       - name: Build CLI (lean, no GUI)
         run: cargo build --release -p tutabridge
 
-      - name: Test core
-        run: cargo test -p tutabridge-core
+      # Same check as on macOS: GNU tools and Ubuntu's git must generate the
+      # same SDK commit.
+      - name: Verify vendored SDK
+        run: scripts/sdk-generate.sh --check
+
+      - name: Test core and the SDK extensions
+        run: cargo test -p tutabridge-core -p tutabridge-tuta

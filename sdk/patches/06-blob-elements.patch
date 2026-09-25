@@ -1,0 +1,225 @@
+From 18947b55cbfe6c5f944120d56c1072e9e48ac642 Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:04:00 +0200
+Subject: [PATCH] [sdk] Load a blob element from its archive
+
+Adds BlobFacade::load_blob_element for BlobElement types such as
+MailDetailsBlob: requests an archive-scoped read token and fetches the
+element from the blob servers, with the same retry and failover as
+blob downloads. It returns the JSON payload; parsing and decryption
+with the owner's session key are left to the caller.
+---
+ .../sdk/src/blobs/blob_access_token_facade.rs |  36 ++++--
+ .../rust/sdk/src/blobs/blob_facade/read.rs    | 113 +++++++++++++++++-
+ 2 files changed, 136 insertions(+), 13 deletions(-)
+
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
+index 1c7acd5428..9eda731631 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_access_token_facade.rs
+@@ -20,6 +20,7 @@ use std::sync::Arc;
+ #[derive(Clone, Hash, PartialEq, Eq)]
+ #[cfg_attr(test, derive(Debug))]
+ pub(crate) enum ReadTokenKey {
++	Archive(GeneratedId),
+ 	Instance {
+ 		archive: GeneratedId,
+ 		list: GeneratedId,
+@@ -101,26 +102,37 @@ impl BlobAccessTokenFacade {
+ 							.encode(self.randomizer_facade.generate_random_array::<4>()),
+ 					))
+ 				};
+-				let ReadTokenKey::Instance {
+-					archive,
+-					list,
+-					element,
+-					data_type,
+-				} = key;
++				let (archive, instance, data_type) = match key {
++					ReadTokenKey::Archive(archive) => (archive, None, None),
++					ReadTokenKey::Instance {
++						archive,
++						list,
++						element,
++						data_type,
++					} => (
++						archive,
++						Some((list, element)),
++						Some(data_type.discriminant()),
++					),
++				};
+ 				let read = BlobReadData {
+ 					_id: aggregate_id(),
+ 					archiveId: archive.clone(),
+-					instanceListId: Some(list.clone()),
+-					instanceIds: vec![InstanceId {
+-						_id: aggregate_id(),
+-						instanceId: Some(element.clone()),
+-					}],
++					instanceListId: instance.map(|id| id.0.clone()),
++					instanceIds: instance
++						.map(|id| {
++							vec![InstanceId {
++								_id: aggregate_id(),
++								instanceId: Some(id.1.clone()),
++							}]
++						})
++						.unwrap_or_default(),
+ 				};
+ 				self.service_executor
+ 					.post::<BlobAccessTokenService>(
+ 						BlobAccessTokenPostIn {
+ 							_format: 0,
+-							archiveDataType: Some(data_type.discriminant()),
++							archiveDataType: data_type,
+ 							read: Some(read),
+ 							write: None,
+ 						},
+diff --git a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
+index 85093cbbff..04a8e3f658 100644
+--- a/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
++++ b/tuta-sdk/rust/sdk/src/blobs/blob_facade/read.rs
+@@ -5,10 +5,11 @@ use crate::bindings::rest_client::{
+ use crate::blobs::blob_access_token_facade::ReadTokenKey;
+ use crate::entities::generated::storage::{BlobGetIn, BlobId, BlobServerAccessInfo};
+ use crate::entities::Entity;
++use crate::metamodel::ElementType;
+ use crate::rest_error::HttpError;
+ use crate::tutanota_constants::ArchiveDataType;
+ use crate::util::BASE64_EXT;
+-use crate::{ApiCallError, CustomId, GeneratedId, IdTupleGenerated};
++use crate::{ApiCallError, CustomId, GeneratedId, IdTupleGenerated, TypeRef};
+ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+ use std::collections::HashMap;
+ use std::future::Future;
+@@ -17,6 +18,44 @@ use std::future::Future;
+ const BLOB_DOWNLOAD_LIMIT: usize = 100;
+ 
+ impl BlobFacade {
++	/// Loads one encrypted blob element from an archive owned by the current
++	/// user. Returns the JSON response; the caller parses and decrypts it.
++	pub async fn load_blob_element(
++		&self,
++		type_ref: &TypeRef,
++		id: &IdTupleGenerated,
++	) -> Result<Vec<u8>, ApiCallError> {
++		let model = self
++			.type_model_provider
++			.resolve_client_type_ref(type_ref)
++			.ok_or_else(|| ApiCallError::internal(format!("Unknown blob type {type_ref}")))?;
++		if model.element_type != ElementType::BlobElement {
++			return Err(ApiCallError::internal(
++				"Expected a blob element type".to_owned(),
++			));
++		}
++		let path = format!(
++			"/rest/{}/{}/{}",
++			type_ref.app,
++			model.name.to_lowercase(),
++			id.list_id
++		);
++		let path = path.as_str();
++		self.with_read_token(
++			&ReadTokenKey::Archive(id.list_id.clone()),
++			|info| async move {
++				self.read_from_servers(
++					&info,
++					path,
++					model.version,
++					vec![("ids".to_owned(), id.element_id.to_string())],
++				)
++				.await
++			},
++		)
++		.await
++	}
++
+ 	/// Downloads encrypted blobs authorized by a referencing instance, in batches of 100.
+ 	/// This does not require ownership of the archive containing those blobs.
+ 	pub async fn download_blobs(
+@@ -224,6 +263,7 @@ mod tests {
+ 	};
+ 	use crate::blobs::blob_access_token_facade::MockBlobAccessTokenFacade;
+ 	use crate::entities::generated::storage::{BlobServerAccessInfo, BlobServerUrl};
++	use crate::entities::generated::tutanota::{Mail, MailDetailsBlob};
+ 	use crate::instance_mapper::InstanceMapper;
+ 	use crate::json_serializer::JsonSerializer;
+ 	use crate::type_model_provider::TypeModelProvider;
+@@ -310,6 +350,77 @@ mod tests {
+ 		}
+ 	}
+ 
++	#[tokio::test]
++	async fn blob_element_retries_transient_server_then_returns_body() {
++		let mut token = MockBlobAccessTokenFacade::default();
++		token
++			.expect_request_read_token()
++			.times(1)
++			.returning(|_| Ok(info()));
++		let mut rest = MockRestClient::new();
++		rest.expect_request_binary()
++			.times(1)
++			.withf(|url, _, _| url.starts_with("https://first/"))
++			.returning(|_, _, _| {
++				Ok(RestResponse {
++					status: 404,
++					headers: HashMap::new(),
++					body: None,
++				})
++			});
++		rest.expect_request_binary()
++			.times(1)
++			.withf(|url, _, _| url.starts_with("https://second/"))
++			.returning(|_, _, _| {
++				Ok(RestResponse {
++					status: 200,
++					headers: HashMap::new(),
++					body: Some(b"[]".to_vec()),
++				})
++			});
++		assert_eq!(
++			facade(rest, token)
++				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
++				.await
++				.unwrap(),
++			b"[]"
++		);
++	}
++
++	#[tokio::test]
++	async fn permanent_errors_and_empty_bodies_do_not_retry() {
++		for status in [401, 474, 200] {
++			let mut token = MockBlobAccessTokenFacade::default();
++			token
++				.expect_request_read_token()
++				.times(1)
++				.returning(|_| Ok(info()));
++			let mut rest = MockRestClient::new();
++			rest.expect_request_binary()
++				.times(1)
++				.returning(move |_, _, _| {
++					Ok(RestResponse {
++						status,
++						headers: HashMap::new(),
++						body: None,
++					})
++				});
++			assert!(facade(rest, token)
++				.load_blob_element(&MailDetailsBlob::type_ref(), &id())
++				.await
++				.is_err());
++		}
++	}
++
++	#[tokio::test]
++	async fn blob_element_rejects_a_type_that_is_not_a_blob_element() {
++		let error = facade(MockRestClient::new(), MockBlobAccessTokenFacade::default())
++			.load_blob_element(&Mail::type_ref(), &id())
++			.await
++			.unwrap_err();
++		assert!(error.to_string().contains("Expected a blob element type"));
++	}
++
+ 	#[tokio::test]
+ 	async fn binary_download_uses_instance_scope_and_chunks_at_100() {
+ 		let mut token = MockBlobAccessTokenFacade::default();

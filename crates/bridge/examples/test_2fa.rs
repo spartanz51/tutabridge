@@ -12,9 +12,10 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tutabridge_tuta::folder_system::MailSetKind;
+use tutabridge_tuta::mail::MailExtensions;
 use tutasdk::bindings::rest_client::RestClient;
 use tutasdk::bindings::test_file_client::TestFileClient;
-use tutasdk::folder_system::MailSetKind;
 use tutasdk::net::native_rest_client::NativeRestClient;
 use tutasdk::tutanota_constants::SecondFactorType;
 use tutasdk::Sdk;
@@ -34,7 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sdk = Sdk::new(api_url, rest_client, file_client);
 
     println!("==> initiate_session for {email}");
-    let session = sdk.initiate_session(&email, &password).await?;
+    let session = sdk
+        .initiate_session(&email, &password, tutabridge_core::tuta::CLIENT_IDENTIFIER)
+        .await?;
     let access_token = session.credentials.access_token.clone();
     println!(
         "    got credentials, {} pending challenge(s)",
@@ -81,14 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("==> verifying: load folders");
     let mailbox = logged_in.mail_facade().load_user_mailbox().await?;
-    let folders = logged_in
-        .mail_facade()
+    let folders = MailExtensions::new(logged_in.clone())
         .load_folders_for_mailbox(&mailbox)
         .await?;
     let inbox = folders
         .system_folder_by_type(MailSetKind::Inbox)
         .ok_or("no inbox folder found after login")?;
-    println!("    OK — logged in, inbox folder id={:?}", inbox._id);
+    println!("    OK: logged in, inbox folder id={:?}", inbox._id);
 
     println!("\nSUCCESS: full 2FA login flow worked end-to-end.");
     Ok(())

@@ -1,0 +1,143 @@
+From 943a896605165d0b2872cbb88f59b156b2834f3f Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:01:00 +0200
+Subject: [PATCH] [sdk] Normalize the mail address in create_session
+
+The TS LoginFacade trims and lowercases the address before requesting
+the salt and creating the session; create_session sent it as typed. The
+credentials keep the address as entered, as in TS.
+---
+ tuta-sdk/rust/sdk/src/lib.rs              |  7 +-
+ tuta-sdk/rust/sdk/tests/create_session.rs | 84 ++++++++++++++++++++++-
+ 2 files changed, 88 insertions(+), 3 deletions(-)
+
+diff --git a/tuta-sdk/rust/sdk/src/lib.rs b/tuta-sdk/rust/sdk/src/lib.rs
+index ee91fae427..f537605dde 100644
+--- a/tuta-sdk/rust/sdk/src/lib.rs
++++ b/tuta-sdk/rust/sdk/src/lib.rs
+@@ -335,6 +335,9 @@ impl Sdk {
+ 		mail_address: &str,
+ 		passphrase: &str,
+ 	) -> Result<Arc<LoggedInSdk>, LoginError> {
++		// The salt and the session are keyed by the normalized address, as in
++		// the TS LoginFacade; the credentials keep the address as entered.
++		let normalized_mail_address = mail_address.trim().to_lowercase();
+ 		let headers_provider = Arc::new(HeadersProvider::new(None));
+ 		let entity_facade = Arc::new(EntityFacadeImpl::new(
+ 			self.type_model_provider.clone(),
+@@ -353,7 +356,7 @@ impl Sdk {
+ 		);
+ 		let salt_get_input: SaltData = SaltData {
+ 			_format: 0,
+-			mailAddress: mail_address.to_string(),
++			mailAddress: normalized_mail_address.clone(),
+ 		};
+ 		let salt_return = service_executor
+ 			.get::<SaltService>(salt_get_input, ExtraServiceParams::default())
+@@ -375,7 +378,7 @@ impl Sdk {
+ 			authToken: None,
+ 			authVerifier: Some(auth_verifier),
+ 			clientIdentifier: "Linux Desktop".to_string(),
+-			mailAddress: Some(mail_address.to_string()),
++			mailAddress: Some(normalized_mail_address),
+ 			recoverCodeVerifier: None,
+ 			user: None,
+ 		};
+diff --git a/tuta-sdk/rust/sdk/tests/create_session.rs b/tuta-sdk/rust/sdk/tests/create_session.rs
+index fc17f81123..94ae876baf 100644
+--- a/tuta-sdk/rust/sdk/tests/create_session.rs
++++ b/tuta-sdk/rust/sdk/tests/create_session.rs
+@@ -1,6 +1,11 @@
++use std::collections::HashMap;
+ use std::error::Error;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
++use tutasdk::bindings::rest_client::{
++	HttpMethod, RestClient, RestClientError, RestClientOptions, RestResponse,
++};
+ use tutasdk::bindings::test_file_client::TestFileClient;
++use tutasdk::bindings::test_rest_client::TestRestClient;
+ use tutasdk::net::native_rest_client::NativeRestClient;
+ use tutasdk::Sdk;
+ 
+@@ -26,3 +31,80 @@ async fn sdk_can_create_new_session() -> Result<(), Box<dyn Error>> {
+ 
+ 	Ok(())
+ }
++
++/// Answers the salt service with the given KDF version, refuses the session
++/// service, and records the requests it receives.
++struct SaltServer {
++	type_models: TestRestClient,
++	kdf_version: &'static str,
++	requests: Mutex<Vec<(String, String)>>,
++}
++
++impl SaltServer {
++	fn new(kdf_version: &'static str) -> Arc<Self> {
++		Arc::new(Self {
++			type_models: TestRestClient::new("http://test"),
++			kdf_version,
++			requests: Mutex::new(vec![]),
++		})
++	}
++
++	fn requests(&self) -> Vec<(String, String)> {
++		self.requests.lock().unwrap().clone()
++	}
++}
++
++#[async_trait::async_trait]
++impl RestClient for SaltServer {
++	async fn request_binary(
++		&self,
++		url: String,
++		method: HttpMethod,
++		options: RestClientOptions,
++	) -> Result<RestResponse, RestClientError> {
++		let response = |status, body: Option<serde_json::Value>| RestResponse {
++			status,
++			headers: HashMap::new(),
++			body: body.map(|body| serde_json::to_vec(&body).unwrap()),
++		};
++		if url.contains("/saltservice") || url.contains("/sessionservice") {
++			let body = String::from_utf8(options.body.clone().unwrap_or_default()).unwrap();
++			self.requests.lock().unwrap().push((url.clone(), body));
++		}
++		if url.contains("/saltservice") {
++			let salt = serde_json::json!({
++				"421": "0",
++				"422": "BwcHBwcHBwcHBwcHBwcHBw==",
++				"2133": self.kdf_version,
++			});
++			Ok(response(200, Some(salt)))
++		} else if url.contains("/sessionservice") {
++			Ok(response(404, None))
++		} else {
++			self.type_models.request_binary(url, method, options).await
++		}
++	}
++}
++
++fn sdk_with(server: Arc<SaltServer>) -> Sdk {
++	Sdk::new(
++		"http://test".to_string(),
++		server,
++		Arc::new(TestFileClient::default()),
++	)
++}
++
++#[tokio::test]
++async fn create_session_uses_the_normalized_address() {
++	let server = SaltServer::new("1");
++
++	let _ = sdk_with(server.clone())
++		.create_session(" Map-Free@Tutanota.de ", "map")
++		.await;
++
++	let requests = server.requests();
++	// The salt request carries its data url-encoded in the query.
++	assert!(requests[0].0.contains("map-free%40tutanota.de"));
++	assert!(requests[1].1.contains("map-free@tutanota.de"));
++	assert!(!requests[1].1.contains("Map-Free"));
++}

@@ -1,123 +1,94 @@
-# Vendored SDK patch list
+# Vendored SDK
 
-What `tuta-repo` carries on top of tutao's release, and why. Keep this
-current when the pin moves — it is the only place the series is described
-as a whole.
+The bridge builds against Tuta's official Rust SDK, not a hand-maintained
+fork. `tuta-repo` is **generated**: the official release named in
+`sdk/BASE`, plus the patches in `sdk/patches/`, applied in order. Nothing in
+the generated tree is edited by hand.
 
-- **Base:** tutao `v359.260904.0` (`aea5846b93a1412451e885bf99002401c3b087e8`)
-- **Branch:** `tutabridge-integration` on the SDK fork (`spartanz51/tutanota`)
-- **Pin:** `7a3d4f9fe333d78b3002a3a3cab223a2ea9167ff`
-
-The base is a real tutao release tag, not a relabelled older tree. `git
-diff <base>..<pin> -- Cargo.toml` is empty: the SDK reports
-`359.260904.0` because the release says so. Check that before trusting
-the version — see "History" below for why.
-
-The pin is a **merge commit** with two parents, the previous integration
-branch and tutao's release. It is not a rebase rooted at the release, so
-it descends from what it targets and merges rather than conflicting.
-
-The shas below are Anthony's original commits, reachable on
-`tutabridge-integration`. They are **not** the rebased copies inside this
-pin: the series is squashed, so per-patch shas within the pin do not
-exist. Cite the originals — they stay reachable and they are what you
-want when tracing a patch to its author.
-
-## What the series adds
-
-| Original commit | Capability | Why it is in the SDK |
-|---|---|---|
-| `ab3747344` | `load_multiple` batch entity loading | Transport and parsing are partly private; avoids one request per mail. |
-| `16c95161b` | Blob element reading (`MailDetailsBlob` bodies) | Reuses the SDK's blob pipeline rather than building a parallel one. |
-| `8219ebe3a` | Interactive session creation with TOTP | Reuses services, key derivation and session bootstrap. |
-| `8fafe8c8e` | Folder tree in `FolderSystem` | Folder hierarchy the bridge exposes over IMAP. |
-| `7ff31bc5c` | `MailFacade::move_mails` | Arbitrary target folders, for IMAP MOVE. |
-| `335b75d78` | WebSocket event-bus client | Live updates; the bridge has no polling path. |
-| `e27780725` | `MailSetEntry` element id codec | Id encoding the mail-set APIs require. |
-| `f97f5b1e0` | Inline event payload decryption | Avoids a REST round-trip per event. |
-| `42170313a` | `MailDetailsDraft` loading | Draft bodies, which are not blob-backed. |
-| `00266f32d` | Attachment blob download and decrypt | Serving attachments over IMAP. |
-| `6d31dec6f` | `BlobGetIn` aggregate `_id` | Required by the instance mapper. |
-| `1036d6f2e` | WebSocket heartbeat and idle timeout | Detects zombie sockets. |
-
-Two further changes are not bridge capabilities and have no original
-commit on `tutabridge-integration` — they were written for the 359 move:
-
-**Integration.** `MailFacade::new` keeps upstream's three-argument
-signature. The blob patch originally widened it to six, and 359 adds
-archive tests calling the official form — **the edits do not overlap
-textually, so a cherry-pick succeeds and the tree does not compile.** A
-patch that applies is not a patch that fits. Blob, draft and attachment
-support is supplied by `with_mail_details_support` instead, and each
-method resolves only what it uses:
-
-| method | needs |
-| --- | --- |
-| `load_mail_details_draft` | key loader |
-| `load_mail_details_blob` | key loader, blob transport, serialiser |
-| `load_file_attachment_data` | key loader, blob transport |
-
-A facade built without them returns `ApiCallError` rather than panicking.
-Upstream's tests compile untouched, which is the point: it keeps the next
-rebase cheap.
-
-**Empty optional encrypted values resolve to null.** `Body` has `text`
-(1275) and `compressedText` (1276), both `ZeroOrOne` and encrypted, and
-only one is ever populated — so the other comes back empty. That value
-matched neither the empty-string arm (guarded to `Cardinality::One`) nor
-the `Null` arm, fell through to `decrypt_data`, and failed the IV-length
-check in `aes.rs`. **Every draft read failed with `InvalidDataSizeError`**
-— on every send, not on odd data. Non-fatal, because the retry wrapper
-swallowed it after the send had already succeeded, which is why it went
-unreported for months.
-
-TS does exactly this in `CryptoMapper.decryptValue`, for both
-cardinalities. The fix predates the rebase: the same gap is in the 348
-tree. It is also proposed standalone as spartanz51/tutanota#8, and sits
-rebased onto tutao's current master on `sdk-empty-optional-upstream`,
-where the function is byte-identical — so the bug is live upstream too.
-
-## History: the relabelled SDK
-
-Before this series the pin was tutao's `348.260528.0` tree with one line
-of `Cargo.toml` changed to report `359.260904.0`, to clear Tuta's
-client-version floor (issue #37). `CLIENT_VERSION` is
-`env!("CARGO_PKG_VERSION")` and the `cv` header is its only consumer, so
-that opened the gate without moving any protocol code.
-
-The middle field of the version is a date. The code was 2026-05-28
-announcing itself as 2026-09-04.
-
-Moving to the genuine release surfaced what the relabelling had hidden:
-
-- `crypto-primitives` renamed `Iv` to `InitializationVector` — six call
-  sites in `store.rs` and `tuta.rs`.
-- `rustfmt.toml` specifies edition 2024, and three `EventBusClient`
-  accessors needed `#[must_use]`. Neither had ever been enforced against
-  these patches.
-
-All small. That is the point: they sat between the bridge and the version
-it claimed to be for months, invisible because the two were never
-compiled together.
-
-**Expect the floor to rise again**, every few months. Tuta shipped
-`360.260917.0` and `360.260921.0` within weeks of 359. The fix is to move
-to a newer real release, not to edit the version string.
-
-## Verifying a pin
-
-```sh
-# the version must come from the release, not from an edit
-git -C tuta-repo diff <base-tag>..HEAD -- Cargo.toml   # must be empty
-
-# use the toolchain CI pins, not whatever is on PATH -- the project
-# specifies 1.84.0 and edition 2024, and newer toolchains disagree
-rustup run 1.84.0 cargo fmt --all -- --check
-rustup run 1.84.0 cargo clippy --all --no-deps -- -Dwarnings
-cargo test --workspace
+```
+sdk/BASE                  official release tag + its commit
+sdk/patches/NN-*.patch    our changes, one concern each
+scripts/sdk-generate.sh   applies them, reproducibly
+tuta-repo                 submodule pinned at the generated commit
+crates/tuta               bridge-specific code that used to live in the fork
 ```
 
-Then run it: log in, send one plaintext and one HTML message, and read
-the log. A clean run has no `ERROR` or `WARN` at all. Compiling proves
-nothing about whether the reported version is accepted — only an
-authenticated login does.
+The result is hosted on the SDK fork (`spartanz51/tutanota`, one branch per
+generated commit, `generated/<version>-<commit>`, never rewritten) only so
+that `cargo`, CI, `dev.sh` and the AUR `-git` package keep building from a
+plain submodule. The fork is an output, not a source.
+
+## Checking a pin
+
+```sh
+scripts/sdk-generate.sh --check
+```
+
+Regenerates the SDK from `sdk/BASE` and `sdk/patches/` and fails unless the
+pinned `tuta-repo` commit is exactly that. Generation is reproducible (fixed
+committer, committer date taken from each patch), so the same inputs always
+give the same commit. It also fails if the patches touch the SDK's
+`Cargo.toml`: the client version Tuta checks must be the release's own,
+never an edit. CI runs this on every pull request.
+
+```sh
+scripts/sdk-generate.sh --verify-each
+```
+
+Also checks every patch on its own: after each one, the SDK must be
+formatted and pass its tests. Slower (about 8 minutes); run it whenever a
+patch changes.
+
+## Moving to a new Tuta release
+
+1. Put the new tag and its commit in `sdk/BASE`.
+2. `scripts/sdk-generate.sh`. A patch Tuta has taken is reported as
+   already included: delete it. A patch that no longer applies is fixed in
+   `sdk/patches/` (regenerate it with `git format-patch` from a fixed tree),
+   never in `tuta-repo`. Then `scripts/sdk-generate.sh --verify-each`.
+3. Run the SDK and bridge test suites, then a live check: log in, list and
+   read mail, open a received attachment and a self-sent one, send one
+   plaintext and one HTML message, mark read, move and trash, read the log.
+4. `scripts/sdk-generate.sh --push`, `git add tuta-repo sdk .gitmodules`,
+   open a PR.
+
+Tuta raises the minimum client version it accepts every few months (HTTP
+474 below it), so staying on recent releases is what keeps the bridge able
+to log in.
+
+## The patches
+
+Each patch is one concern, formatted, and builds and passes the SDK tests
+on its own, with a few focused tests. Patches that could go to Tuta come
+first, internal ones last; which is which, and their status, is tracked in
+[`SDK_UPSTREAM.md`](SDK_UPSTREAM.md).
+
+| Patch | Adds | Why it lives in the SDK |
+|---|---|---|
+| 01 optional empty | An empty optional encrypted value is null, as in TS `CryptoMapper` | Protocol fix. |
+| 02 normalize address | `create_session` trims and lowercases the address for the salt and the session, as TS does | Fix in the SDK's own login. |
+| 03 account KDF | The passphrase key uses the KDF the salt service reports; Bcrypt is an error instead of a panic | Fix in the SDK's own login. |
+| 04 load multiple | `load_multiple`: list elements by id, 100 per request | Transport and parsing are partly private; avoids one request per mail. |
+| 05 blob downloads | `download_blobs`: instance-scoped read tokens, 100 blobs per request, retry and failover | Reuses the SDK's token service and blob servers. Attachments. |
+| 06 blob elements | `load_blob_element`: a blob element (`MailDetailsBlob`) from its archive | Same pipeline as 05. Mail bodies. |
+| 07 parse raw | `parse_raw`: a raw JSON entity through the serializer | Inline event payloads and blob contents use the official parser. |
+| 08 interactive session | `initiate_session` and the TOTP second-factor calls | Reuses services, key derivation and session bootstrap. |
+| 09 owner session key | `decrypt_parsed` with a session key from the owning instance | Blob elements and draft details have no key of their own. |
+| 10 AEAD session reads | Decrypts AEAD v3 values with the session key and field context | Hooks the existing primitives into the entity decoder. |
+| 11 AEAD group reads | Decrypts AEAD v2 values with versioned group keys and the KDF nonce | Key resolution belongs with the key loader. |
+
+What the fork used to carry beyond this (event bus client, folder tree,
+MOVE, `MailSetEntry` id codec, inline event decryption) composes from the
+SDK's public API and now lives in `crates/tuta`.
+
+AEAD **writes** are not included: they are prototyped on the
+`lab/sdk-official` branch but not validated against a real account.
+
+## History
+
+Until September 2026 the SDK was a fork of tutao's 348 release carrying
+twelve bridge commits. Its version string was raised to 359 to clear Tuta's
+version floor (#38), then @ninjapanzer rebased the commits onto the real
+359 release (#47) and documented why a relabelled version is not a real
+one. This layout replaces the fork with generated releases, so a new Tuta
+release is a new tag in `sdk/BASE`, a regeneration and a test run.

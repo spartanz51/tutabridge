@@ -1,0 +1,92 @@
+From 6082f0d844d375ee1ce8ba07e1731504387db1fd Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:01:30 +0200
+Subject: [PATCH] [sdk] Derive the passphrase key with the account's KDF
+
+create_session derived the key with Argon2id whatever KDF the salt
+service reported, so a Bcrypt account sent a wrong verifier and got a
+misleading authentication error; derive_user_passphrase_key panicked
+on Bcrypt. It now takes the reported KDF, and Bcrypt, which is not
+implemented, is an error instead of a panic, before any session is
+created.
+---
+ tuta-sdk/rust/sdk/src/lib.rs                |  6 +++++-
+ tuta-sdk/rust/sdk/src/login/login_facade.rs | 12 +++++++-----
+ tuta-sdk/rust/sdk/tests/create_session.rs   | 15 +++++++++++++++
+ 3 files changed, 27 insertions(+), 6 deletions(-)
+
+diff --git a/tuta-sdk/rust/sdk/src/lib.rs b/tuta-sdk/rust/sdk/src/lib.rs
+index f537605dde..d5ea962c2d 100644
+--- a/tuta-sdk/rust/sdk/src/lib.rs
++++ b/tuta-sdk/rust/sdk/src/lib.rs
+@@ -370,7 +370,11 @@ impl Sdk {
+ 
+ 		let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+ 		let access_key = Aes256Key::generate(&randomizer);
+-		let user_passphrase_key = derive_user_passphrase_key(KdfType::Argon2id, passphrase, salt);
++		let user_passphrase_key = derive_user_passphrase_key(
++			KdfType::try_from(salt_return.kdfVersion)?,
++			passphrase,
++			salt,
++		)?;
+ 		let auth_verifier = create_auth_verifier(user_passphrase_key.clone());
+ 		let session_data: CreateSessionData = CreateSessionData {
+ 			_format: 0,
+diff --git a/tuta-sdk/rust/sdk/src/login/login_facade.rs b/tuta-sdk/rust/sdk/src/login/login_facade.rs
+index 24375e16fa..d80c9d6d7f 100644
+--- a/tuta-sdk/rust/sdk/src/login/login_facade.rs
++++ b/tuta-sdk/rust/sdk/src/login/login_facade.rs
+@@ -130,12 +130,12 @@ impl LoginFacade {
+ 				error_message: "Salt is missing from User!".to_string(),
+ 			});
+ 		};
+-		Ok(derive_user_passphrase_key(
++		derive_user_passphrase_key(
+ 			KdfType::try_from(user.kdfVersion)?,
+ 			passphrase,
+ 			array_cast_slice(salt, "Vec")
+ 				.map_err(|e| ApiCallError::internal_with_err(e, "Invalid salt"))?,
+-		))
++		)
+ 	}
+ 
+ 	/// Initialize a session with given user id and return a new UserFacade
+@@ -206,10 +206,12 @@ pub fn derive_user_passphrase_key(
+ 	kdf_type: KdfType,
+ 	passphrase: &str,
+ 	salt: [u8; 16],
+-) -> Aes256Key {
++) -> Result<Aes256Key, ApiCallError> {
+ 	match kdf_type {
+-		KdfType::Argon2id => generate_key_from_passphrase(passphrase, salt),
+-		KdfType::Bcrypt => panic!("BCrypt not implemented"),
++		KdfType::Argon2id => Ok(generate_key_from_passphrase(passphrase, salt)),
++		KdfType::Bcrypt => Err(ApiCallError::internal(
++			"Bcrypt passphrase keys are not implemented".to_owned(),
++		)),
+ 	}
+ }
+ 
+diff --git a/tuta-sdk/rust/sdk/tests/create_session.rs b/tuta-sdk/rust/sdk/tests/create_session.rs
+index 94ae876baf..6dda41bf19 100644
+--- a/tuta-sdk/rust/sdk/tests/create_session.rs
++++ b/tuta-sdk/rust/sdk/tests/create_session.rs
+@@ -108,3 +108,18 @@ async fn create_session_uses_the_normalized_address() {
+ 	assert!(requests[1].1.contains("map-free@tutanota.de"));
+ 	assert!(!requests[1].1.contains("Map-Free"));
+ }
++
++#[tokio::test]
++async fn create_session_refuses_a_bcrypt_account_without_creating_a_session() {
++	let server = SaltServer::new("0");
++
++	let result = sdk_with(server.clone())
++		.create_session("map-free@tutanota.de", "map")
++		.await;
++
++	assert!(result.is_err());
++	assert!(!server
++		.requests()
++		.iter()
++		.any(|(url, _)| url.contains("/sessionservice")));
++}

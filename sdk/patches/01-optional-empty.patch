@@ -1,0 +1,68 @@
+From d1aa5c00eee593caa3d0088538b20b29e6d6a462 Mon Sep 17 00:00:00 2001
+From: spartanz51 <a.m@tuta.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0200
+Subject: [PATCH] [sdk] Treat an empty optional encrypted value as null
+
+An optional encrypted field that holds an empty string has no ciphertext.
+The TS client resolves it to null (CryptoMapper.decryptValue); the Rust
+parser decoded it to zero bytes and handed them to the cipher, which
+fails with InvalidDataSizeError.
+---
+ tuta-sdk/rust/sdk/src/json_serializer.rs | 30 +++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/tuta-sdk/rust/sdk/src/json_serializer.rs b/tuta-sdk/rust/sdk/src/json_serializer.rs
+index 47733782d0..74bdb2ac59 100644
+--- a/tuta-sdk/rust/sdk/src/json_serializer.rs
++++ b/tuta-sdk/rust/sdk/src/json_serializer.rs
+@@ -74,6 +74,13 @@ impl JsonSerializer {
+ 
+ 			let mapped_value = match (&value_type.cardinality, value) {
+ 				(Cardinality::ZeroOrOne, JsonElement::Null) => ElementValue::Null,
++				// An empty optional encrypted value carries no ciphertext: it is null, as in
++				// CryptoMapper.decryptValue on the TS side, not something to decrypt.
++				(Cardinality::ZeroOrOne, JsonElement::String(v))
++					if value_type.encrypted && v.is_empty() =>
++				{
++					ElementValue::Null
++				},
+ 				(Cardinality::One, JsonElement::String(v))
+ 					if value_type.encrypted && v.is_empty() =>
+ 				{
+@@ -619,7 +626,7 @@ mod tests {
+ 	use crate::bindings::rest_client::MockRestClient;
+ 	use crate::entities::entity_facade::EntityFacadeImpl;
+ 	use crate::entities::generated::sys::{GroupMembership, User};
+-	use crate::entities::generated::tutanota::Mail;
++	use crate::entities::generated::tutanota::{Body, Mail};
+ 	use crate::entities::Entity;
+ 	use crate::instance_mapper::InstanceMapper;
+ 	use crate::util::test_utils::*;
+@@ -663,6 +670,27 @@ mod tests {
+ 			.unwrap();
+ 	}
+ 
++	#[test]
++	fn test_parse_empty_optional_encrypted_value_is_null() {
++		let type_model_provider = Arc::new(TypeModelProvider::new_test(
++			Arc::new(MockRestClient::new()),
++			Arc::new(MockFileClient::new()),
++			"localhost:9000".to_string(),
++		));
++		let json_serializer = JsonSerializer {
++			type_model_provider,
++		};
++		// Body.text (1275) and Body.compressedText (1276) are optional and encrypted.
++		let raw_entity: RawEntity =
++			serde_json::from_str(r#"{"1274":"body","1275":"","1276":"AQEBAQEBAQEBAQEBAQEBAQ=="}"#)
++				.unwrap();
++		let parsed = json_serializer
++			.parse(&Body::type_ref(), raw_entity)
++			.unwrap();
++		assert_eq!(parsed["1275"], ElementValue::Null);
++		assert_eq!(parsed["1276"], ElementValue::Bytes(vec![1; 16]));
++	}
++
+ 	#[test]
+ 	fn test_parse_mail_with_attachments() {
+ 		let type_model_provider = Arc::new(TypeModelProvider::new_test(
