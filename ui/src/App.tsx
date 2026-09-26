@@ -12,6 +12,7 @@ type Tab = "dashboard" | "connection" | "config" | "backup";
 
 function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const bridge = useBridge();
 
   const status = bridge.status;
@@ -68,6 +69,17 @@ function App() {
           </button>
         </nav>
       </header>
+      {bridge.updateReady && !updateDismissed && (
+        <div className="update-banner">
+          <span>TutaBridge {bridge.updateReady} is installed. Restart to use it.</span>
+          <div className="update-banner-actions">
+            <button onClick={() => setUpdateDismissed(true)}>Later</button>
+            <button className="primary" onClick={bridge.restartApp}>
+              Restart now
+            </button>
+          </div>
+        </div>
+      )}
       <main className="app-content">
         {tab === "dashboard" && (
           <Dashboard
@@ -99,6 +111,10 @@ function App() {
             loading={bridge.loading}
             onSave={bridge.saveConfig}
             onRestart={bridge.restartBridge}
+            appVersion={bridge.appVersion}
+            updateReady={bridge.updateReady}
+            onCheckUpdate={bridge.checkUpdate}
+            onInstallUpdate={bridge.installUpdate}
           />
         )}
         {tab === "backup" && (

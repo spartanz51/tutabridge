@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Config, BridgeStatus, BridgeStats } from "../types";
+import type { Config, BridgeStatus, BridgeStats, UpdateInfo } from "../types";
 
 const MAX_LOG_LINES = 500;
 
@@ -45,6 +45,11 @@ export function useBridge() {
   const [backupResult, setBackupResult] = useState<BackupStats | null>(null);
   const [backupError, setBackupError] = useState<string | null>(null);
 
+  // In-app updates: the running version, and the version installed behind
+  // it that waits for a restart (from the background loop or a manual install).
+  const [appVersion, setAppVersion] = useState("");
+  const [updateReady, setUpdateReady] = useState<string | null>(null);
+
   const refresh = useCallback(() => {
     invoke<BridgeStatus>("get_status").then(setStatus);
     invoke<BridgeStats>("get_stats").then(setStats);
@@ -54,6 +59,7 @@ export function useBridge() {
     invoke<Config>("get_config").then(setConfig);
     invoke<boolean>("has_saved_session").then(setHasSavedSession);
     invoke<string | null>("get_bridge_password").then(setBridgePassword);
+    invoke<string>("get_app_version").then(setAppVersion);
     refresh();
 
     // The bridge pushes `bridge://stats` and `bridge://status` whenever
@@ -62,10 +68,14 @@ export function useBridge() {
     const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => setStatus(e.payload));
     // The login (still in progress) needs a 2FA code: show the field.
     const unlistenTotp = listen("bridge://need-totp", () => setNeedsTotp(true));
+    const unlistenUpdate = listen<{ version: string }>("bridge://update-ready", (e) =>
+      setUpdateReady(e.payload.version),
+    );
     return () => {
       unlistenStats.then((fn) => fn());
       unlistenStatus.then((fn) => fn());
       unlistenTotp.then((fn) => fn());
+      unlistenUpdate.then((fn) => fn());
     };
   }, [refresh]);
 
@@ -168,6 +178,16 @@ export function useBridge() {
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
+  const checkUpdate = useCallback(() => invoke<UpdateInfo | null>("check_update"), []);
+
+  const installUpdate = useCallback(async () => {
+    const installed = await invoke<string | null>("install_update");
+    if (installed) setUpdateReady(installed);
+    return installed;
+  }, []);
+
+  const restartApp = useCallback(() => invoke("restart_app"), []);
+
   const regenerateBridgePassword = useCallback(async () => {
     const newPassword = await invoke<string>("regenerate_bridge_password");
     setBridgePassword(newPassword);
@@ -222,5 +242,10 @@ export function useBridge() {
     backupResult,
     backupError,
     startBackup,
+    appVersion,
+    updateReady,
+    checkUpdate,
+    installUpdate,
+    restartApp,
   };
 }

@@ -12,6 +12,15 @@ export interface Config {
   mcp_permission: McpPermission;
   /** Port the read-only MCP HTTP server listens on (127.0.0.1). */
   mcp_port: number;
+  /** The app looks for new versions on GitHub and installs them. */
+  auto_update: boolean;
+}
+
+/** A version newer than the running one, from `check_update`. */
+export interface UpdateInfo {
+  version: string;
+  current: string;
+  notes: string | null;
 }
 
 export type BridgeStatus = "Stopped" | "Starting" | "Running" | { Error: string };
