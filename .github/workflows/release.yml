@@ -2,7 +2,8 @@ name: Release
 
 # Two ways in:
 #   * push a tag `v0.1.0`  → build installers and attach them to a draft
-#     GitHub Release.
+#     GitHub Release, with the signed updater artifacts and `latest.json`
+#     that installed apps read to update themselves.
 #   * run manually (workflow_dispatch, on any branch) → build the same
 #     installers and upload them as **workflow artifacts** only, with no tag
 #     and no release. This is how you test the pipeline without burning a tag.
@@ -84,6 +85,24 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      # The updater compares versions, so a build carries the version of its
+      # tag (the repo says 0.1.0). A manual run gets a -dev suffix, which
+      # never looks newer than a release. Updater artifacts (signed .tar.gz,
+      # .sig files, latest.json) are only produced here: a local `tauri build`
+      # needs no signing key.
+      - name: Version the app and enable updater artifacts
+        shell: bash
+        run: |
+          cfg=src-tauri/tauri.conf.json
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(jq -r .version "$cfg")-dev.$(git rev-parse --short HEAD)"
+          fi
+          jq --arg v "$version" '.version = $v | .bundle.createUpdaterArtifacts = true' "$cfg" > "$cfg.tmp"
+          mv "$cfg.tmp" "$cfg"
+          echo "TutaBridge $version"
+
       # Builds the GUI bundles (.dmg / .msi+.exe / .deb+.AppImage). On a tag it
       # also creates/updates a draft Release and uploads them; on a manual run
       # `tagName` is empty so it only builds (no release).
@@ -92,11 +111,15 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('TutaBridge {0}', github.ref_name) || '' }}
           releaseDraft: true
           prerelease: false
+          # The updater installs the NSIS setup, not the MSI.
+          updaterJsonPreferNsis: true
           args: ${{ matrix.tauri_args }}
 
       - name: Build CLI

@@ -690,3 +690,21 @@ button.small {
   color: var(--on-surface);
   word-break: break-all;
 }
+
+/* ── Update banner ── */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.update-banner-actions {
+  display: flex;
+  gap: 8px;
+}

@@ -18,6 +18,10 @@ pub struct Config {
     pub mcp_permission: McpPermission,
     #[serde(default = "default_mcp_port")]
     pub mcp_port: u16,
+    /// The GUI looks for a new version on GitHub and installs it. Off means
+    /// it never contacts GitHub on its own. The CLI never updates itself.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
 }
 
 /// What a connected LLM may read over the MCP server. Strictly read-only — the
@@ -61,6 +65,10 @@ fn default_api_url() -> String {
     "https://app.tuta.com".to_string()
 }
 
+fn default_auto_update() -> bool {
+    true
+}
+
 impl Config {
     /// The listening ports must be usable and distinct. Two services on one
     /// port make the second bind fail at start; port 0 makes the system pick
@@ -98,6 +106,7 @@ impl Default for Config {
             sync_limit: default_sync_limit(),
             mcp_permission: McpPermission::default(),
             mcp_port: default_mcp_port(),
+            auto_update: default_auto_update(),
         }
     }
 }
@@ -294,6 +303,7 @@ smtp_port = 1025
             sync_limit: 500,
             mcp_permission: McpPermission::Full,
             mcp_port: 1944,
+            auto_update: false,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
@@ -327,6 +337,14 @@ mcp_port = 9999
         assert!(cfg.mcp_permission.is_enabled());
         assert!(!cfg.mcp_permission.allows_body());
         assert_eq!(cfg.mcp_port, 9999);
+    }
+
+    #[test]
+    fn auto_update_is_on_unless_the_config_turns_it_off() {
+        let base = "email = \"test@tuta.com\"\nimap_port = 1143\nsmtp_port = 1025\n";
+        assert!(parse_config(base).unwrap().auto_update);
+        let off = format!("{base}auto_update = false\n");
+        assert!(!parse_config(&off).unwrap().auto_update);
     }
 
     #[test]

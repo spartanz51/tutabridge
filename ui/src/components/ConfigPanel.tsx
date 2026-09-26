@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Config, BridgeStatus, McpPermission } from "../types";
+import type { Config, BridgeStatus, McpPermission, UpdateInfo } from "../types";
 
 interface Props {
   config: Config | null;
@@ -8,11 +8,26 @@ interface Props {
   loading: boolean;
   onSave: (config: Config) => Promise<void>;
   onRestart: () => Promise<void>;
+  appVersion: string;
+  /** A newer version is installed and waits for a restart. */
+  updateReady: string | null;
+  onCheckUpdate: () => Promise<UpdateInfo | null>;
+  onInstallUpdate: () => Promise<string | null>;
 }
 
-type Section = "account" | "sync" | "ai";
+type Section = "account" | "sync" | "ai" | "updates";
 
-export function ConfigPanel({ config, status, loading, onSave, onRestart }: Props) {
+export function ConfigPanel({
+  config,
+  status,
+  loading,
+  onSave,
+  onRestart,
+  appVersion,
+  updateReady,
+  onCheckUpdate,
+  onInstallUpdate,
+}: Props) {
   const [section, setSection] = useState<Section>("account");
   const [email, setEmail] = useState("");
   const [imapPort, setImapPort] = useState(1143);
@@ -25,6 +40,11 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
   const [mcpPort, setMcpPort] = useState(1944);
   const [mcpCopied, setMcpCopied] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [autoUpdate, setAutoUpdate] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [available, setAvailable] = useState<UpdateInfo | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (config) {
@@ -36,6 +56,7 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
       setSyncLimit(config.sync_limit === 0 ? 500 : config.sync_limit);
       setMcpPermission(config.mcp_permission ?? "disabled");
       setMcpPort(config.mcp_port ?? 1944);
+      setAutoUpdate(config.auto_update ?? true);
     }
   }, [config]);
 
@@ -43,7 +64,7 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
   // makes that message stale.
   useEffect(() => {
     setSaveError(null);
-  }, [email, imapPort, smtpPort, apiUrl, syncLimit, fetchAll, mcpPermission, mcpPort]);
+  }, [email, imapPort, smtpPort, apiUrl, syncLimit, fetchAll, mcpPermission, mcpPort, autoUpdate]);
 
   const isRunning = status === "Running" || status === "Starting";
 
@@ -81,6 +102,7 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
         sync_limit: fetchAll ? 0 : syncLimit,
         mcp_permission: mcpPermission,
         mcp_port: mcpPort,
+        auto_update: autoUpdate,
       });
     } catch (e) {
       setSaveError(String(e));
@@ -88,6 +110,39 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
     }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleCheckUpdate = async () => {
+    setChecking(true);
+    setUpdateMessage(null);
+    setAvailable(null);
+    try {
+      const found = await onCheckUpdate();
+      if (found) {
+        setAvailable(found);
+        setUpdateMessage(`TutaBridge ${found.version} is available.`);
+      } else {
+        setUpdateMessage(`TutaBridge ${appVersion} is up to date.`);
+      }
+    } catch (e) {
+      setUpdateMessage(`Could not check for updates: ${String(e)}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    setInstalling(true);
+    setUpdateMessage(null);
+    try {
+      const installed = await onInstallUpdate();
+      setAvailable(null);
+      if (!installed) setUpdateMessage(`TutaBridge ${appVersion} is up to date.`);
+    } catch (e) {
+      setUpdateMessage(`The update failed: ${String(e)}`);
+    } finally {
+      setInstalling(false);
+    }
   };
 
   const handleCopyMcpConfig = async () => {
@@ -121,6 +176,12 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
           onClick={() => setSection("ai")}
         >
           AI access
+        </button>
+        <button
+          className={section === "updates" ? "active" : ""}
+          onClick={() => setSection("updates")}
+        >
+          Updates
         </button>
       </nav>
 
@@ -246,6 +307,55 @@ export function ConfigPanel({ config, status, loading, onSave, onRestart }: Prop
                   client. The server listens on 127.0.0.1 and requires the
                   bridge password as a bearer token.
                 </small>
+              </>
+            )}
+          </div>
+        )}
+
+        {section === "updates" && (
+          <div className="form-group">
+            <label>Updates</label>
+            <small className="field-hint">Installed version: {appVersion || "…"}</small>
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={autoUpdate}
+                onChange={(e) => setAutoUpdate(e.target.checked)}
+              />
+              <span>Install updates automatically</span>
+            </label>
+            <small className="field-hint">
+              Looks for a new version on GitHub at startup and every 6 hours,
+              downloads it and installs it. The new version runs at the next
+              launch, or right away from the restart banner. When this is off,
+              TutaBridge never contacts GitHub on its own; you can still check
+              here. Every update is signed and checked before it is installed.
+            </small>
+            {updateReady ? (
+              <small className="field-hint">
+                TutaBridge {updateReady} is installed. Restart to use it.
+              </small>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={handleCheckUpdate}
+                  disabled={checking || installing}
+                >
+                  {checking ? "Checking…" : "Check for updates"}
+                </button>
+                {updateMessage && <small className="field-hint">{updateMessage}</small>}
+                {available && (
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={handleInstallUpdate}
+                    disabled={installing}
+                  >
+                    {installing ? "Installing…" : `Install ${available.version}`}
+                  </button>
+                )}
               </>
             )}
           </div>
