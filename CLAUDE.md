@@ -63,9 +63,10 @@ cargo build -p tutabridge-core  # Core library only
 ## Releases and updates
 
 Tag `vX.Y.Z-rc.N` on `main`: the release workflow writes that version into
-`src-tauri/tauri.conf.json`, builds the installers, signs the updater
-artifacts with the `TAURI_SIGNING_PRIVATE_KEY` secrets and attaches
-`latest.json` to the draft release. Publishing the draft is what makes the
+`src-tauri/tauri.conf.json` as `X.Y.Z-N` (Windows installers only take a
+numeric pre-release), builds the installers, signs the updater artifacts
+with the `TAURI_SIGNING_PRIVATE_KEY` secrets and attaches `latest.json` to
+the draft release. Publishing the draft is what makes the
 installed apps update themselves (`src-tauri/src/update.rs`; users can turn
 it off in the settings). A manual run of the workflow builds a `-dev`
 version as artifacts only. The signing key and its password must stay

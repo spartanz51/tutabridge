@@ -86,18 +86,25 @@ jobs:
         run: npm ci
 
       # The updater compares versions, so a build carries the version of its
-      # tag (the repo says 0.1.0). A manual run gets a -dev suffix, which
-      # never looks newer than a release. Updater artifacts (signed .tar.gz,
-      # .sig files, latest.json) are only produced here: a local `tauri build`
-      # needs no signing key.
+      # tag (the repo says 0.1.0). Windows installers only take a numeric
+      # pre-release, so the tag's `rc.N` becomes `N`: v0.1.0-rc.14 builds
+      # 0.1.0-14 on every platform, and latest.json says the same. A manual
+      # run builds 0.1.0-0, which never looks newer than a release. Updater
+      # artifacts (signed .tar.gz, .sig files, latest.json) are only produced
+      # here: a local `tauri build` needs no signing key.
       - name: Version the app and enable updater artifacts
         shell: bash
         run: |
           cfg=src-tauri/tauri.conf.json
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
+            version="${version/-rc./-}"
           else
-            version="$(jq -r .version "$cfg")-dev.$(git rev-parse --short HEAD)"
+            version="$(jq -r .version "$cfg")-0"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]]; then
+            echo "::error::tag must be vX.Y.Z or vX.Y.Z-rc.N, got $GITHUB_REF_NAME"
+            exit 1
           fi
           jq --arg v "$version" '.version = $v | .bundle.createUpdaterArtifacts = true' "$cfg" > "$cfg.tmp"
           mv "$cfg.tmp" "$cfg"
