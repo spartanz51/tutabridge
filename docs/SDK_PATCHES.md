@@ -50,7 +50,9 @@ longer applies, the PR is opened all the same, with the generator's
 message and only `sdk/BASE` moved. The workflow needs the
 `SDK_BUMP_TOKEN` repository secret: a fine-grained token with contents and
 pull-request write access on this repository and contents write access on
-the fork.
+the fork. Verifying the patches runs the release's own code, which nobody
+has reviewed yet, so that job holds no token, uses no action and no cache;
+the job that pushes with the token runs git alone.
 
 By hand, or to finish a PR whose patches broke:
 
