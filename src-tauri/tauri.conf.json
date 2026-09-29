@@ -35,5 +35,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI1NEI5Q0I3NzRCOUUwMjIKUldRaTRMbDB0NXhMSldHZFlPWG1wcVJWNEhWU1NBdmRTK2I0cmlLVVpydGpkWVpsUURmcnpkengK",
+      "endpoints": [
+        "https://github.com/spartanz51/tutabridge/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
