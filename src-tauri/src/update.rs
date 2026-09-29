@@ -35,14 +35,39 @@ fn auto_update_enabled() -> bool {
     }
 }
 
+/// Whether this install can replace itself. The macOS and Windows bundles
+/// can; on Linux only the AppImage can, a `.deb` or `.rpm` belongs to the
+/// package manager and the release only publishes the AppImage for updates.
+fn self_updating() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some()
+}
+
+const PACKAGE_MANAGED: &str = "This install is updated by its package manager, not by the app";
+
+/// The plugin's wording for a missing or unreachable `latest.json` names
+/// neither cause; a release published before the updater existed has none.
+fn describe(error: tauri_plugin_updater::Error) -> String {
+    let text = error.to_string();
+    if text.contains("valid release JSON") {
+        "GitHub returned no update information: the latest release has none, or the \
+         connection failed"
+            .to_owned()
+    } else {
+        text
+    }
+}
+
 /// Asks GitHub whether a newer version exists. Downloads nothing.
 pub async fn check(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
+    if !self_updating() {
+        return Err(PACKAGE_MANAGED.to_owned());
+    }
     let update = app
         .updater()
         .map_err(|e| e.to_string())?
         .check()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(describe)?;
     Ok(update.map(|update| UpdateInfo {
         version: update.version.clone(),
         current: update.current_version.clone(),
@@ -55,12 +80,15 @@ pub async fn check(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
 /// installer closes the app and relaunches it. Returns the installed version,
 /// or `None` when the app is up to date.
 pub async fn install(app: &AppHandle) -> Result<Option<String>, String> {
+    if !self_updating() {
+        return Err(PACKAGE_MANAGED.to_owned());
+    }
     let Some(update) = app
         .updater()
         .map_err(|e| e.to_string())?
         .check()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(describe)?
     else {
         return Ok(None);
     };
@@ -84,6 +112,10 @@ pub async fn install(app: &AppHandle) -> Result<Option<String>, String> {
 /// read again before every check, so turning it off needs no restart. Ends
 /// after one install: the new version takes over at the next launch.
 pub async fn run(app: AppHandle) {
+    if !self_updating() {
+        log::info!("{PACKAGE_MANAGED}");
+        return;
+    }
     tokio::time::sleep(FIRST_CHECK_DELAY).await;
     loop {
         if auto_update_enabled() {
