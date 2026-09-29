@@ -1,0 +1,181 @@
+name: SDK bump
+
+# Once a week, look for a Tuta release newer than sdk/BASE and open the pull
+# request that moves the vendored SDK to it: regenerated from sdk/patches with
+# every patch checked on its own, published on the fork, ready for CI. When a
+# patch no longer applies, the PR is still opened, with the generator's
+# message, for a human to fix the patch. Nothing is merged here.
+#
+# Needs the SDK_BUMP_TOKEN secret: a fine-grained token with contents and
+# pull-request write access on this repository and contents write access on
+# the SDK fork. The workflow's own token could neither publish the generated
+# commit on the fork nor open a PR that gets its CI run.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tuta release tag to move to (default: the latest)"
+        required: false
+      dry_run:
+        description: "Generate and verify only, push nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UPSTREAM: https://github.com/tutao/tutanota.git
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the token
+        if: ${{ !inputs.dry_run }}
+        env:
+          TOKEN: ${{ secrets.SDK_BUMP_TOKEN }}
+        run: |
+          [ -n "$TOKEN" ] && exit 0
+          echo "::error::the SDK_BUMP_TOKEN secret is not set (see the comment in this workflow)"
+          exit 1
+
+      # The token is kept in the git configuration, submodule included: the
+      # bump branch and the generated commit are pushed with it.
+      - name: Checkout (with vendored SDK submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.SDK_BUMP_TOKEN || github.token }}
+
+      - name: Find the release to move to
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          current=$(sed -n 's/^tag=//p' sdk/BASE)
+          tag=$INPUT_TAG
+          if [ -z "$tag" ]; then
+            tag=$(git ls-remote --tags "$UPSTREAM" 'refs/tags/tutanota-release-*' \
+              | awk '{print $2}' | sed 's#^refs/tags/##; s#\^{}$##' \
+              | grep -E '^tutanota-release-[0-9]+\.[0-9]{6}\.[0-9]+$' | sort -uV | tail -n 1)
+          fi
+          # The commit the tag points at: the peeled line for an annotated tag.
+          commit=$(git ls-remote --tags "$UPSTREAM" "refs/tags/$tag" "refs/tags/$tag^{}" \
+            | awk '/\^\{\}$/ {peeled = $1} !/\^\{\}$/ {plain = $1} END {print peeled ? peeled : plain}')
+          if [ -z "$commit" ]; then
+            echo "::error::no such release: $tag"
+            exit 1
+          fi
+          echo "vendored: $current, candidate: $tag ($commit)"
+          if [ "$tag" = "$current" ]; then
+            echo "The vendored SDK is already on $tag." >> "$GITHUB_STEP_SUMMARY"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --heads origin "sdk/${tag#tutanota-release-}" >/dev/null; then
+            echo "A bump to $tag is already open (branch sdk/${tag#tutanota-release-})." >> "$GITHUB_STEP_SUMMARY"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "bump=true"
+              echo "tag=$tag"
+              echo "version=${tag#tutanota-release-}"
+              echo "commit=$commit"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.release.outputs.bump == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo build
+        if: steps.release.outputs.bump == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      # Same as the CI's Linux job: the SDK tests build the rustls stack.
+      - name: Install build tools
+        if: steps.release.outputs.bump == 'true'
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm libdbus-1-dev pkg-config
+
+      - name: Point sdk/BASE at the release
+        if: steps.release.outputs.bump == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          sed -i -e "s/^tag=.*/tag=$TAG/" -e "s/^commit=.*/commit=$COMMIT/" sdk/BASE
+          cat sdk/BASE
+
+      # After every patch the SDK must be formatted and pass its tests. A
+      # failure names the patch; the PR below carries that message. An
+      # explicit `shell: bash` turns pipefail on, so the outcome is the
+      # generator's, not tee's.
+      - name: Regenerate the SDK and verify every patch
+        if: steps.release.outputs.bump == 'true'
+        id: generate
+        continue-on-error: true
+        shell: bash
+        run: scripts/sdk-generate.sh --verify-each 2>&1 | tee generate.log
+
+      - name: Publish the generated commit on the fork
+        if: steps.release.outputs.bump == 'true' && steps.generate.outcome == 'success' && !inputs.dry_run
+        run: scripts/sdk-generate.sh --push
+
+      - name: Open the bump pull request
+        if: steps.release.outputs.bump == 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.SDK_BUMP_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+          GENERATED: ${{ steps.generate.outcome }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "sdk/$VERSION"
+          # On a failed generation tuta-repo and .gitmodules are untouched:
+          # the PR then moves sdk/BASE alone, so `--check` reproduces the failure.
+          git add sdk/BASE tuta-repo .gitmodules
+          git commit -m "Build on Tuta release $VERSION"
+          git push origin "sdk/$VERSION"
+          {
+            echo "Moves the vendored SDK to \`$TAG\` (\`$COMMIT\`)."
+            echo
+            if [ "$GENERATED" = success ]; then
+              echo "Every patch applies, is formatted and passes the SDK tests on its own;"
+              echo "the generated commit is published on the fork."
+              echo
+              echo "Before merging, a live check: log in, list and read mail, send one"
+              echo "message, move one, trash one. Then tag a release."
+            else
+              echo "**The patches no longer apply as they are.** The generator said:"
+              echo
+              echo '```'
+              tail -n 20 generate.log
+              echo '```'
+              echo
+              echo "Fix the patch in \`sdk/patches\` on this branch (docs/SDK_PATCHES.md),"
+              echo "then \`scripts/sdk-generate.sh --push\` and stage \`tuta-repo\` and \`.gitmodules\`."
+            fi
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --title "Build on Tuta release $VERSION" --body-file "$RUNNER_TEMP/body.md" \
+            --base "${{ github.event.repository.default_branch }}" --head "sdk/$VERSION"
+
+      - name: Summary
+        if: steps.release.outputs.bump == 'true'
+        env:
+          GENERATED: ${{ steps.generate.outcome }}
+        run: |
+          {
+            echo "Release: ${{ steps.release.outputs.tag }}, generation: $GENERATED"
+            echo
+            echo '```'
+            tail -n 15 generate.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$GENERATED" = success ]
