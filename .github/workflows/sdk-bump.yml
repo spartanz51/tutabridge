@@ -8,10 +8,11 @@ name: SDK bump
 #
 # Trust boundary. Verifying the patches means building and running the
 # release's own code (build scripts, proc macros, tests), which nobody has
-# reviewed yet. That happens in `verify`, a job with nothing to steal: no
-# token, no action (an action's process carries the runtime token, and a
-# process left behind by a test could read it), no cache to poison. Only
-# `publish` sees the token, and it runs nothing from the release: git alone.
+# reviewed yet. That happens in `verify`, a job that holds no token, uses
+# no action (an action's process carries the runtime token, and a process
+# left behind by a test could read it), restores and saves no cache, and
+# gives up root before that code runs. Only `publish` sees the token, and
+# it runs nothing from the release: git alone.
 #
 # Needs the SDK_BUMP_TOKEN secret: a fine-grained token with contents and
 # pull-request write access on this repository and contents write access on
@@ -125,6 +126,24 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
 
+      # A hosted runner gives its user passwordless sudo and the docker
+      # socket: two roads to root, and from there to the runner process,
+      # whose token writes the caches that CI and the release restore. Both
+      # are closed before the release's code runs. Less reach, not none: the
+      # runner process itself is still there.
+      - name: Give up root
+        run: |
+          sudo systemctl stop docker.socket docker containerd 2>/dev/null || true
+          sudo bash -c 'chmod 600 /var/run/docker.sock 2>/dev/null; rm -f /etc/sudoers.d/*; sed -i "/NOPASSWD/d" /etc/sudoers'
+          if sudo -n true 2>/dev/null; then
+            echo "::error::sudo is still available"
+            exit 1
+          fi
+          if docker info >/dev/null 2>&1; then
+            echo "::error::docker is still available"
+            exit 1
+          fi
+
       - name: Point sdk/BASE at the release
         run: |
           sed -i -e "s/^tag=.*/tag=$TAG/" -e "s/^commit=.*/commit=$COMMIT/" sdk/BASE
@@ -203,6 +222,8 @@ jobs:
           git commit -m "Build on Tuta release $VERSION"
           git push origin "sdk/$VERSION"
           run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # A line from a job that ran the release's code: text only.
+          message=$(printf '%s' "$MESSAGE" | tr -d '`@\r\n' | cut -c 1-300)
           {
             echo "Moves the vendored SDK to \`$TAG\` (\`$COMMIT\`)."
             echo
@@ -212,15 +233,20 @@ jobs:
               echo
               echo "Before merging, a live check: log in, list and read mail, send one"
               echo "message, move one, trash one. Then tag a release."
-            else
-              echo "**The patches no longer apply as they are.** The generator said:"
+            elif [ -n "$message" ]; then
+              echo "**The patches no longer hold on this release.** The generator said:"
               echo
-              echo "> $(printf '%s' "$MESSAGE" | tr -d '`@\r\n' | cut -c 1-300)"
+              echo "> $message"
               echo
               echo "Full log: $run"
               echo
               echo "Fix the patch in \`sdk/patches\` on this branch (docs/SDK_PATCHES.md),"
               echo "then \`scripts/sdk-generate.sh --push\` and stage \`tuta-repo\` and \`.gitmodules\`."
+            else
+              echo "**The verification did not finish** (cancelled, timed out, or failed"
+              echo "before the generator ran): $run"
+              echo
+              echo "Run \`scripts/sdk-generate.sh --verify-each\` on this branch to see where it stands."
             fi
           } > "$RUNNER_TEMP/body.md"
           gh pr create --title "Build on Tuta release $VERSION" --body-file "$RUNNER_TEMP/body.md" \
