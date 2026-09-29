@@ -6,6 +6,13 @@ name: SDK bump
 # patch no longer applies, the PR is still opened, with the generator's
 # message, for a human to fix the patch. Nothing is merged here.
 #
+# Trust boundary. Verifying the patches means building and running the
+# release's own code (build scripts, proc macros, tests), which nobody has
+# reviewed yet. That happens in `verify`, a job with nothing to steal: no
+# token, no action (an action's process carries the runtime token, and a
+# process left behind by a test could read it), no cache to poison. Only
+# `publish` sees the token, and it runs nothing from the release: git alone.
+#
 # Needs the SDK_BUMP_TOKEN secret: a fine-grained token with contents and
 # pull-request write access on this repository and contents write access on
 # the SDK fork. The workflow's own token could neither publish the generated
@@ -27,12 +34,16 @@ permissions:
   contents: read
 
 env:
-  CARGO_TERM_COLOR: always
   UPSTREAM: https://github.com/tutao/tutanota.git
 
 jobs:
-  bump:
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      bump: ${{ steps.release.outputs.bump }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
     steps:
       - name: Check the token
         if: ${{ !inputs.dry_run }}
@@ -43,14 +54,10 @@ jobs:
           echo "::error::the SDK_BUMP_TOKEN secret is not set (see the comment in this workflow)"
           exit 1
 
-      # The token is kept in the git configuration, submodule included: the
-      # bump branch and the generated commit are pushed with it.
-      - name: Checkout (with vendored SDK submodule)
+      - name: Checkout (sdk/BASE only)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
-          fetch-depth: 0
-          token: ${{ secrets.SDK_BUMP_TOKEN || github.token }}
+          persist-credentials: false
 
       - name: Find the release to move to
         id: release
@@ -64,10 +71,14 @@ jobs:
               | awk '{print $2}' | sed 's#^refs/tags/##; s#\^{}$##' \
               | grep -E '^tutanota-release-[0-9]+\.[0-9]{6}\.[0-9]+$' | sort -uV | tail -n 1)
           fi
+          if ! [[ $tag =~ ^tutanota-release-[0-9]+\.[0-9]{6}\.[0-9]+$ ]]; then
+            echo "::error::not a Tuta release tag: $tag"
+            exit 1
+          fi
           # The commit the tag points at: the peeled line for an annotated tag.
           commit=$(git ls-remote --tags "$UPSTREAM" "refs/tags/$tag" "refs/tags/$tag^{}" \
             | awk '/\^\{\}$/ {peeled = $1} !/\^\{\}$/ {plain = $1} END {print peeled ? peeled : plain}')
-          if [ -z "$commit" ]; then
+          if ! [[ $commit =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::no such release: $tag"
             exit 1
           fi
@@ -87,66 +98,115 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install Rust toolchain
-        if: steps.release.outputs.bump == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Cache cargo build
-        if: steps.release.outputs.bump == 'true'
-        uses: Swatinem/rust-cache@v2
+  verify:
+    # Runs the release's code: see the trust boundary above. No `uses:` here.
+    needs: detect
+    if: needs.detect.outputs.bump == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions: {}
+    outputs:
+      generated: ${{ steps.generate.outputs.generated }}
+      message: ${{ steps.generate.outputs.message }}
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
+      COMMIT: ${{ needs.detect.outputs.commit }}
+    steps:
+      - name: Clone this repository and the vendored SDK
+        run: |
+          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
+          git checkout --quiet "$GITHUB_SHA"
+          git submodule update --init --quiet tuta-repo
 
       # Same as the CI's Linux job: the SDK tests build the rustls stack.
       - name: Install build tools
-        if: steps.release.outputs.bump == 'true'
-        run: sudo apt-get update && sudo apt-get install -y cmake nasm libdbus-1-dev pkg-config
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake nasm libdbus-1-dev pkg-config
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
 
       - name: Point sdk/BASE at the release
-        if: steps.release.outputs.bump == 'true'
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-          COMMIT: ${{ steps.release.outputs.commit }}
         run: |
           sed -i -e "s/^tag=.*/tag=$TAG/" -e "s/^commit=.*/commit=$COMMIT/" sdk/BASE
           cat sdk/BASE
 
-      # After every patch the SDK must be formatted and pass its tests. A
-      # failure names the patch; the PR below carries that message. An
-      # explicit `shell: bash` turns pipefail on, so the outcome is the
-      # generator's, not tee's.
+      # After every patch the SDK must be formatted and pass its tests. The
+      # generator's last line names the failing patch; `publish` puts it in
+      # the PR. An explicit `shell: bash` turns pipefail on, so the status
+      # is the generator's, not tee's.
       - name: Regenerate the SDK and verify every patch
-        if: steps.release.outputs.bump == 'true'
         id: generate
-        continue-on-error: true
         shell: bash
-        run: scripts/sdk-generate.sh --verify-each 2>&1 | tee generate.log
+        run: |
+          status=0
+          scripts/sdk-generate.sh --verify-each 2>&1 | tee generate.log || status=$?
+          {
+            echo "generated=$(git -C tuta-repo rev-parse HEAD)"
+            echo "message=$(tail -n 1 generate.log | tr -d '`' | cut -c 1-300)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "Release: $TAG, generator status: $status"
+            echo
+            echo '```'
+            tail -n 15 generate.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
+  publish:
+    # Runs after `verify` whatever its result: a broken patch is a PR too.
+    needs: [detect, verify]
+    if: always() && needs.detect.result == 'success' && needs.detect.outputs.bump == 'true' && !inputs.dry_run
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
+      VERSION: ${{ needs.detect.outputs.version }}
+      COMMIT: ${{ needs.detect.outputs.commit }}
+      VERIFIED: ${{ needs.verify.result }}
+    steps:
+      # The token is kept in the git configuration, submodule included: the
+      # bump branch and the generated commit are pushed with it.
+      - name: Checkout (with vendored SDK submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.SDK_BUMP_TOKEN }}
+
+      - name: Point sdk/BASE at the release
+        run: sed -i -e "s/^tag=.*/tag=$TAG/" -e "s/^commit=.*/commit=$COMMIT/" sdk/BASE
+
+      # Git only: the patches applied again on the same base give the same
+      # commit, which must be the one `verify` tested.
       - name: Publish the generated commit on the fork
-        if: steps.release.outputs.bump == 'true' && steps.generate.outcome == 'success' && !inputs.dry_run
-        run: scripts/sdk-generate.sh --push
+        if: env.VERIFIED == 'success'
+        env:
+          GENERATED: ${{ needs.verify.outputs.generated }}
+        run: |
+          scripts/sdk-generate.sh --push
+          if [ "$(git -C tuta-repo rev-parse HEAD)" != "$GENERATED" ]; then
+            echo "::error::the generated commit is not the one verify tested ($GENERATED)"
+            exit 1
+          fi
 
       - name: Open the bump pull request
-        if: steps.release.outputs.bump == 'true' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.SDK_BUMP_TOKEN }}
-          TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.release.outputs.version }}
-          COMMIT: ${{ steps.release.outputs.commit }}
-          GENERATED: ${{ steps.generate.outcome }}
+          MESSAGE: ${{ needs.verify.outputs.message }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "sdk/$VERSION"
-          # On a failed generation tuta-repo and .gitmodules are untouched:
+          # After a failed verification tuta-repo and .gitmodules are untouched:
           # the PR then moves sdk/BASE alone, so `--check` reproduces the failure.
           git add sdk/BASE tuta-repo .gitmodules
           git commit -m "Build on Tuta release $VERSION"
           git push origin "sdk/$VERSION"
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           {
             echo "Moves the vendored SDK to \`$TAG\` (\`$COMMIT\`)."
             echo
-            if [ "$GENERATED" = success ]; then
+            if [ "$VERIFIED" = success ]; then
               echo "Every patch applies, is formatted and passes the SDK tests on its own;"
               echo "the generated commit is published on the fork."
               echo
@@ -155,9 +215,9 @@ jobs:
             else
               echo "**The patches no longer apply as they are.** The generator said:"
               echo
-              echo '```'
-              tail -n 20 generate.log
-              echo '```'
+              echo "> $(printf '%s' "$MESSAGE" | tr -d '`@\r\n' | cut -c 1-300)"
+              echo
+              echo "Full log: $run"
               echo
               echo "Fix the patch in \`sdk/patches\` on this branch (docs/SDK_PATCHES.md),"
               echo "then \`scripts/sdk-generate.sh --push\` and stage \`tuta-repo\` and \`.gitmodules\`."
@@ -165,17 +225,3 @@ jobs:
           } > "$RUNNER_TEMP/body.md"
           gh pr create --title "Build on Tuta release $VERSION" --body-file "$RUNNER_TEMP/body.md" \
             --head "sdk/$VERSION"
-
-      - name: Summary
-        if: steps.release.outputs.bump == 'true'
-        env:
-          GENERATED: ${{ steps.generate.outcome }}
-        run: |
-          {
-            echo "Release: ${{ steps.release.outputs.tag }}, generation: $GENERATED"
-            echo
-            echo '```'
-            tail -n 15 generate.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          [ "$GENERATED" = success ]
