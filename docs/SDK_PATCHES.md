@@ -41,16 +41,33 @@ patch changes.
 
 ## Moving to a new Tuta release
 
+The `SDK bump` workflow (`.github/workflows/sdk-bump.yml`) opens the PR:
+every Monday, or on demand from the Actions tab, it looks for a
+`tutanota-release-*` tag newer than `sdk/BASE`, points `sdk/BASE` at it,
+runs `scripts/sdk-generate.sh --verify-each`, publishes the generated
+commit on the fork and pushes a `sdk/<version>` branch. When a patch no
+longer applies, the PR is opened all the same, with the generator's
+message and only `sdk/BASE` moved. The workflow needs the
+`SDK_BUMP_TOKEN` repository secret: a fine-grained token with contents and
+pull-request write access on this repository and contents write access on
+the fork. Verifying the patches runs the release's own code, which nobody
+has reviewed yet, so that job holds no token, uses no action and no cache;
+the job that pushes with the token runs git alone.
+
+By hand, or to finish a PR whose patches broke:
+
 1. Put the new tag and its commit in `sdk/BASE`.
 2. `scripts/sdk-generate.sh`. A patch Tuta has taken is reported as
    already included: delete it. A patch that no longer applies is fixed in
    `sdk/patches/` (regenerate it with `git format-patch` from a fixed tree),
    never in `tuta-repo`. Then `scripts/sdk-generate.sh --verify-each`.
-3. Run the SDK and bridge test suites, then a live check: log in, list and
-   read mail, open a received attachment and a self-sent one, send one
-   plaintext and one HTML message, mark read, move and trash, read the log.
-4. `scripts/sdk-generate.sh --push`, `git add tuta-repo sdk .gitmodules`,
-   open a PR.
+3. `scripts/sdk-generate.sh --push`, `git add tuta-repo sdk .gitmodules`,
+   push.
+
+Before merging any bump: CI (the SDK and bridge test suites), then a live
+check: log in, list and read mail, open a received attachment and a
+self-sent one, send one plaintext and one HTML message, mark read, move
+and trash, read the log. Then tag a release.
 
 Tuta raises the minimum client version it accepts every few months (HTTP
 474 below it), so staying on recent releases is what keeps the bridge able
