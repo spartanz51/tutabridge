@@ -299,8 +299,8 @@ mod tests {
     use crate::mail::parser::ParsedMessage;
     use crate::tuta::FolderInfo;
     use tokio::io::AsyncReadExt;
+    use tutabridge_tuta::folder_system::MailSetKind;
     use tutasdk::entities::generated::tutanota::{Mail, MailDetails, MailSetEntry, TutanotaFile};
-    use tutasdk::folder_system::MailSetKind;
     use tutasdk::IdTupleGenerated;
 
     #[test]

@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let bus_user_id = session
         .user_id()
         .ok_or_else(|| anyhow::anyhow!("Missing user id from session"))?;
-    let bus_client = Arc::new(tutasdk::event_bus::EventBusClient::new(
+    let bus_client = Arc::new(tutabridge_tuta::event_bus::EventBusClient::new(
         cfg.api_url.clone(),
         bridge_helpers::sys_model_version(),
         bridge_helpers::tutanota_model_version(),
@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let expire_ms = tutasdk::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
+        let expire_ms = tutabridge_tuta::event_bus::ENTITY_EVENT_BATCH_EXPIRE.as_millis() as i64;
         if let Ok(Some(min_ms)) = local_store.event_bus_state_min_updated_at_ms() {
             if now_ms - min_ms > expire_ms {
                 info!("Cached event-bus state is older than 44 days — wiping and forcing a full re-sync");
@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         let shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
-                use tutasdk::event_bus::EventBusError;
+                use tutabridge_tuta::event_bus::EventBusError;
                 if !matches!(e, EventBusError::Stopped) {
                     warn!("Event bus exited: {e}");
                 }
