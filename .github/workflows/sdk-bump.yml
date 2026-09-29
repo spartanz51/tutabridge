@@ -164,7 +164,7 @@ jobs:
             fi
           } > "$RUNNER_TEMP/body.md"
           gh pr create --title "Build on Tuta release $VERSION" --body-file "$RUNNER_TEMP/body.md" \
-            --base "${{ github.event.repository.default_branch }}" --head "sdk/$VERSION"
+            --head "sdk/$VERSION"
 
       - name: Summary
         if: steps.release.outputs.bump == 'true'
