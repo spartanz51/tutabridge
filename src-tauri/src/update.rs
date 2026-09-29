@@ -4,9 +4,11 @@
 //!
 //! The update path does not go through Tuta, so an app that Tuta refuses for
 //! being too old can still update itself.
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Error, UpdaterExt};
 use tutabridge_core::config;
 
 /// How often a running app looks for a new version.
@@ -28,6 +30,13 @@ struct UpdateReady {
     version: String,
 }
 
+/// A new version exists but installing it is left to the user, pushed to
+/// the UI as `bridge://update-available`.
+#[derive(Clone, serde::Serialize)]
+struct UpdateAvailable {
+    version: String,
+}
+
 fn auto_update_enabled() -> bool {
     match config::load_config() {
         Ok(Some(cfg)) => cfg.auto_update,
@@ -44,16 +53,50 @@ fn self_updating() -> bool {
 
 const PACKAGE_MANAGED: &str = "This install is updated by its package manager, not by the app";
 
-/// The plugin's wording for a missing or unreachable `latest.json` names
-/// neither cause; a release published before the updater existed has none.
-fn describe(error: tauri_plugin_updater::Error) -> String {
-    let text = error.to_string();
-    if text.contains("valid release JSON") {
-        "GitHub returned no update information: the latest release has none, or the \
-         connection failed"
-            .to_owned()
+/// Replacing the app needs write access to where it lives. Without it the
+/// plugin asks for an administrator password, which a background task must
+/// never do: the user gets a banner and decides. The Windows installer
+/// manages its own rights.
+fn bundle_writable() -> bool {
+    if cfg!(target_os = "windows") {
+        return true;
+    }
+    let location = if cfg!(target_os = "macos") {
+        // .../TutaBridge.app/Contents/MacOS/tutabridge-gui: the folder holding the bundle.
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.ancestors().nth(4).map(Path::to_path_buf))
     } else {
-        text
+        std::env::var_os("APPIMAGE")
+            .map(PathBuf::from)
+            .and_then(|image| image.parent().map(Path::to_path_buf))
+    };
+    let Some(dir) = location else {
+        return false;
+    };
+    let probe = dir.join(".tutabridge-update-probe");
+    let writable = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    writable
+}
+
+/// One download at a time: the background loop and the settings button
+/// can both ask for an install.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// The plugin reports a missing `latest.json` with the same words whether
+/// the release has none (published before the updater existed) or GitHub
+/// answered something else; both are worth saying.
+fn describe(error: Error) -> String {
+    match error {
+        Error::ReleaseNotFound => {
+            "GitHub returned no update information: the latest release has none, or the \
+             answer was not the expected file"
+                .to_owned()
+        }
+        Error::Network(reason) => format!("Could not reach GitHub: {reason}"),
+        Error::Reqwest(e) => format!("Could not reach GitHub: {e}"),
+        other => other.to_string(),
     }
 }
 
@@ -83,6 +126,15 @@ pub async fn install(app: &AppHandle) -> Result<Option<String>, String> {
     if !self_updating() {
         return Err(PACKAGE_MANAGED.to_owned());
     }
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        return Err("An update is already being installed".to_owned());
+    }
+    let result = install_now(app).await;
+    INSTALLING.store(false, Ordering::SeqCst);
+    result
+}
+
+async fn install_now(app: &AppHandle) -> Result<Option<String>, String> {
     let Some(update) = app
         .updater()
         .map_err(|e| e.to_string())?
@@ -97,7 +149,7 @@ pub async fn install(app: &AppHandle) -> Result<Option<String>, String> {
     update
         .download_and_install(|_, _| {}, || {})
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(describe)?;
     log::info!("TutaBridge {version} is installed; it runs at the next launch");
     let _ = app.emit(
         "bridge://update-ready",
@@ -119,9 +171,26 @@ pub async fn run(app: AppHandle) {
     tokio::time::sleep(FIRST_CHECK_DELAY).await;
     loop {
         if auto_update_enabled() {
-            match install(&app).await {
-                Ok(Some(_)) => return,
+            match check(&app).await {
                 Ok(None) => log::debug!("TutaBridge is up to date"),
+                Ok(Some(_)) if bundle_writable() => match install(&app).await {
+                    Ok(Some(_)) => return,
+                    Ok(None) => {}
+                    Err(e) => log::warn!("Update failed: {e}"),
+                },
+                Ok(Some(found)) => {
+                    log::info!(
+                        "TutaBridge {} is available; installing it needs more rights, so the app \
+                         waits for the user",
+                        found.version
+                    );
+                    let _ = app.emit(
+                        "bridge://update-available",
+                        UpdateAvailable {
+                            version: found.version,
+                        },
+                    );
+                }
                 Err(e) => log::warn!("Update check failed: {e}"),
             }
         }

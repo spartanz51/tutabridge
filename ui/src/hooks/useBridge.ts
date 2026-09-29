@@ -49,6 +49,9 @@ export function useBridge() {
   // it that waits for a restart (from the background loop or a manual install).
   const [appVersion, setAppVersion] = useState("");
   const [updateReady, setUpdateReady] = useState<string | null>(null);
+  // A version the background loop found but did not install (it would need
+  // more rights): the banner offers the install instead.
+  const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     invoke<BridgeStatus>("get_status").then(setStatus);
@@ -68,14 +71,19 @@ export function useBridge() {
     const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => setStatus(e.payload));
     // The login (still in progress) needs a 2FA code: show the field.
     const unlistenTotp = listen("bridge://need-totp", () => setNeedsTotp(true));
-    const unlistenUpdate = listen<{ version: string }>("bridge://update-ready", (e) =>
-      setUpdateReady(e.payload.version),
+    const unlistenUpdate = listen<{ version: string }>("bridge://update-ready", (e) => {
+      setUpdateAvailable(null);
+      setUpdateReady(e.payload.version);
+    });
+    const unlistenAvailable = listen<{ version: string }>("bridge://update-available", (e) =>
+      setUpdateAvailable(e.payload.version),
     );
     return () => {
       unlistenStats.then((fn) => fn());
       unlistenStatus.then((fn) => fn());
       unlistenTotp.then((fn) => fn());
       unlistenUpdate.then((fn) => fn());
+      unlistenAvailable.then((fn) => fn());
     };
   }, [refresh]);
 
@@ -182,7 +190,10 @@ export function useBridge() {
 
   const installUpdate = useCallback(async () => {
     const installed = await invoke<string | null>("install_update");
-    if (installed) setUpdateReady(installed);
+    if (installed) {
+      setUpdateAvailable(null);
+      setUpdateReady(installed);
+    }
     return installed;
   }, []);
 
@@ -244,6 +255,7 @@ export function useBridge() {
     startBackup,
     appVersion,
     updateReady,
+    updateAvailable,
     checkUpdate,
     installUpdate,
     restartApp,

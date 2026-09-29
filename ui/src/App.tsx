@@ -13,7 +13,21 @@ type Tab = "dashboard" | "connection" | "config" | "backup";
 function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
   const bridge = useBridge();
+
+  const installFromBanner = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      await bridge.installUpdate();
+    } catch (e) {
+      setInstallError(String(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   const status = bridge.status;
   const isRunning = status === "Running";
@@ -76,6 +90,22 @@ function App() {
             <button onClick={() => setUpdateDismissed(true)}>Later</button>
             <button className="primary" onClick={bridge.restartApp}>
               Restart now
+            </button>
+          </div>
+        </div>
+      )}
+      {!bridge.updateReady && bridge.updateAvailable && !updateDismissed && (
+        <div className="update-banner">
+          <span>
+            TutaBridge {bridge.updateAvailable} is available.
+            {installError ? ` The install failed: ${installError}` : ""}
+          </span>
+          <div className="update-banner-actions">
+            <button onClick={() => setUpdateDismissed(true)} disabled={installing}>
+              Later
+            </button>
+            <button className="primary" onClick={installFromBanner} disabled={installing}>
+              {installing ? "Installing…" : "Install"}
             </button>
           </div>
         </div>
