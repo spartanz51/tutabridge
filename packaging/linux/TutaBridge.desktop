@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TutaBridge
+Comment=Local IMAP/SMTP bridge for Tuta encrypted email
+Exec=tutabridge-gui
+Icon=tutabridge-gui
+Terminal=false
+Categories=Network;Email;
+StartupWMClass=tutabridge-gui
