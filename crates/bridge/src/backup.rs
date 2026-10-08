@@ -292,11 +292,11 @@ mod tests {
     use crypto_primitives::key::GenericAesKey;
     use crypto_primitives::randomizer_facade::RandomizerFacade;
     use std::collections::HashMap;
+    use tutabridge_tuta::folder_system::MailSetKind;
     use tutasdk::date::DateTime;
     use tutasdk::entities::generated::tutanota::{
         Body, Mail, MailAddress, MailDetails, MailSetEntry, Recipients,
     };
-    use tutasdk::folder_system::MailSetKind;
     use tutasdk::{GeneratedId, IdTupleGenerated};
 
     fn gid(s: &str) -> GeneratedId {

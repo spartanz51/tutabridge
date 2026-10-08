@@ -2021,7 +2021,7 @@ mod tests {
 
     use crate::sync::StoredMail;
     use crate::tuta::FolderInfo;
-    use tutasdk::folder_system::MailSetKind;
+    use tutabridge_tuta::folder_system::MailSetKind;
 
     fn inbox_folder() -> FolderInfo {
         FolderInfo {

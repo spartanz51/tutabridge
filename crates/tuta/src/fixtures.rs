@@ -1,0 +1,80 @@
+pub trait Fixture {
+    fn fixture() -> Self;
+}
+pub fn create_test_entity<T: Fixture>() -> T {
+    T::fixture()
+}
+impl Fixture for tutasdk::entities::generated::tutanota::Mail {
+    fn fixture() -> Self {
+        Self {
+            _id: None,
+            _permissions: tutasdk::GeneratedId("fixture".into()),
+            _format: Default::default(),
+            _ownerEncSessionKey: None,
+            subject: Default::default(),
+            receivedDate: tutasdk::date::DateTime::from_millis(0),
+            state: Default::default(),
+            unread: Default::default(),
+            confidential: Default::default(),
+            replyType: Default::default(),
+            _ownerGroup: None,
+            differentEnvelopeSender: None,
+            listUnsubscribe: Default::default(),
+            movedTime: None,
+            phishingStatus: Default::default(),
+            authStatus: None,
+            method: Default::default(),
+            recipientCount: Default::default(),
+            encryptionAuthStatus: None,
+            _ownerKeyVersion: None,
+            processingState: Default::default(),
+            processNeeded: Default::default(),
+            sendAt: None,
+            serverClassificationData: None,
+            _kdfNonce: None,
+            sender: create_test_entity::<tutasdk::entities::generated::tutanota::MailAddress>(),
+            attachments: vec![],
+            conversationEntry: tutasdk::IdTupleGenerated::new(
+                tutasdk::GeneratedId("list".into()),
+                tutasdk::GeneratedId("element".into()),
+            ),
+            firstRecipient: None,
+            mailDetails: None,
+            mailDetailsDraft: None,
+            bucketKey: None,
+            sets: vec![],
+            clientSpamClassifierResult: None,
+            _errors: Default::default(),
+        }
+    }
+}
+impl Fixture for tutasdk::entities::generated::tutanota::MailSet {
+    fn fixture() -> Self {
+        Self {
+            _id: None,
+            _permissions: tutasdk::GeneratedId("fixture".into()),
+            _format: Default::default(),
+            _ownerEncSessionKey: None,
+            name: Default::default(),
+            folderType: Default::default(),
+            _ownerGroup: None,
+            _ownerKeyVersion: None,
+            color: None,
+            _kdfNonce: None,
+            parentFolder: None,
+            entries: tutasdk::GeneratedId("fixture".into()),
+            _errors: Default::default(),
+        }
+    }
+}
+impl Fixture for tutasdk::entities::generated::tutanota::MailAddress {
+    fn fixture() -> Self {
+        Self {
+            _id: None,
+            name: Default::default(),
+            address: Default::default(),
+            contact: None,
+            _errors: Default::default(),
+        }
+    }
+}

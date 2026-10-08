@@ -7,7 +7,7 @@
 //! The hot path — `MailSetEntry` CREATE/DELETE — is handled **without**
 //! re-listing the affected folder over REST: a `MailSetEntry`'s element id
 //! is a Tuta-defined encoding of `(receivedDate, mail_element_id)`, so we
-//! recover the mail id directly via `tutasdk::mail_set_entry_id::deconstruct`
+//! recover the mail id directly via `tutabridge_tuta::mail_set_entry_id::deconstruct`
 //! and either move the already-decrypted Mail between folders in memory
 //! (when it's a MOVE between two cached folders) or ask the backend for
 //! the single Mail (`load_mail`) when it is a brand-new arrival. The full
@@ -22,8 +22,11 @@ use std::sync::{Arc, Mutex};
 
 use log::{debug, info, warn};
 use tokio::sync::{mpsc, watch};
-use tutasdk::event_bus::{EntityUpdateBatch, EntityUpdateEvent, EventBusMessage, Operation};
-use tutasdk::{mail_set_entry_id, CustomId};
+use tutabridge_tuta::event_bus::{
+    EntityUpdateBatch, EntityUpdateEvent, EventBusMessage, Operation,
+};
+use tutabridge_tuta::mail_set_entry_id;
+use tutasdk::CustomId;
 
 use crate::store::LocalStore;
 use crate::sync::{sync_folder, MailStore, StoredMail};
@@ -845,11 +848,11 @@ mod startup_tests {
     use crypto_primitives::key::GenericAesKey;
     use crypto_primitives::randomizer_facade::RandomizerFacade;
     use std::time::{Duration, Instant};
+    use tutabridge_tuta::folder_system::MailSetKind;
     use tutasdk::date::DateTime;
     use tutasdk::entities::generated::tutanota::{
         Mail, MailAddress, MailDetails, MailSetEntry, TutanotaFile,
     };
-    use tutasdk::folder_system::MailSetKind;
     use tutasdk::{GeneratedId, IdTupleGenerated};
 
     const FOLDER: &str = "inbox";
