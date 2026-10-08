@@ -49,7 +49,9 @@ build() {
 	export RUSTUP_TOOLCHAIN=stable
 	# The GUI crate's build script embeds ui/dist, so the frontend goes first.
 	(cd ui && npm run build)
-	cargo build --release --frozen -p tutabridge-gui
+	# Direct cargo builds need this feature to embed and serve the frontend
+	# instead of loading devUrl; --release alone does not enable it.
+	cargo build --release --frozen -p tutabridge-gui --features tauri/custom-protocol
 }
 
 package() {
