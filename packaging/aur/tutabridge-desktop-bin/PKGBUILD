@@ -13,7 +13,7 @@ pkgdesc="Local IMAP/SMTP bridge for Tuta encrypted email (prebuilt desktop app)"
 arch=('x86_64')
 url="https://github.com/spartanz51/tutabridge"
 license=('GPL-3.0-or-later')
-depends=('webkit2gtk-4.1' 'gtk3' 'dbus' 'gcc-libs')
+depends=('webkit2gtk-4.1' 'gtk3' 'dbus')
 optdepends=('gnome-keyring: persist the Tuta session across reboots (Secret Service)'
             'kwallet: alternative Secret Service provider')
 provides=('tutabridge-desktop')
