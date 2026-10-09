@@ -13,13 +13,12 @@
     "windows": [
       {
         "title": "TutaBridge",
-        "width": 700,
-        "height": 520,
+        "width": 900,
+        "height": 650,
         "minWidth": 700,
         "minHeight": 520,
         "resizable": true,
-        "center": true,
-        "create": false
+        "center": true
       }
     ],
     "security": {
