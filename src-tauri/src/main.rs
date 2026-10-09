@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod tray;
 
 use commands::BridgeState;
 use std::sync::Arc;
@@ -26,6 +27,11 @@ fn main() {
     let shared = Arc::new(Mutex::new(handle));
 
     tauri::Builder::default()
+        // Reopening the launcher restores the background instance instead
+        // of starting another bridge on the same IMAP/SMTP ports.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(shared as BridgeState)
@@ -46,6 +52,9 @@ fn main() {
         ])
         .setup(|app| {
             create_main_window(app)?;
+            if let Err(error) = tray::setup(app) {
+                log::warn!("Tray unavailable; closing the window will exit: {error}");
+            }
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -65,8 +74,16 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error running TutaBridge");
+        .on_window_event(tray::on_window_event)
+        .build(tauri::generate_context!())
+        .expect("error building TutaBridge")
+        .run(|_app, _event| {
+            // The Dock can reopen an already-running macOS app too.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                tray::show_main_window(_app);
+            }
+        });
 }
 
 async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {

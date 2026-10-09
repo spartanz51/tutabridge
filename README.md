@@ -94,6 +94,16 @@ e.g. `yay -S tutabridge-desktop-bin`.
 
 ## Getting started
 
+The desktop app has a tray icon (the menu bar on macOS). Closing its window
+keeps the bridge running; use **Open TutaBridge** to bring it back or
+**Quit TutaBridge** to stop the app. Launching the app again also restores
+the existing window. The normal minimize button still minimizes the window;
+**Hide to tray** removes it from view without stopping the bridge.
+
+On Linux, the desktop must support AppIndicator/StatusNotifier icons.
+GNOME may need the AppIndicator extension. If no tray host is available,
+closing the window exits normally instead of leaving an inaccessible app.
+
 1. **Open TutaBridge** and sign in with your Tuta address. Password and 2FA are
    asked on the first run only; the session is saved to your OS keychain
    afterwards.
