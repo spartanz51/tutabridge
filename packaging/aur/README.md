@@ -20,6 +20,12 @@ configuration), just not run at the same time.
 The desktop app installed this way is updated by pacman: on Linux it only
 updates itself when it runs as an AppImage.
 
+Desktop packages depend on `libappindicator-gtk3` for the tray icon. The
+desktop environment must also provide a StatusNotifier host (on GNOME,
+enable the AppIndicator extension). Without one, closing the window exits
+normally. The prebuilt package gains tray support when it is updated to a
+release containing that feature.
+
 ## Local build / test (on Arch)
 
 ```bash
