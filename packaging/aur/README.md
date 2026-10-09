@@ -1,15 +1,24 @@
 # AUR packaging
 
 Two packages for the **headless TutaBridge daemon** (CLI only, no GUI, so no
-Node / Tauri / webkit dependencies):
+Node / Tauri / webkit dependencies) and two for the **desktop app** (the
+Tauri GUI, bridge included):
 
 | Directory | AUR package | What it does |
 |-----------|-------------|--------------|
 | `tutabridge-git/` | `tutabridge-git` | Builds the `tutabridge` binary from the latest commit (needs the Rust toolchain). |
 | `tutabridge-bin/` | `tutabridge-bin` | Downloads the prebuilt x86_64 binary from the GitHub release. No build. |
+| `tutabridge-desktop-git/` | `tutabridge-desktop-git` | Builds `tutabridge-gui` from the latest commit (Rust toolchain, Node, webkit2gtk). |
+| `tutabridge-desktop-bin/` | `tutabridge-desktop-bin` | Installs the files of the x86_64 `.deb` from the GitHub release. No build. |
 
-Each directory holds a `PKGBUILD` and a `.SRCINFO`. They install
-`/usr/bin/tutabridge` plus a user systemd unit.
+Each directory holds a `PKGBUILD` and a `.SRCINFO`. The daemon packages
+install `/usr/bin/tutabridge` plus a user systemd unit; the desktop packages
+install `/usr/bin/tutabridge-gui`, a desktop entry and icons. A daemon
+package and a desktop package can be installed side by side (they share the
+configuration), just not run at the same time.
+
+The desktop app installed this way is updated by pacman: on Linux it only
+updates itself when it runs as an AppImage.
 
 ## Local build / test (on Arch)
 
@@ -57,6 +66,11 @@ pushing so they match the PKGBUILD exactly.
   PKGBUILD itself changes.
 - `tutabridge-bin` pins a release: bump `pkgver` and `_tag`, refresh the three
   `sha256sums` (`updpkgsums`), regenerate `.SRCINFO`, and push.
+- `tutabridge-desktop-bin` does the same with two `sha256sums` (the `.deb`
+  and `LICENSE`). `tutabridge-desktop-git` tracks git like `tutabridge-git`.
+- Both `-git` packages carry `options=(!lto)`: makepkg's LTO flags would turn
+  the C code cargo builds (SQLCipher, OpenSSL) into GCC bytecode that
+  rust-lld cannot link.
 
 ## Notes
 
