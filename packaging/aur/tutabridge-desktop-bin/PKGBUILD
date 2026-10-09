@@ -8,7 +8,7 @@
 # tutabridge-desktop-git.
 pkgname=tutabridge-desktop-bin
 pkgver=0.1.0rc13
-pkgrel=1
+pkgrel=2
 pkgdesc="Local IMAP/SMTP bridge for Tuta encrypted email (prebuilt desktop app)"
 arch=('x86_64')
 url="https://github.com/spartanz51/tutabridge"
@@ -18,6 +18,11 @@ optdepends=('gnome-keyring: persist the Tuta session across reboots (Secret Serv
             'kwallet: alternative Secret Service provider')
 provides=('tutabridge-desktop')
 conflicts=('tutabridge-desktop')
+# No tutabridge-desktop-bin-debug split: makepkg would carve the prebuilt
+# binary's symbols into one, and it would hold the same /usr/lib/debug file
+# as tutabridge-desktop-git-debug, so switching between -bin and -git would
+# fail.
+options=(!debug)
 _tag=v0.1.0-rc.13
 source=("TutaBridge-$pkgver.deb::$url/releases/download/$_tag/TutaBridge-Linux.deb"
         "LICENSE::https://raw.githubusercontent.com/spartanz51/tutabridge/$_tag/LICENSE")
