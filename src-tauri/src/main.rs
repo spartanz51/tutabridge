@@ -4,7 +4,7 @@ mod commands;
 
 use commands::BridgeState;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Manager, WebviewWindowBuilder};
 use tokio::sync::Mutex;
 use tutabridge_core::bridge::BridgeHandle;
 
@@ -45,6 +45,8 @@ fn main() {
             commands::get_mcp_client_config,
         ])
         .setup(|app| {
+            create_main_window(app)?;
+
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 stream_logs(app_handle, log_rx).await;
@@ -144,4 +146,37 @@ async fn stream_logs(app: tauri::AppHandle, mut rx: tokio::sync::broadcast::Rece
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+/// Opens the window at the same share of the screen everywhere: the
+/// configured 700 × 520 is right on a laptop and a thumbnail on a 4K
+/// monitor. Set the final size before creation: GTK resizes asynchronously,
+/// so centering immediately after set_size() would use stale dimensions.
+fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let mut config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .expect("main window configuration is missing")
+        .clone();
+    // Wayland may have no primary monitor, and a hidden window cannot tell
+    // us which monitor it is on yet. Enumerate outputs as a fallback.
+    let monitor = match app.primary_monitor()? {
+        Some(monitor) => Some(monitor),
+        None => app.available_monitors()?.into_iter().next(),
+    };
+    if let Some(monitor) = monitor {
+        let screen = monitor.size().to_logical::<f64>(monitor.scale_factor());
+        config.width = (screen.width * 0.35).max(config.min_width.unwrap_or(0.0));
+        config.height = (screen.height * 0.45).max(config.min_height.unwrap_or(0.0));
+        // Tell the builder which monitor to center on, including when there
+        // is no primary. Wayland leaves placement to the compositor.
+        let origin = monitor.position().to_logical::<f64>(monitor.scale_factor());
+        config.x = Some(origin.x);
+        config.y = Some(origin.y);
+    }
+    WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    Ok(())
 }
