@@ -4,7 +4,7 @@ mod commands;
 
 use commands::BridgeState;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{LogicalSize, Manager};
 use tokio::sync::Mutex;
 use tutabridge_core::bridge::BridgeHandle;
 
@@ -61,6 +61,7 @@ fn main() {
                 auto_start(state).await;
             });
 
+            size_window(app)?;
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -144,4 +145,21 @@ async fn stream_logs(app: tauri::AppHandle, mut rx: tokio::sync::broadcast::Rece
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+/// Opens the window at the same share of the screen everywhere: the
+/// configured 700 × 520 is right on a laptop and a thumbnail on a 4K
+/// monitor. The window starts hidden so it is never seen growing.
+fn size_window(app: &tauri::App) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    if let Some(monitor) = window.current_monitor()? {
+        let screen = monitor.size().to_logical::<f64>(monitor.scale_factor());
+        let width = (screen.width * 0.35).max(700.0);
+        let height = (screen.height * 0.45).max(520.0);
+        window.set_size(LogicalSize::new(width, height))?;
+        window.center()?;
+    }
+    window.show()
 }
