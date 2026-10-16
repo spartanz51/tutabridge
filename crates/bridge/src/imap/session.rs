@@ -7,7 +7,7 @@ use crate::mail::mail_to_rfc2822;
 use crate::mail::parser::{parse_address_headers, AddressHeaders};
 use crate::mail::rfc2822::{
     extract_headers, format_address, format_internal_date, format_name_and_address,
-    reply_to_addresses,
+    format_rfc2822_date, reply_to_addresses,
 };
 use crate::store::LocalStore;
 use crate::sync::MailStore;
@@ -1095,7 +1095,7 @@ fn filter_header_fields(rfc: &str, fields: &[String], negate: bool) -> String {
 /// address lists come from [`address_headers`]. Bcc and in-reply-to stay NIL.
 fn build_envelope(cached: &CachedMail, addresses: &AddressHeaders) -> String {
     let mail = &cached.mail;
-    let date = format_internal_date(mail.receivedDate.as_millis());
+    let date = format_rfc2822_date(mail.receivedDate.as_millis());
     let subject = imap_string(&mail.subject);
 
     let sender = [(mail.sender.name.clone(), mail.sender.address.clone())];
@@ -1540,6 +1540,20 @@ mod tests {
                 "{from} {from} {reply_to} {to} {cc} NIL NIL \"<mail_list.mail_elem@tutabridge.local>\")"
             )),
             "{env}"
+        );
+    }
+
+    #[test]
+    fn build_envelope_date_is_rfc2822() {
+        // RFC 3501 §7.4.2: the envelope date is the message's Date: header —
+        // an RFC 2822/5322 date-time — so it must not use the INTERNALDATE
+        // format ("25-Dec-2024 12:37:25 +0000").
+        let mut cached = make_test_mail(1, "Receipt", false);
+        cached.mail.receivedDate = DateTime::from_millis(1735130245000);
+        let env = build_envelope(&cached, &AddressHeaders::default());
+        assert!(
+            env.starts_with("(\"Wed, 25 Dec 2024 12:37:25 +0000\" "),
+            "ENVELOPE date must be an RFC 2822 date-time, got: {env}"
         );
     }
 
