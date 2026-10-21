@@ -989,6 +989,9 @@ mod startup_tests {
         async fn send_mail(&self, _m: &ParsedMessage) -> Result<(), String> {
             Err("offline".into())
         }
+        async fn create_draft(&self, _m: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+            Err("offline".into())
+        }
     }
 
     /// The disk cache of a bridge that already ran: CACHED mails, a known

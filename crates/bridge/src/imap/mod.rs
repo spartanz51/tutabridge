@@ -2,7 +2,7 @@ mod search;
 mod session;
 mod utf7;
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
+use crate::mail::parser::parse_rfc2822;
 use crate::store::LocalStore;
 use crate::sync::MailStore;
 use crate::tuta::MailBackend;
@@ -245,11 +246,19 @@ where
 /// Largest APPEND message literal we will read into memory.
 const MAX_APPEND_BYTES: usize = 26_214_400;
 
-/// Handle an `APPEND`. Tuta saves sent mail server-side, so an APPEND to the
-/// Sent folder is accepted as a no-op: read and discard the literal, reply OK.
-/// That lets a mail client's "save a copy to Sent" succeed without creating a
-/// duplicate (the real copy arrives via the syncer). Other folders are not
-/// supported yet and are rejected before the literal is sent, so the client
+/// Handle an `APPEND`.
+///
+/// Tuta saves sent mail server-side, so an APPEND to the Sent folder is a
+/// no-op: read and discard the literal, reply OK. That lets a client's "save a
+/// copy to Sent" succeed without creating a duplicate (the real copy arrives
+/// via the syncer).
+///
+/// An APPEND to Drafts is saved as a real draft: the literal is parsed and
+/// posted to Tuta's draft service, and the reply names the new draft's UID, so
+/// the client can delete the copy it autosaved before instead of leaving one
+/// behind on every save.
+///
+/// Every other folder is rejected before the literal is sent, so the client
 /// aborts the synchronizing literal and the stream stays in sync.
 async fn handle_append<R, W>(
     reader: &mut R,
@@ -261,35 +270,85 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    if !session.append_targets_sent(&req.mailbox).await {
-        let resp = format!(
-            "{} NO [CANNOT] APPEND is only supported for the Sent folder; Tuta saves sent mail automatically\r\n",
-            req.tag
-        );
-        writer.write_all(resp.as_bytes()).await?;
-        writer.flush().await?;
+    let target = session.append_target(&req.mailbox).await;
+    if let session::AppendTarget::Unsupported = target {
+        reply(
+            writer,
+            format!(
+                "{} NO [CANNOT] APPEND is only supported for the Sent and Drafts folders\r\n",
+                req.tag
+            ),
+        )
+        .await?;
         return Ok(());
     }
     if req.literal_size > MAX_APPEND_BYTES {
-        let resp = format!("{} NO message too large\r\n", req.tag);
-        writer.write_all(resp.as_bytes()).await?;
-        writer.flush().await?;
+        reply(writer, format!("{} NO message too large\r\n", req.tag)).await?;
         return Ok(());
     }
 
-    // Synchronizing literal: tell the client to send the message, then read and
-    // discard it plus the trailing CRLF (the real Sent copy comes from sync).
+    // Synchronizing literal: tell the client to send the message, then read it
+    // plus the trailing CRLF.
     writer.write_all(b"+ OK\r\n").await?;
     writer.flush().await?;
-    let mut buf = vec![0u8; req.literal_size];
+    let literal = read_literal(reader, req.literal_size).await?;
+
+    if let session::AppendTarget::Drafts = target {
+        let msg = parse_rfc2822(&literal);
+        let resp = match session.create_draft(&msg).await {
+            Ok(uid) => append_ok(&req.tag, uid),
+            Err(e) => {
+                warn!(
+                    "IMAP APPEND to {}: saving the draft failed: {e}",
+                    req.mailbox
+                );
+                format!(
+                    "{} NO [SERVERBUG] the draft could not be saved\r\n",
+                    req.tag
+                )
+            }
+        };
+        reply(writer, resp).await?;
+        return Ok(());
+    }
+
+    // Sent: the server makes that copy itself.
+    reply(writer, append_ok(&req.tag, None)).await?;
+    Ok(())
+}
+
+/// The tagged reply to a successful `APPEND`. `APPENDUID` is only present when
+/// the bridge knows the new draft's UID: RFC 4315 requires the code when UIDPLUS
+/// is advertised, but a client that gets none is better off than one that is
+/// told a UID that does not exist.
+fn append_ok(tag: &str, uid: Option<u32>) -> String {
+    match uid {
+        Some(uid) => format!(
+            "{tag} OK [APPENDUID {} {uid}] APPEND completed\r\n",
+            session::UIDVALIDITY
+        ),
+        None => format!("{tag} OK APPEND completed\r\n"),
+    }
+}
+
+/// Read an `APPEND` message literal and the CRLF that follows it. A MIME
+/// message is not necessarily UTF-8, so invalid bytes are replaced rather than
+/// rejected: the parser needs text, and a draft with one odd byte beats a
+/// failed save.
+async fn read_literal<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    size: usize,
+) -> std::io::Result<String> {
+    let mut buf = vec![0u8; size];
     reader.read_exact(&mut buf).await?;
     let mut tail = String::new();
     reader.read_line(&mut tail).await?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
 
-    let resp = format!("{} OK APPEND completed\r\n", req.tag);
+async fn reply<W: AsyncWriteExt + Unpin>(writer: &mut W, resp: String) -> std::io::Result<()> {
     writer.write_all(resp.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
+    writer.flush().await
 }
 
 #[cfg(test)]
@@ -348,7 +407,10 @@ mod tests {
         }
     }
 
-    struct NoopBackend;
+    #[derive(Default)]
+    struct NoopBackend {
+        created_drafts: std::sync::Mutex<Vec<ParsedMessage>>,
+    }
     #[async_trait::async_trait]
     impl MailBackend for NoopBackend {
         async fn load_mail_ids_for_folder(
@@ -408,6 +470,13 @@ mod tests {
         async fn send_mail(&self, _m: &ParsedMessage) -> Result<(), String> {
             unimplemented!()
         }
+        async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+            self.created_drafts.lock().unwrap().push(msg.clone());
+            Ok(IdTupleGenerated::new(
+                tutasdk::GeneratedId("drafts".to_string()),
+                tutasdk::GeneratedId("draft-1".to_string()),
+            ))
+        }
     }
 
     #[test]
@@ -435,7 +504,25 @@ mod tests {
             special_use: Some("\\Sent".into()),
         };
         store.set_folder_list(vec![sent]).await;
-        ImapSession::new(store, Arc::new(NoopBackend), None, None)
+        ImapSession::new(store, Arc::new(NoopBackend::default()), None, None)
+    }
+
+    async fn session_with_drafts() -> (ImapSession, Arc<NoopBackend>) {
+        let store = MailStore::new();
+        let drafts = FolderInfo {
+            id: "drafts".into(),
+            list_id: "folders".into(),
+            entries_list_id: "drafts_entries".into(),
+            kind: MailSetKind::Draft,
+            imap_path: "Drafts".into(),
+            special_use: Some("\\Drafts".into()),
+        };
+        store.set_folder_list(vec![drafts]).await;
+        let backend = Arc::new(NoopBackend::default());
+        (
+            ImapSession::new(store, backend.clone(), None, None),
+            backend,
+        )
     }
 
     /// Replays a fixed script of reads: each entry is either a chunk of bytes
@@ -479,7 +566,7 @@ mod tests {
         let mut writer = tokio::io::sink();
         let store = MailStore::new();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(store, Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(store, Arc::new(NoopBackend::default()), None, None);
 
         let result =
             run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
@@ -504,7 +591,12 @@ mod tests {
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(
+            MailStore::new(),
+            Arc::new(NoopBackend::default()),
+            None,
+            None,
+        );
 
         let result =
             run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
@@ -529,7 +621,12 @@ mod tests {
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(
+            MailStore::new(),
+            Arc::new(NoopBackend::default()),
+            None,
+            None,
+        );
 
         let result =
             run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
@@ -607,7 +704,12 @@ mod tests {
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(
+            MailStore::new(),
+            Arc::new(NoopBackend::default()),
+            None,
+            None,
+        );
 
         run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch)
             .await
@@ -693,6 +795,15 @@ mod tests {
         assert!(resp.contains("a1 OK APPEND completed"), "got {resp:?}");
     }
 
+    #[test]
+    fn append_ok_offers_the_uid_only_when_it_is_known() {
+        assert_eq!(
+            append_ok("a1", Some(17)),
+            "a1 OK [APPENDUID 1 17] APPEND completed\r\n"
+        );
+        assert_eq!(append_ok("a1", None), "a1 OK APPEND completed\r\n");
+    }
+
     #[tokio::test]
     async fn append_to_non_sent_is_rejected_without_continuation() {
         let session = session_with_sent().await;
@@ -701,7 +812,7 @@ mod tests {
         let mut reader = BufReader::new(sr);
         let req = session::AppendRequest {
             tag: "b2".into(),
-            mailbox: "Drafts".into(),
+            mailbox: "INBOX".into(),
             literal_size: 5,
         };
 
@@ -717,6 +828,49 @@ mod tests {
         assert!(
             !resp.contains('+'),
             "a rejected folder must not get a continuation"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_to_drafts_saves_the_message_as_a_draft() {
+        let (session, backend) = session_with_drafts().await;
+        let (mut client, server) = tokio::io::duplex(4096);
+        let (sr, mut sw) = tokio::io::split(server);
+        let mut reader = BufReader::new(sr);
+        let literal = b"From: Me <me@tuta.com>\r\nTo: You <you@example.com>\r\nSubject: a draft\r\n\r\nbody text\r\n"
+            .to_vec();
+        let req = session::AppendRequest {
+            tag: "d1".into(),
+            mailbox: "Drafts".into(),
+            literal_size: literal.len(),
+        };
+
+        let server_fut = handle_append(&mut reader, &mut sw, &session, req);
+        let client_fut = async {
+            let mut buf = [0u8; 32];
+            let n = client.read(&mut buf).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buf[..n]).starts_with('+'),
+                "expected a continuation request"
+            );
+            client.write_all(&literal).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            let mut resp = vec![0u8; 128];
+            let n = client.read(&mut resp).await.unwrap();
+            String::from_utf8_lossy(&resp[..n]).into_owned()
+        };
+        let (res, resp) = tokio::join!(server_fut, client_fut);
+        res.unwrap();
+
+        // The store never sees the draft in this test, so the reply carries no
+        // APPENDUID; that is the whole point of it being optional.
+        assert!(resp.contains("d1 OK APPEND completed"), "got {resp:?}");
+        let created = backend.created_drafts.lock().unwrap();
+        assert_eq!(created.len(), 1, "the literal must become one draft");
+        assert_eq!(created[0].subject, "a draft");
+        assert_eq!(
+            created[0].to,
+            vec![("You".to_string(), "you@example.com".to_string())]
         );
     }
 }
