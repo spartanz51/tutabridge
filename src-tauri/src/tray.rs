@@ -9,6 +9,14 @@ struct UpdateMenu(MenuItem<tauri::Wry>);
 const TRAY_ID: &str = "main-tray";
 
 pub fn setup(app: &App) -> tauri::Result<()> {
+    let version_text = format!("TutaBridge {}", tutabridge_core::VERSION);
+    let version = MenuItem::with_id(
+        app,
+        "tray-version",
+        version_text.as_str(),
+        false,
+        None::<&str>,
+    )?;
     let open = MenuItem::with_id(app, "tray-open", "Open TutaBridge", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "tray-hide", "Hide to tray", true, None::<&str>)?;
     let restart = MenuItem::with_id(
@@ -19,8 +27,20 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "tray-quit", "Quit TutaBridge", true, None::<&str>)?;
+    let after_version = PredefinedMenuItem::separator(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &hide, &restart, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &version,
+            &after_version,
+            &open,
+            &hide,
+            &restart,
+            &separator,
+            &quit,
+        ],
+    )?;
 
     app.manage(UpdateMenu(restart));
 

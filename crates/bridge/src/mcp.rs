@@ -42,7 +42,7 @@ use crate::tuta::MailBackend;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "tutabridge";
-const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SERVER_VERSION: &str = crate::VERSION;
 
 #[derive(Clone)]
 struct McpState {

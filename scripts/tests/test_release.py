@@ -61,6 +61,52 @@ class CalendarAndVersions(unittest.TestCase):
 
 
 class WorkflowArguments(unittest.TestCase):
+    def test_release_version_check_handles_legacy_sources(self):
+        workflow = (SCRIPTS.parent / '.github/workflows/release.yml').read_text()
+        body = workflow.split('      - name: Check that the CLI reports the release version', 1)[1].split('        run: |\n', 1)[1]
+        lines = []
+        for line in body.splitlines():
+            if line and not line.startswith('          '):
+                break
+            lines.append(line[10:])
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / 'crates/bridge/src/lib.rs'
+            source.parent.mkdir(parents=True)
+            binary = root / 'target/release/tutabridge'
+            binary.parent.mkdir(parents=True)
+            invoked = root / 'invoked'
+            for platform in ('Linux', 'macOS', 'Windows'):
+                cli = binary.with_suffix('.exe') if platform == 'Windows' else binary
+                cli.write_text('#!/bin/sh\nprintf "%s\n" "$@" > "$INVOCATION_LOG"\nprintf "%s\n" "$REPORTED_VERSION"\nexit "$CLI_STATUS"\n')
+                cli.chmod(0o755)
+                cases = [
+                    ('legacy', '', '1', True, False),
+                    ('current', 'tutabridge 0.1.0-rc.99', '0', True, True),
+                    ('current', 'tutabridge 0.1.0-dev', '0', False, True),
+                    ('current', 'tutabridge 0.1.0-rc.98', '0', False, True),
+                    ('current', 'tutabridge 0.1.0-rc.99', '1', False, True),
+                    ('missing', '', '0', False, False),
+                ]
+                for kind, reported, status, success, called in cases:
+                    with self.subTest(platform=platform, source=kind, reported=reported, status=status):
+                        if kind == 'missing':
+                            source.unlink()
+                        else:
+                            source.write_text('pub mod bridge;\n' if kind == 'legacy' else 'pub const VERSION: Option<&str> = option_env!("TUTABRIDGE_VERSION");\n')
+                        invoked.unlink(missing_ok=True)
+                        env = dict(os.environ, RUNNER_OS=platform,
+                                   RELEASE_VERSION='0.1.0-rc.99', REPORTED_VERSION=reported,
+                                   CLI_STATUS=status, INVOCATION_LOG=str(invoked))
+                        result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', '\n'.join(lines)],
+                                                cwd=root, env=env, capture_output=True, text=True)
+                        self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+                        self.assertEqual(invoked.exists(), called)
+                        if called:
+                            self.assertEqual(invoked.read_text(), '--version\n')
+                        if kind == 'legacy':
+                            self.assertIn('Legacy source', result.stdout)
+
     def test_actual_detect_step_preserves_dry_run_and_schedule(self):
         workflow = (SCRIPTS.parent / '.github/workflows/sdk-bump.yml').read_text()
         body = workflow.split('      - name: Select SDK or resume pending release', 1)[1].split('        run: |\n', 1)[1]

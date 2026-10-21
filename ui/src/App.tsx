@@ -46,6 +46,7 @@ function App() {
         <div className="header-left">
           <img src={logo} alt="" className="app-logo" width={24} height={24} />
           <h1>TutaBridge</h1>
+          {bridge.appVersion && <span className="app-version">{bridge.appVersion}</span>}
           <div
             className="header-status"
             title={status && isError(status) ? status.Error : undefined}
