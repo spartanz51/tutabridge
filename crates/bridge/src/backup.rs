@@ -458,6 +458,9 @@ mod tests {
         async fn send_mail(&self, _m: &ParsedMessage) -> Result<(), String> {
             unimplemented!()
         }
+        async fn create_draft(&self, _m: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+            unimplemented!()
+        }
     }
 
     fn temp_store() -> (LocalStore, std::path::PathBuf) {

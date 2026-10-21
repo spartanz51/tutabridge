@@ -657,6 +657,9 @@ mod tests {
             self.sent.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+        async fn create_draft(&self, _m: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+            unimplemented!()
+        }
         async fn load_mail_ids_for_folder(
             &self,
             _f: &FolderInfo,
