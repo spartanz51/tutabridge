@@ -171,6 +171,12 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          # Older rollback sources predate --version; do not start their bridge.
+          test -r crates/bridge/src/lib.rs
+          if ! grep -Fq 'option_env!("TUTABRIDGE_VERSION")' crates/bridge/src/lib.rs; then
+            echo "Legacy source: CLI version check is not supported"
+            exit 0
+          fi
           cli=target/release/tutabridge
           if [ "$RUNNER_OS" = Windows ]; then cli="$cli.exe"; fi
           reported=$("$cli" --version)
