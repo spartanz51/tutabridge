@@ -58,7 +58,7 @@ fn main() {
             update::restart_app,
         ])
         .setup(|app| {
-            log::info!("TutaBridge {} starting", app.package_info().version);
+            log::info!("TutaBridge {} starting", tutabridge_core::VERSION);
             create_main_window(app)?;
             if let Err(error) = tray::setup(app) {
                 log::warn!("Tray unavailable; closing the window will exit: {error}");

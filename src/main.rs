@@ -2,7 +2,7 @@ use log::{info, warn};
 use std::sync::Arc;
 use tutabridge_core::{
     backup, bridge as bridge_helpers, config, event_handler, imap, mcp, smtp, store::LocalStore,
-    sync, tls, tuta,
+    sync, tls, tuta, VERSION,
 };
 
 #[tokio::main]
@@ -18,6 +18,10 @@ async fn main() -> anyhow::Result<()> {
     // and exits.
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("tutabridge {VERSION}");
+            return Ok(());
+        }
         Some("backup") => {
             let Some(output) = args.get(2) else {
                 eprintln!("usage: tutabridge backup <output-directory>");
@@ -37,11 +41,14 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("--help") | Some("-h") | Some("help") => {
+            println!("tutabridge {VERSION}");
+            println!();
             println!("tutabridge                 run the IMAP/SMTP bridge (default)");
             println!("tutabridge backup <dir>    export every mail to <dir> as .eml files");
             println!(
                 "tutabridge password        print the local bridge password (mail client setup)"
             );
+            println!("tutabridge --version       print the version");
             return Ok(());
         }
         _ => {}
@@ -71,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
     let bridge_password_is_new = cfg.bridge_password.is_none();
     let bridge_password = config::ensure_bridge_password(&mut cfg)
         .map_err(|e| anyhow::anyhow!("Bridge password setup failed: {e}"))?;
-    info!("TutaBridge starting...");
+    info!("TutaBridge {VERSION} starting");
 
     let tls_acceptor =
         tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("TLS setup failed: {e}"))?;

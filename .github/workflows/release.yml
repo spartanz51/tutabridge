@@ -149,6 +149,7 @@ jobs:
         shell: bash
         env:
           TAURI_ARGS: ${{ matrix.tauri_args }}
+          TUTABRIDGE_VERSION: ${{ inputs.version }}
         run: |
           args=()
           if [ -n "$TAURI_ARGS" ]; then read -r -a args <<< "$TAURI_ARGS"; fi
@@ -158,10 +159,23 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: source
         shell: pwsh
+        env:
+          TUTABRIDGE_VERSION: ${{ inputs.version }}
         run: |
           tauri.cmd build --% -- --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release -p tutabridge
+      - name: Check that the CLI reports the release version
+        working-directory: source
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          cli=target/release/tutabridge
+          if [ "$RUNNER_OS" = Windows ]; then cli="$cli.exe"; fi
+          reported=$("$cli" --version)
+          echo "$reported"
+          test "$reported" = "tutabridge $RELEASE_VERSION"
       - name: Prepare standard updater payloads and installers
         working-directory: source
         shell: bash

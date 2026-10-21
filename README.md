@@ -103,7 +103,8 @@ Linux packages installed through a package manager use that manager; only
 the AppImage updates itself. Turn automatic checks off in
 **Config, Updates** if you prefer to update by hand; the app then never
 contacts GitHub on its own, and the same screen still lets you check when
-you want to.
+you want to. The running version shows in the window header, in the tray
+menu and on that screen; the CLI prints it with `tutabridge --version`.
 
 Keeping up matters: Tuta only accepts clients above a minimum version that
 moves from time to time, and TutaBridge announces the version of the SDK it
