@@ -61,6 +61,11 @@ class CalendarAndVersions(unittest.TestCase):
 
 
 class WorkflowArguments(unittest.TestCase):
+    def test_current_source_is_not_seen_as_legacy(self):
+        # The release check skips sources without this marker; losing it would disable the check silently.
+        source = (SCRIPTS.parent / 'crates/bridge/src/lib.rs').read_text()
+        self.assertIn('option_env!("TUTABRIDGE_VERSION")', source)
+
     def test_release_version_check_handles_legacy_sources(self):
         workflow = (SCRIPTS.parent / '.github/workflows/release.yml').read_text()
         body = workflow.split('      - name: Check that the CLI reports the release version', 1)[1].split('        run: |\n', 1)[1]
