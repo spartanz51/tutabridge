@@ -4,7 +4,7 @@ use tutasdk::entities::generated::tutanota::{Mail, MailAddress, TutanotaFile};
 
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
-use crate::mail::parser::{parse_address_headers, AddressHeaders};
+use crate::mail::parser::{parse_address_headers, AddressHeaders, ParsedMessage};
 use crate::mail::rfc2822::{
     extract_headers, format_address, format_internal_date, format_name_and_address,
     format_rfc2822_date, reply_to_addresses,
@@ -51,6 +51,25 @@ pub struct ImapSession {
     /// with no connection behind it.
     session_id: u64,
 }
+
+/// The UIDVALIDITY every mailbox reports. The store allocates UIDs per folder
+/// and never renumbers them, so one value covers every mailbox.
+pub(crate) const UIDVALIDITY: u32 = 1;
+
+/// What Tuta can do with an `APPEND` to a given mailbox.
+pub(crate) enum AppendTarget {
+    /// Tuta saved the mail itself; the copy the client sends is redundant.
+    Sent,
+    /// The message becomes a server-side draft.
+    Drafts,
+    /// Tuta cannot create a mail in an arbitrary folder.
+    Unsupported,
+}
+
+/// How long an `APPEND` waits for the draft it just created to reach the store
+/// before it answers without `APPENDUID`: 40 × 50 ms = 2 s.
+const APPEND_UID_POLLS: usize = 40;
+const APPEND_UID_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 impl ImapSession {
     pub fn new(
@@ -256,17 +275,40 @@ impl ImapSession {
         }
     }
 
-    /// `true` if `mailbox` resolves to the Sent folder. Tuta saves sent mail
-    /// server-side, so an `APPEND` there is a no-op (see `handle_append` in the
-    /// connection loop), which is what lets a client's "save to Sent" succeed
-    /// without creating a duplicate.
-    pub(crate) async fn append_targets_sent(&self, mailbox: &str) -> bool {
+    /// Resolve an `APPEND` target mailbox to what the server can do with it.
+    pub(crate) async fn append_target(&self, mailbox: &str) -> AppendTarget {
         let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
-        self.store
+        let special_use = self
+            .store
             .folder_by_imap_path(&name)
             .await
-            .map(|f| f.special_use.as_deref() == Some("\\Sent"))
-            .unwrap_or(false)
+            .and_then(|f| f.special_use);
+        match special_use.as_deref() {
+            Some("\\Sent") => AppendTarget::Sent,
+            Some("\\Drafts") => AppendTarget::Drafts,
+            _ => AppendTarget::Unsupported,
+        }
+    }
+
+    /// Save an `APPEND`ed message as a server-side draft, and report the UID the
+    /// store gave it so the client can delete its previous autosave.
+    pub(crate) async fn create_draft(&self, msg: &ParsedMessage) -> Result<Option<u32>, String> {
+        let draft = self.backend.create_draft(msg).await?;
+        Ok(self.append_uid(&draft.element_id.to_string()).await)
+    }
+
+    /// The UID of a mail that was just created on the server. The event bus
+    /// delivers it a moment after the API call returns, so this waits briefly.
+    /// `None` is not an error: the draft is saved either way, and only the
+    /// client's own bookkeeping (deleting the previous autosave) suffers.
+    async fn append_uid(&self, element_id: &str) -> Option<u32> {
+        for _ in 0..APPEND_UID_POLLS {
+            if let Some((_, stored)) = self.store.find_mail_anywhere(element_id).await {
+                return Some(stored.uid);
+            }
+            tokio::time::sleep(APPEND_UID_POLL_INTERVAL).await;
+        }
+        None
     }
 
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
@@ -363,7 +405,7 @@ impl ImapSession {
                     "* 0 RECENT\r\n".to_string(),
                     "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n".to_string(),
                     "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Limited\r\n".to_string(),
-                    "* OK [UIDVALIDITY 1] UIDs valid\r\n".to_string(),
+                    "* OK [UIDVALIDITY {UIDVALIDITY}] UIDs valid\r\n".to_string(),
                     format!("* OK [UIDNEXT {}] Predicted next UID\r\n", self.uid_next),
                 ];
                 if first_unseen > 0 {
@@ -397,7 +439,7 @@ impl ImapSession {
         let unseen = stored.iter().filter(|m| m.mail.unread).count();
         vec![
             format!(
-                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY 1)\r\n",
+                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY {UIDVALIDITY})\r\n",
                 raw_name, count, unseen, self.uid_next
             ),
             format!("{} OK STATUS completed\r\n", tag),
@@ -1978,6 +2020,7 @@ mod tests {
         trashed: Mutex<Vec<IdTupleGenerated>>,
         unread_calls: Mutex<Vec<(Vec<IdTupleGenerated>, bool)>>,
         sent: Mutex<Vec<ParsedMessage>>,
+        created_drafts: Mutex<Vec<ParsedMessage>>,
         moved: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
         fail_details: Mutex<bool>,
         attachment_failure: Mutex<u8>,
@@ -1993,6 +2036,7 @@ mod tests {
                 trashed: Mutex::new(Vec::new()),
                 unread_calls: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
+                created_drafts: Mutex::new(Vec::new()),
                 moved: Mutex::new(Vec::new()),
                 fail_details: Mutex::new(false),
                 attachment_failure: Mutex::new(0),
@@ -2322,7 +2366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_targets_sent_only_for_the_sent_folder() {
+    async fn append_target_is_sent_or_drafts_and_nothing_else() {
         let backend = Arc::new(MockBackend::with_mails(vec![]));
         let store = MailStore::new();
         let sent = FolderInfo {
@@ -2333,12 +2377,63 @@ mod tests {
             imap_path: "Sent".into(),
             special_use: Some("\\Sent".into()),
         };
-        store.set_folder_list(vec![inbox_folder(), sent]).await;
+        let drafts = FolderInfo {
+            id: "drafts".into(),
+            list_id: "folders".into(),
+            entries_list_id: "drafts_entries".into(),
+            kind: MailSetKind::Draft,
+            imap_path: "Drafts".into(),
+            special_use: Some("\\Drafts".into()),
+        };
+        store
+            .set_folder_list(vec![inbox_folder(), sent, drafts])
+            .await;
         let session = ImapSession::new(store, backend, None, None);
 
-        assert!(session.append_targets_sent("Sent").await);
-        assert!(!session.append_targets_sent("INBOX").await);
-        assert!(!session.append_targets_sent("Nonexistent").await);
+        assert!(matches!(
+            session.append_target("Sent").await,
+            AppendTarget::Sent
+        ));
+        assert!(matches!(
+            session.append_target("Drafts").await,
+            AppendTarget::Drafts
+        ));
+        assert!(matches!(
+            session.append_target("INBOX").await,
+            AppendTarget::Unsupported
+        ));
+        assert!(matches!(
+            session.append_target("Nonexistent").await,
+            AppendTarget::Unsupported
+        ));
+    }
+
+    #[tokio::test]
+    async fn append_uid_is_the_uid_the_store_gave_the_new_draft() {
+        let store = MailStore::new();
+        let drafts = FolderInfo {
+            id: "drafts".into(),
+            list_id: "folders".into(),
+            entries_list_id: "drafts_entries".into(),
+            kind: MailSetKind::Draft,
+            imap_path: "Drafts".into(),
+            special_use: Some("\\Drafts".into()),
+        };
+        store.set_folder_list(vec![drafts]).await;
+        store
+            .set_folder(
+                "drafts",
+                vec![StoredMail {
+                    mail: make_mail("draft-1", "a draft", false),
+                    body_loaded: false,
+                    uid: 42,
+                    attachments_pending: false,
+                }],
+            )
+            .await;
+        let session = ImapSession::new(store, Arc::new(MockBackend::new()), None, None);
+
+        assert_eq!(session.append_uid("draft-1").await, Some(42));
     }
 
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
@@ -2474,6 +2569,10 @@ mod tests {
         async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String> {
             self.sent.lock().unwrap().push(msg.clone());
             Ok(())
+        }
+        async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+            self.created_drafts.lock().unwrap().push(msg.clone());
+            Ok(IdTupleGenerated::new(test_id("drafts"), test_id("draft-1")))
         }
     }
 

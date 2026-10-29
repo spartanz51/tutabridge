@@ -104,6 +104,11 @@ pub trait MailBackend: Send + Sync {
         target: &FolderInfo,
     ) -> Result<(), String>;
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String>;
+    /// Create a draft on the server. A draft is the only mail Tuta can create
+    /// that is not a sent message, which is what makes `APPEND` to the Drafts
+    /// folder possible. Returns the new mail's id, so the caller can report its
+    /// UID back to the client.
+    async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String>;
 }
 
 /// Canonical IMAP name for a system folder, or `None` for custom/unsupported.
@@ -179,6 +184,13 @@ const SENT_ID_CACHE_MAX_ENTRIES: usize = 200;
 struct SentIdEntry {
     stored_at: std::time::Instant,
     tuta_message_id: String,
+}
+
+/// A draft the server has saved, plus the keys a later send of it needs.
+struct CreatedDraft {
+    id: IdTupleGenerated,
+    session_key: Vec<u8>,
+    attachment_keys: Vec<GenericAesKey>,
 }
 
 pub struct TutaSession {
@@ -579,6 +591,54 @@ impl TutaSession {
         }
 
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+        let created = self.create_draft_impl(msg).await?;
+
+        // To populate `attachmentKeyData[]` we need each File entity's
+        // IdTuple — the server allocated those when the draft was created.
+        // We load the freshly-saved Mail just to read its `attachments`
+        // field (order matches our `addedAttachments`) and zip with the
+        // session keys we generated earlier.
+        let attachment_key_data = if created.attachment_keys.is_empty() {
+            Vec::new()
+        } else {
+            self.build_attachment_key_data(&created.id, &created.attachment_keys, &randomizer)
+                .await?
+        };
+
+        let parameters_id = CustomId(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(randomizer.generate_random_array::<4>()),
+        );
+        let send_data = build_send_draft_data(
+            created.session_key,
+            created.id,
+            parameters_id,
+            attachment_key_data,
+            msg.is_plaintext,
+        );
+
+        let executor = self.logged_in.get_service_executor();
+        let send_return = executor
+            .post::<SendDraftService>(send_data, ExtraServiceParams::default())
+            .await?;
+
+        log::info!("Mail sent, message_id: {}", send_return.messageId);
+
+        // Remember submitted-id → delivered-id so the next patch in a
+        // series can thread against what the server actually sent.
+        if let Some(submitted_id) = &msg.message_id {
+            self.remember_sent_message_id(submitted_id, &send_return.messageId)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Create the draft that a send submits, or that an IMAP `APPEND` to the
+    /// Drafts folder saves for a client. The returned keys are what a later
+    /// `SendDraftService` call needs; a draft that is never sent does not use
+    /// them.
+    async fn create_draft_impl(&self, msg: &ParsedMessage) -> Result<CreatedDraft, ApiCallError> {
+        let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
         let session_key: GenericAesKey = Aes256Key::generate(&randomizer).into();
 
         // Send as the address the submission asked for, when the account
@@ -674,43 +734,11 @@ impl TutaSession {
 
         log::info!("Draft created: {:?}", draft_return.draft);
 
-        // To populate `attachmentKeyData[]` we need each File entity's
-        // IdTuple — the server allocated those when the draft was created.
-        // We load the freshly-saved Mail just to read its `attachments`
-        // field (order matches our `addedAttachments`) and zip with the
-        // session keys we generated earlier.
-        let attachment_key_data = if attachment_keys.is_empty() {
-            Vec::new()
-        } else {
-            self.build_attachment_key_data(&draft_return.draft, &attachment_keys, &randomizer)
-                .await?
-        };
-
-        let parameters_id = CustomId(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(randomizer.generate_random_array::<4>()),
-        );
-        let send_data = build_send_draft_data(
-            session_key.as_bytes().to_vec(),
-            draft_return.draft,
-            parameters_id,
-            attachment_key_data,
-            msg.is_plaintext,
-        );
-
-        let send_return = executor
-            .post::<SendDraftService>(send_data, ExtraServiceParams::default())
-            .await?;
-
-        log::info!("Mail sent, message_id: {}", send_return.messageId);
-
-        // Remember submitted-id → delivered-id so the next patch in a
-        // series can thread against what the server actually sent.
-        if let Some(submitted_id) = &msg.message_id {
-            self.remember_sent_message_id(submitted_id, &send_return.messageId)
-                .await;
-        }
-        Ok(())
+        Ok(CreatedDraft {
+            id: draft_return.draft,
+            session_key: session_key.as_bytes().to_vec(),
+            attachment_keys,
+        })
     }
 
     /// Insert this mail's attachments into the self-send cache so the
@@ -1089,6 +1117,13 @@ impl MailBackend for TutaSession {
 
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String> {
         self.send_mail_impl(msg).await.map_err(|e| format!("{e}"))
+    }
+
+    async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+        self.create_draft_impl(msg)
+            .await
+            .map(|draft| draft.id)
+            .map_err(|e| format!("{e}"))
     }
 }
 
