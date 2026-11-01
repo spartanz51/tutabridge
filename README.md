@@ -235,6 +235,23 @@ mails/<id>.eml.enc   per-mail encrypted bodies
 mailbox is always listed and metadata-searchable regardless. Set it to `0` (or
 tick "keep every message body offline" in the GUI) to download everything.
 
+### Keeping the session in pass
+
+By default the login session is saved to your OS keychain (on Linux, a Secret
+Service provider such as GNOME Keyring or KeePassXC). On systems without one,
+you can keep it in [pass](https://www.passwordstore.org/) instead, encrypted
+with your GPG key. Add a `pass_path` to `config.toml`:
+
+```toml
+pass_path = "Tuta/Bridge"
+```
+
+The session is then stored as `Tuta/Bridge/<your address>`. `pass` must be on
+`PATH`, and `gpg-agent` must be able to decrypt the entry when the bridge
+starts, so a bridge started without a terminal needs a cached passphrase or a
+graphical pinentry. Log in once after setting it; an existing keychain session
+is not moved.
+
 ---
 
 ## Testing

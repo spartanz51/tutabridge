@@ -110,7 +110,7 @@ async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
         log::warn!("Bridge password setup failed: {e}");
     }
 
-    if !tuta::has_saved_session(&cfg.email) {
+    if !tuta::has_saved_session(&cfg) {
         return;
     }
 

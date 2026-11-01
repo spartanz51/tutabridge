@@ -1148,7 +1148,7 @@ pub async fn login_with_2fa(
     let file_client: Arc<dyn FileClient> = Arc::new(DiskFileClient::new());
     let sdk = Sdk::new_without_suspension(cfg.api_url.clone(), rest_client, file_client);
 
-    if let Some(credentials) = load_credentials(&cfg.email) {
+    if let Some(credentials) = load_credentials(cfg) {
         log::info!("Resuming saved session...");
         let access_token = credentials.access_token.clone();
         match sdk.login(credentials).await {
@@ -1164,7 +1164,7 @@ pub async fn login_with_2fa(
             Err(e) => match classify_resume_failure(&e) {
                 ResumeFailure::SessionInvalid => {
                     log::warn!("Saved session is no longer valid, re-authenticating: {e}");
-                    delete_credentials(&cfg.email);
+                    delete_credentials(cfg);
                 }
                 ResumeFailure::ClientRejected => {
                     return Err(format!(
@@ -1247,7 +1247,7 @@ pub async fn login_with_2fa(
         Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))
     })?;
 
-    save_credentials(&cfg.email, &credentials);
+    save_credentials(cfg, &credentials);
 
     Ok(TutaSession {
         logged_in,
@@ -1304,11 +1304,138 @@ fn classify_resume_failure(e: &tutasdk::login::LoginError) -> ResumeFailure {
     }
 }
 
-pub fn has_saved_session(email: &str) -> bool {
-    load_credentials(email).is_some()
+pub fn has_saved_session(cfg: &Config) -> bool {
+    load_credentials(cfg).is_some()
 }
 
-fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
+/// Where the saved login session lives: the OS keyring by default, or
+/// `<pass_path>/<email>` in the user's password-store when `pass_path` is set
+/// in the config. `pass` suits systems with no Secret Service provider, and
+/// keeps the session under the user's own GPG key.
+#[derive(Debug, PartialEq)]
+enum SessionStore {
+    Keyring { email: String },
+    Pass { entry: String },
+}
+
+impl SessionStore {
+    fn for_config(cfg: &Config) -> Self {
+        match cfg.pass_path.as_deref().map(|p| p.trim_matches('/')) {
+            Some(prefix) if !prefix.is_empty() => Self::Pass {
+                entry: format!("{prefix}/{}", cfg.email),
+            },
+            _ => Self::Keyring {
+                email: cfg.email.clone(),
+            },
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Keyring { .. } => "the keychain".to_string(),
+            Self::Pass { entry } => format!("pass ({entry})"),
+        }
+    }
+
+    fn write(&self, secret: &str) -> Result<(), String> {
+        match self {
+            Self::Keyring { email } => keyring::Entry::new(KEYRING_SERVICE, email)
+                .and_then(|entry| entry.set_password(secret))
+                .map_err(|e| e.to_string()),
+            Self::Pass { entry } => pass_insert(entry, secret),
+        }
+    }
+
+    fn read(&self) -> Option<String> {
+        match self {
+            Self::Keyring { email } => keyring::Entry::new(KEYRING_SERVICE, email)
+                .and_then(|entry| entry.get_password())
+                .ok(),
+            Self::Pass { entry } => pass_show(entry),
+        }
+    }
+
+    /// Remove the saved session. A session that is already gone is not an
+    /// error.
+    fn remove(&self) -> Result<(), String> {
+        match self {
+            Self::Keyring { email } => {
+                match keyring::Entry::new(KEYRING_SERVICE, email)
+                    .and_then(|entry| entry.delete_credential())
+                {
+                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Self::Pass { entry } => {
+                if !pass_entry_file(entry).is_some_and(|f| f.exists()) {
+                    return Ok(());
+                }
+                let status = std::process::Command::new("pass")
+                    .args(["rm", "--force", entry])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .map_err(|e| format!("cannot run pass: {e}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("pass rm exited with {status}"))
+                }
+            }
+        }
+    }
+}
+
+/// The encrypted file `pass` keeps an entry in, to tell "absent" from
+/// "could not delete" without decrypting anything.
+fn pass_entry_file(entry: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("PASSWORD_STORE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".password-store")))?;
+    Some(dir.join(format!("{entry}.gpg")))
+}
+
+fn pass_insert(entry: &str, secret: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pass")
+        .args(["insert", "--multiline", "--force", entry])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run pass: {e}"))?;
+    // Dropping stdin after the write closes it, which ends `insert`.
+    child
+        .stdin
+        .take()
+        .ok_or("pass has no stdin")?
+        .write_all(secret.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn pass_show(entry: &str) -> Option<String> {
+    // Stderr is inherited so a gpg or pinentry failure shows in the log
+    // rather than looking like a missing session.
+    let out = std::process::Command::new("pass")
+        .args(["show", entry])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+fn save_credentials(cfg: &Config, creds: &tutasdk::login::Credentials) {
     let data = serde_json::json!({
         "login": creds.login,
         "user_id": creds.user_id.0,
@@ -1323,34 +1450,27 @@ fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
         },
     });
 
-    match keyring::Entry::new(KEYRING_SERVICE, email) {
-        Ok(entry) => {
-            if let Err(e) = entry.set_password(&data.to_string()) {
-                log::warn!("Failed to save session to keychain: {e}");
-            } else {
-                log::info!("Session saved to keychain");
-            }
-        }
-        Err(e) => log::warn!("Failed to create keychain entry: {e}"),
+    let store = SessionStore::for_config(cfg);
+    match store.write(&data.to_string()) {
+        Ok(()) => log::info!("Session saved to {}", store.describe()),
+        Err(e) => log::warn!("Failed to save session to {}: {e}", store.describe()),
     }
     *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(creds.clone()));
 }
 
-fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
+fn load_credentials(cfg: &Config) -> Option<tutasdk::login::Credentials> {
     let mut cache = CREDENTIALS_CACHE.lock().unwrap();
     if let Some(cached) = cache.as_ref() {
         return cached.clone();
     }
 
-    let result = load_credentials_from_keyring(email);
+    let result = load_credentials_from_store(&SessionStore::for_config(cfg));
     *cache = Some(result.clone());
     result
 }
 
-fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credentials> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, email).ok()?;
-
-    let json_str = entry.get_password().ok()?;
+fn load_credentials_from_store(store: &SessionStore) -> Option<tutasdk::login::Credentials> {
+    let json_str = store.read()?;
 
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
     Some(tutasdk::login::Credentials {
@@ -1374,12 +1494,13 @@ fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credenti
 /// this process even if the keyring refuses the deletion, so a rejected token
 /// is never read back and retried. A leftover entry is overwritten by the
 /// next successful login.
-fn delete_credentials(email: &str) {
-    match keyring::Entry::new(KEYRING_SERVICE, email).and_then(|e| e.delete_credential()) {
-        Ok(()) | Err(keyring::Error::NoEntry) => {}
-        Err(e) => log::warn!(
-            "Could not remove the stale session from the keyring ({e}); it will be replaced on the next login"
-        ),
+fn delete_credentials(cfg: &Config) {
+    let store = SessionStore::for_config(cfg);
+    if let Err(e) = store.remove() {
+        log::warn!(
+            "Could not remove the stale session from {} ({e}); it will be replaced on the next login",
+            store.describe()
+        );
     }
     *CREDENTIALS_CACHE.lock().unwrap() = Some(None);
 }
@@ -1608,7 +1729,8 @@ mod resume_failure_tests {
 
 #[cfg(test)]
 mod forget_session_tests {
-    use super::{delete_credentials, has_saved_session, CREDENTIALS_CACHE};
+    use super::{delete_credentials, has_saved_session, SessionStore, CREDENTIALS_CACHE};
+    use crate::config::Config;
 
     fn fake_credentials(email: &str) -> tutasdk::login::Credentials {
         tutasdk::login::Credentials {
@@ -1632,24 +1754,61 @@ mod forget_session_tests {
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         crate::net::log_capture::install();
         let email = "nobody@example.invalid";
+        let cfg = Config {
+            email: email.to_string(),
+            ..Config::default()
+        };
         *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(fake_credentials(email)));
         assert!(
-            has_saved_session(email),
+            has_saved_session(&cfg),
             "precondition: the session is loaded"
         );
 
-        delete_credentials(email);
+        delete_credentials(&cfg);
 
         assert!(
             matches!(*CREDENTIALS_CACHE.lock().unwrap(), Some(None)),
             "the cache must say 'nothing there', not 'not loaded yet'"
         );
-        assert!(!has_saved_session(email));
+        assert!(!has_saved_session(&cfg));
         assert!(
             crate::net::log_capture::lines_containing("Could not remove the stale session")
                 .is_empty(),
             "a missing entry is not worth a warning"
         );
+    }
+
+    fn cfg_with_pass_path(pass_path: Option<&str>) -> Config {
+        Config {
+            email: "me@tuta.io".to_string(),
+            pass_path: pass_path.map(str::to_string),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn the_keyring_is_used_unless_a_pass_path_is_set() {
+        for pass_path in [None, Some(""), Some("/")] {
+            assert_eq!(
+                SessionStore::for_config(&cfg_with_pass_path(pass_path)),
+                SessionStore::Keyring {
+                    email: "me@tuta.io".to_string()
+                },
+                "{pass_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pass_path_names_one_entry_per_account() {
+        for pass_path in ["Tuta/Bridge", "/Tuta/Bridge/"] {
+            assert_eq!(
+                SessionStore::for_config(&cfg_with_pass_path(Some(pass_path))),
+                SessionStore::Pass {
+                    entry: "Tuta/Bridge/me@tuta.io".to_string()
+                }
+            );
+        }
     }
 }
 

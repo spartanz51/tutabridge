@@ -38,7 +38,7 @@ pub async fn has_saved_session() -> Result<bool, String> {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
         _ => return Ok(false),
     };
-    Ok(tuta::has_saved_session(&cfg.email))
+    Ok(tuta::has_saved_session(&cfg))
 }
 
 /// Holds the sender side of the channel the 2FA callback blocks on. `submit_totp`
