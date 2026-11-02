@@ -1592,34 +1592,41 @@ async fn own_key_failure_never_falls_back_to_a_working_bucket() {
 }
 
 #[tokio::test]
-async fn delete_batches_preserve_list_folder_and_unique_ids() {
+async fn delete_batches_preserve_list_folder_order_and_unique_ids() {
     let session = session().await;
     let target = IdTupleGenerated::new(GeneratedId("folders".into()), GeneratedId("trash".into()));
-    let mut mails: Vec<_> = (0..101).map(mail_id).collect();
-    mails.insert(
-        10,
+    let other_mail = |i| {
         IdTupleGenerated::new(
             GeneratedId("other-list".into()),
-            GeneratedId("other-mail".into()),
-        ),
-    );
+            GeneratedId(format!("mail-{i}")),
+        )
+    };
+    let mut mails: Vec<_> = (0..101).map(mail_id).collect();
+    // Interleave lists and reuse element ids across lists. Only identical
+    // (list, element) pairs are duplicates, including across batch boundaries.
+    mails.insert(10, other_mail(5));
+    mails.insert(20, other_mail(2));
     mails.push(mail_id(5));
+    mails.push(other_mail(5));
     session.ext.delete_mails(mails, target).await.unwrap();
     let calls = session.server.deletes.lock().unwrap();
     assert_eq!(calls.len(), 4);
-    let mut ids = std::collections::HashSet::new();
     for (index, options) in calls.iter().enumerate() {
         let json: serde_json::Value =
             serde_json::from_slice(options.body.as_ref().unwrap()).unwrap();
         assert_eq!(json["724"], serde_json::json!([["folders", "trash"]]));
-        let batch = json["421"].as_array().unwrap();
-        assert_eq!(batch.len(), if index < 2 { 50 } else { 1 });
-        for mail in batch {
-            assert_eq!(mail[0], if index < 3 { "mail-list" } else { "other-list" });
-            assert!(ids.insert(mail.to_string()));
-        }
+        let expected: Vec<_> = if index < 3 {
+            (index * 50..((index + 1) * 50).min(101))
+                .map(|i| serde_json::json!(["mail-list", format!("mail-{i}")]))
+                .collect()
+        } else {
+            vec![
+                serde_json::json!(["other-list", "mail-5"]),
+                serde_json::json!(["other-list", "mail-2"]),
+            ]
+        };
+        assert_eq!(json["421"], serde_json::json!(expected));
     }
-    assert_eq!(ids.len(), 102);
 }
 
 #[tokio::test]

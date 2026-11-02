@@ -5,7 +5,7 @@ use crate::folder_system::FolderSystem;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tutasdk::crypto::crypto_facade::{BucketKeyError, ResolvedSessionKey};
 use tutasdk::entities::generated::tutanota::{
@@ -23,9 +23,9 @@ use tutasdk::services::generated::tutanota::{MailService, MoveMailService};
 use tutasdk::tutanota_constants::ArchiveDataType;
 use tutasdk::{ApiCallError, GeneratedId, IdTupleGenerated, ListLoadDirection, LoggedInSdk};
 
-/// Maximum number of mails moved in a single request. If higher, it needs to
-/// be sent in batches or else the request returns HTTP Bad Request.
-const MOVE_MAIL_LIMIT: usize = 50;
+/// Maximum number of mails moved or deleted per request. Larger batches
+/// are rejected with HTTP Bad Request.
+const MAIL_BATCH_LIMIT: usize = 50;
 
 /// Where a mail body is stored.
 enum BodySource<'a> {
@@ -153,7 +153,7 @@ impl MailExtensions {
         target_folder: IdTupleGenerated,
     ) -> Result<(), ApiCallError> {
         mails.dedup();
-        for chunk in mails.chunks(MOVE_MAIL_LIMIT) {
+        for chunk in mails.chunks(MAIL_BATCH_LIMIT) {
             self.sdk
                 .get_service_executor()
                 .post::<MoveMailService>(
@@ -180,22 +180,22 @@ impl MailExtensions {
         mails: Vec<IdTupleGenerated>,
         folder: IdTupleGenerated,
     ) -> Result<(), ApiCallError> {
+        // Keep first-seen list and mail order; hash tables only provide lookups.
         let mut by_list: Vec<Vec<IdTupleGenerated>> = Vec::new();
+        let mut list_indices = HashMap::new();
+        let mut seen = HashSet::new();
         for mail in mails {
-            match by_list
-                .iter_mut()
-                .find(|group| group[0].list_id == mail.list_id)
-            {
-                Some(group) => {
-                    if !group.contains(&mail) {
-                        group.push(mail);
-                    }
-                }
-                None => by_list.push(vec![mail]),
+            if !seen.insert(pair(&mail)) {
+                continue;
             }
+            let index = *list_indices.entry(mail.list_id.clone()).or_insert_with(|| {
+                by_list.push(Vec::new());
+                by_list.len() - 1
+            });
+            by_list[index].push(mail);
         }
         for group in by_list {
-            for chunk in group.chunks(MOVE_MAIL_LIMIT) {
+            for chunk in group.chunks(MAIL_BATCH_LIMIT) {
                 self.sdk
                     .get_service_executor()
                     .delete::<MailService>(
