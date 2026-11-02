@@ -1138,6 +1138,7 @@ pub async fn login_with_2fa(
     password: Option<&str>,
     totp_callback: Option<TwoFactorCallback>,
 ) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
+    let credentials = load_credentials(cfg)?;
     let raw_client: Arc<dyn RestClient> =
         Arc::new(tutasdk::net::native_rest_client::NativeRestClient::try_new()?);
     // Route every SDK request through the rate governor (bounded concurrency +
@@ -1148,7 +1149,7 @@ pub async fn login_with_2fa(
     let file_client: Arc<dyn FileClient> = Arc::new(DiskFileClient::new());
     let sdk = Sdk::new_without_suspension(cfg.api_url.clone(), rest_client, file_client);
 
-    if let Some(credentials) = load_credentials(cfg) {
+    if let Some(credentials) = credentials {
         log::info!("Resuming saved session...");
         let access_token = credentials.access_token.clone();
         match sdk.login(credentials).await {
@@ -1304,8 +1305,13 @@ fn classify_resume_failure(e: &tutasdk::login::LoginError) -> ResumeFailure {
     }
 }
 
-pub fn has_saved_session(cfg: &Config) -> bool {
-    load_credentials(cfg).is_some()
+/// A storage failure is not evidence that the user needs to log in again.
+#[derive(Debug, thiserror::Error)]
+#[error("Could not read the saved session: {0}")]
+pub struct SessionStoreError(String);
+
+pub fn has_saved_session(cfg: &Config) -> Result<bool, SessionStoreError> {
+    load_credentials(cfg).map(|credentials| credentials.is_some())
 }
 
 /// Where the saved login session lives: the OS keyring by default, or
@@ -1346,11 +1352,13 @@ impl SessionStore {
         }
     }
 
-    fn read(&self) -> Option<String> {
+    fn read(&self) -> Result<Option<String>, SessionStoreError> {
         match self {
-            Self::Keyring { email } => keyring::Entry::new(KEYRING_SERVICE, email)
+            // Retain the existing keyring fallback for installations without
+            // a Secret Service provider. pass is an explicitly selected store.
+            Self::Keyring { email } => Ok(keyring::Entry::new(KEYRING_SERVICE, email)
                 .and_then(|entry| entry.get_password())
-                .ok(),
+                .ok()),
             Self::Pass { entry } => pass_show(entry),
         }
     }
@@ -1391,6 +1399,7 @@ impl SessionStore {
 /// "could not delete" without decrypting anything.
 fn pass_entry_file(entry: &str) -> Option<std::path::PathBuf> {
     let dir = std::env::var_os("PASSWORD_STORE_DIR")
+        .filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".password-store")))?;
     Some(dir.join(format!("{entry}.gpg")))
@@ -1421,18 +1430,33 @@ fn pass_insert(entry: &str, secret: &str) -> Result<(), String> {
     }
 }
 
-fn pass_show(entry: &str) -> Option<String> {
-    // Stderr is inherited so a gpg or pinentry failure shows in the log
-    // rather than looking like a missing session.
+fn pass_show(entry: &str) -> Result<Option<String>, SessionStoreError> {
+    // pass uses the same nonzero status for missing entries and GPG failures.
+    // Only a confirmed missing file means that there is no saved session.
+    let file = pass_entry_file(entry)
+        .ok_or_else(|| SessionStoreError("cannot locate the password store".into()))?;
+    match file.try_exists() {
+        Ok(false) => return Ok(None),
+        Ok(true) => {}
+        Err(e) => return Err(SessionStoreError(format!("cannot inspect pass entry: {e}"))),
+    }
     let out = std::process::Command::new("pass")
-        .args(["show", entry])
+        .args(["show", "--", entry])
         .stdin(std::process::Stdio::null())
         .output()
-        .ok()?;
+        .map_err(|e| SessionStoreError(format!("cannot run pass: {e}")))?;
     if !out.status.success() {
-        return None;
+        // Never include stdout: even a failed command may have emitted part
+        // of the decrypted credentials.
+        return Err(SessionStoreError(format!(
+            "pass show exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
     }
-    String::from_utf8(out.stdout).ok()
+    String::from_utf8(out.stdout)
+        .map(Some)
+        .map_err(|_| SessionStoreError("pass returned a session that is not UTF-8".into()))
 }
 
 fn save_credentials(cfg: &Config, creds: &tutasdk::login::Credentials) {
@@ -1458,21 +1482,36 @@ fn save_credentials(cfg: &Config, creds: &tutasdk::login::Credentials) {
     *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(creds.clone()));
 }
 
-fn load_credentials(cfg: &Config) -> Option<tutasdk::login::Credentials> {
+fn load_credentials(
+    cfg: &Config,
+) -> Result<Option<tutasdk::login::Credentials>, SessionStoreError> {
     let mut cache = CREDENTIALS_CACHE.lock().unwrap();
     if let Some(cached) = cache.as_ref() {
-        return cached.clone();
+        return Ok(cached.clone());
     }
 
-    let result = load_credentials_from_store(&SessionStore::for_config(cfg));
+    // Leave the cache uninitialized on errors so unlocking GPG and retrying
+    // in the same process performs a fresh read.
+    let result = load_credentials_from_store(&SessionStore::for_config(cfg))?;
     *cache = Some(result.clone());
-    result
+    Ok(result)
 }
 
-fn load_credentials_from_store(store: &SessionStore) -> Option<tutasdk::login::Credentials> {
-    let json_str = store.read()?;
+fn load_credentials_from_store(
+    store: &SessionStore,
+) -> Result<Option<tutasdk::login::Credentials>, SessionStoreError> {
+    let Some(json_str) = store.read()? else {
+        return Ok(None);
+    };
+    let credentials = parse_credentials(&json_str);
+    if credentials.is_none() && matches!(store, SessionStore::Pass { .. }) {
+        return Err(SessionStoreError("pass returned an invalid session".into()));
+    }
+    Ok(credentials)
+}
 
-    let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+fn parse_credentials(json_str: &str) -> Option<tutasdk::login::Credentials> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
     Some(tutasdk::login::Credentials {
         login: v["login"].as_str()?.to_string(),
         user_id: tutasdk::GeneratedId(v["user_id"].as_str()?.to_string()),
@@ -1760,7 +1799,7 @@ mod forget_session_tests {
         };
         *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(fake_credentials(email)));
         assert!(
-            has_saved_session(&cfg),
+            has_saved_session(&cfg).unwrap(),
             "precondition: the session is loaded"
         );
 
@@ -1770,7 +1809,7 @@ mod forget_session_tests {
             matches!(*CREDENTIALS_CACHE.lock().unwrap(), Some(None)),
             "the cache must say 'nothing there', not 'not loaded yet'"
         );
-        assert!(!has_saved_session(&cfg));
+        assert!(!has_saved_session(&cfg).unwrap());
         assert!(
             crate::net::log_capture::lines_containing("Could not remove the stale session")
                 .is_empty(),

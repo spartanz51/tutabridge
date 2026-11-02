@@ -6,7 +6,7 @@ interface Props {
   status: BridgeStatus | null;
   stats: BridgeStats;
   config: Config | null;
-  hasSavedSession: boolean;
+  hasSavedSession: boolean | null;
   loading: boolean;
   logs: string[];
   needsTotp: boolean;
@@ -60,7 +60,7 @@ export function Dashboard({
   const isStopped = status === "Stopped" || errored;
   const hasAccount = !!config?.email;
   const needsEmail = isStopped && !hasAccount;
-  const needsPassword = isStopped && !hasSavedSession;
+  const needsPassword = isStopped && hasSavedSession === false;
   const wsConnected = stats.ws_status === "Connected";
 
   // LED colour reflects real health: green only when running and realtime is
