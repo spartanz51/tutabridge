@@ -5,12 +5,12 @@ use crate::folder_system::FolderSystem;
 use crypto_primitives::key::GenericAesKey;
 use crypto_primitives::randomizer_facade::RandomizerFacade;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tutasdk::crypto::crypto_facade::{BucketKeyError, ResolvedSessionKey};
 use tutasdk::entities::generated::tutanota::{
-    Mail, MailBox, MailDetails, MailDetailsBlob, MailDetailsDraft, MailSet, MoveMailData,
-    TutanotaFile,
+    DeleteMailData, Mail, MailBox, MailDetails, MailDetailsBlob, MailDetailsDraft, MailSet,
+    MoveMailData, TutanotaFile,
 };
 use tutasdk::entities::{
     entity_facade::{
@@ -19,13 +19,13 @@ use tutasdk::entities::{
     },
     Entity,
 };
-use tutasdk::services::generated::tutanota::MoveMailService;
+use tutasdk::services::generated::tutanota::{MailService, MoveMailService};
 use tutasdk::tutanota_constants::ArchiveDataType;
 use tutasdk::{ApiCallError, GeneratedId, IdTupleGenerated, ListLoadDirection, LoggedInSdk};
 
-/// Maximum number of mails moved in a single request. If higher, it needs to
-/// be sent in batches or else the request returns HTTP Bad Request.
-const MOVE_MAIL_LIMIT: usize = 50;
+/// Maximum number of mails moved or deleted per request. Larger batches
+/// are rejected with HTTP Bad Request.
+const MAIL_BATCH_LIMIT: usize = 50;
 
 /// Where a mail body is stored.
 enum BodySource<'a> {
@@ -153,7 +153,7 @@ impl MailExtensions {
         target_folder: IdTupleGenerated,
     ) -> Result<(), ApiCallError> {
         mails.dedup();
-        for chunk in mails.chunks(MOVE_MAIL_LIMIT) {
+        for chunk in mails.chunks(MAIL_BATCH_LIMIT) {
             self.sdk
                 .get_service_executor()
                 .post::<MoveMailService>(
@@ -167,6 +167,47 @@ impl MailExtensions {
                     Default::default(),
                 )
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes mails permanently. Mirrors TS `MailFacade.deleteMails`: one
+    /// request per mail list, in chunks of the same size as moves. The server
+    /// only deletes mails that are in `folder`, so an id that has meanwhile
+    /// moved elsewhere is left alone.
+    pub async fn delete_mails(
+        &self,
+        mails: Vec<IdTupleGenerated>,
+        folder: IdTupleGenerated,
+    ) -> Result<(), ApiCallError> {
+        // Keep first-seen list and mail order; hash tables only provide lookups.
+        let mut by_list: Vec<Vec<IdTupleGenerated>> = Vec::new();
+        let mut list_indices = HashMap::new();
+        let mut seen = HashSet::new();
+        for mail in mails {
+            if !seen.insert(pair(&mail)) {
+                continue;
+            }
+            let index = *list_indices.entry(mail.list_id.clone()).or_insert_with(|| {
+                by_list.push(Vec::new());
+                by_list.len() - 1
+            });
+            by_list[index].push(mail);
+        }
+        for group in by_list {
+            for chunk in group.chunks(MAIL_BATCH_LIMIT) {
+                self.sdk
+                    .get_service_executor()
+                    .delete::<MailService>(
+                        DeleteMailData {
+                            _format: 0,
+                            mails: chunk.to_vec(),
+                            folder: Some(folder.clone()),
+                        },
+                        Default::default(),
+                    )
+                    .await?;
+            }
         }
         Ok(())
     }

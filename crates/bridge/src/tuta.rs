@@ -97,6 +97,13 @@ pub trait MailBackend: Send + Sync {
         unread: bool,
     ) -> Result<(), String>;
     async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String>;
+    /// Delete mails permanently, as Tuta's "Delete permanently" does in Trash
+    /// and Spam. Only mails that are in `folder` are deleted.
+    async fn delete_mails(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        folder: &FolderInfo,
+    ) -> Result<(), String>;
     /// Move mails into the given target folder.
     async fn move_mails(
         &self,
@@ -1068,6 +1075,21 @@ impl MailBackend for TutaSession {
         self.logged_in
             .mail_facade()
             .trash_mails(mail_ids)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn delete_mails(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        folder: &FolderInfo,
+    ) -> Result<(), String> {
+        let folder = IdTupleGenerated::new(
+            tutasdk::GeneratedId(folder.list_id.clone()),
+            tutasdk::GeneratedId(folder.id.clone()),
+        );
+        MailExtensions::new(self.logged_in.clone())
+            .delete_mails(mail_ids, folder)
             .await
             .map_err(|e| format!("{e}"))
     }
