@@ -1,8 +1,8 @@
 {
-  "version": "0.1.0-rc.14",
-  "tag": "tutanota-release-361.261006.0",
-  "upstream": "bbc38dbec458eb36379d499a3d1de9932a6be9e9",
-  "generated": "3408df1853d274efc719c74cef80d4e013ad49cc",
-  "base": "e937f94964250b44cbb4ea668cde507109779c38",
-  "lock": "b3e0fa263a6046b6b77a2e31d903811a251d78aab3bf349b8968ad79bc765f4b"
+  "version": "0.1.0-rc.16",
+  "tag": "tutanota-release-362.261020.0",
+  "upstream": "f5e2d8628f17be558fe63130396ff625bbe69c77",
+  "tree": "d501ff242a35515a803885b43619f79b20db169d",
+  "base": "9117d313f15a49228339857c6298ea2c18f8dae8",
+  "lock": "dd0f877d1e72ca08303f253f1ac212a8897d671423dbc6b59237a9b2a74fa362"
 }
