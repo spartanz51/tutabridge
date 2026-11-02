@@ -157,8 +157,8 @@ export function useBridge() {
   }, []);
 
   const saveConfig = useCallback(async (cfg: Config) => {
-    await invoke("save_config", { config: cfg });
-    setConfig(cfg);
+    const saved = await invoke<Config>("save_config", { config: cfg });
+    setConfig(saved);
   }, []);
 
   // One login. If the account has 2FA, the backend emits `bridge://need-totp`
