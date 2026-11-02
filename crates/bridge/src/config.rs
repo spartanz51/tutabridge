@@ -24,6 +24,21 @@ pub struct Config {
     pub auto_update: bool,
 }
 
+/// The fields the settings form owns. Hidden configuration must come from
+/// the current file, never from a partial or stale frontend snapshot.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditableSettings {
+    pub email: String,
+    pub imap_port: u16,
+    pub smtp_port: u16,
+    pub api_url: String,
+    pub sync_limit: usize,
+    pub mcp_permission: McpPermission,
+    pub mcp_port: u16,
+    pub auto_update: bool,
+}
+
 /// What a connected LLM may read over the MCP server. Strictly read-only — the
 /// server never exposes a tool that sends, moves, deletes or otherwise mutates
 /// mail. The tiers differ only in how much they let a client *read*.
@@ -148,6 +163,45 @@ pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let content = toml::to_string_pretty(cfg)?;
     crate::fs_private::write_private(&path, &content)?;
     Ok(())
+}
+
+/// Merge GUI-owned settings into the latest configuration on disk. Keep the
+/// TOML table intact so fields this version does not know (such as pass_path
+/// from a newer build) survive too.
+pub fn save_settings(settings: &EditableSettings) -> Result<Config, Box<dyn std::error::Error>> {
+    save_settings_at(&config_path(), settings)
+}
+
+fn save_settings_at(
+    path: &std::path::Path,
+    settings: &EditableSettings,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let (config, content) = merge_settings(existing.as_deref(), settings)?;
+    crate::fs_private::create_dir_all_private(path.parent().unwrap())?;
+    crate::fs_private::write_private(path, content)?;
+    Ok(config)
+}
+
+/// Pure transformation: preserve hidden fields, apply the form and validate
+/// before producing the content to persist. No filesystem or global state.
+fn merge_settings(
+    existing: Option<&str>,
+    settings: &EditableSettings,
+) -> Result<(Config, String), Box<dyn std::error::Error>> {
+    let mut table: toml::Table = match existing {
+        Some(content) => toml::from_str(content)?,
+        None => toml::Table::new(),
+    };
+    table.extend(toml::Table::try_from(settings)?);
+    let config: Config = table.clone().try_into()?;
+    config.validate_ports()?;
+    let content = toml::to_string_pretty(&table)?;
+    Ok((config, content))
 }
 
 pub fn ensure_bridge_password(config: &mut Config) -> Result<String, Box<dyn std::error::Error>> {
@@ -359,5 +413,165 @@ unknown_field = "ignored"
         // but serde default is to ignore them
         let result = parse_config(toml);
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    // This is the payload emitted by ConfigPanel, without hidden fields.
+    const FORM: &str = r#"{
+        "email":"me@tuta.io", "imap_port":2143, "smtp_port":2025,
+        "api_url":"https://app.tuta.com", "sync_limit":0,
+        "mcp_permission":"metadata", "mcp_port":2944, "auto_update":false
+    }"#;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tutabridge-settings-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            Self(dir.join("config.toml"))
+        }
+
+        fn write(&self, content: &str) {
+            crate::fs_private::create_dir_all_private(self.0.parent().unwrap()).unwrap();
+            crate::fs_private::write_private(&self.0, content).unwrap();
+        }
+
+        fn read(&self) -> String {
+            std::fs::read_to_string(&self.0).unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+        }
+    }
+
+    const EXISTING: &str = r#"email = "old@tuta.io"
+imap_port = 1143
+smtp_port = 1025
+api_url = "https://old.example.invalid"
+sync_limit = 500
+mcp_permission = "disabled"
+mcp_port = 1944
+auto_update = true
+bridge_password = "keep-me"
+pass_path = "Tuta/Bridge"
+[future_settings]
+enabled = true
+"#;
+
+    #[test]
+    fn merge_preserves_hidden_fields_and_applies_every_form_setting() {
+        let settings: EditableSettings = serde_json::from_str(FORM).unwrap();
+        let (config, content) = merge_settings(Some(EXISTING), &settings).unwrap();
+        assert_eq!(config.email, "me@tuta.io");
+        assert_eq!(config.imap_port, 2143);
+        assert_eq!(config.smtp_port, 2025);
+        assert_eq!(config.api_url, "https://app.tuta.com");
+        assert_eq!(config.sync_limit, 0);
+        assert_eq!(config.mcp_permission, McpPermission::Metadata);
+        assert_eq!(config.mcp_port, 2944);
+        assert!(!config.auto_update);
+        assert_eq!(config.bridge_password.as_deref(), Some("keep-me"));
+        let merged: toml::Table = toml::from_str(&content).unwrap();
+        assert_eq!(merged["bridge_password"].as_str(), Some("keep-me"));
+        assert_eq!(merged["pass_path"].as_str(), Some("Tuta/Bridge"));
+        assert_eq!(merged["future_settings"]["enabled"].as_bool(), Some(true));
+        assert_eq!(config, toml::from_str::<Config>(&content).unwrap());
+    }
+
+    #[test]
+    fn merge_without_existing_content_creates_a_first_run_config() {
+        let settings: EditableSettings = serde_json::from_str(FORM).unwrap();
+        let (config, content) = merge_settings(None, &settings).unwrap();
+        assert_eq!(config.email, "me@tuta.io");
+        assert_eq!(config.imap_port, 2143);
+        assert_eq!(config.bridge_password, None);
+        assert_eq!(config, toml::from_str::<Config>(&content).unwrap());
+    }
+
+    #[test]
+    fn merge_rejects_invalid_ports() {
+        for (imap, smtp, mcp) in [(0, 2025, 2944), (2143, 2143, 2944), (2143, 2025, 2143)] {
+            let mut settings: EditableSettings = serde_json::from_str(FORM).unwrap();
+            settings.imap_port = imap;
+            settings.smtp_port = smtp;
+            settings.mcp_port = mcp;
+            assert!(merge_settings(Some(EXISTING), &settings).is_err());
+        }
+    }
+
+    #[test]
+    fn merge_rejects_corrupt_or_ill_typed_existing_content() {
+        let settings: EditableSettings = serde_json::from_str(FORM).unwrap();
+        for content in ["invalid [toml", "bridge_password = 123"] {
+            assert!(merge_settings(Some(content), &settings).is_err());
+        }
+    }
+
+    #[test]
+    fn save_creates_a_private_file_and_reads_the_latest_hidden_values() {
+        let file = Fixture::new();
+        let settings: EditableSettings = serde_json::from_str(FORM).unwrap();
+        let first = save_settings_at(&file.0, &settings).unwrap();
+        assert_eq!(first, toml::from_str::<Config>(&file.read()).unwrap());
+        // A password regenerated after opening the form must be retained.
+        file.write(&EXISTING.replace("keep-me", "regenerated-password"));
+        let saved = save_settings_at(&file.0, &settings).unwrap();
+        assert_eq!(
+            saved.bridge_password.as_deref(),
+            Some("regenerated-password")
+        );
+        assert_eq!(saved.imap_port, 2143);
+        let persisted: toml::Table = toml::from_str(&file.read()).unwrap();
+        assert_eq!(persisted["pass_path"].as_str(), Some("Tuta/Bridge"));
+        assert_eq!(saved, toml::from_str::<Config>(&file.read()).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file.0).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn failed_save_leaves_the_existing_file_untouched() {
+        let file = Fixture::new();
+        let mut settings: EditableSettings = serde_json::from_str(FORM).unwrap();
+        file.write(EXISTING);
+        settings.imap_port = settings.smtp_port;
+        assert!(save_settings_at(&file.0, &settings).is_err());
+        assert_eq!(file.read(), EXISTING);
+
+        settings.imap_port = 2143;
+        file.write("invalid [toml");
+        assert!(save_settings_at(&file.0, &settings).is_err());
+        assert_eq!(file.read(), "invalid [toml");
+        // An unreadable path must not be mistaken for a missing file.
+        std::fs::remove_file(&file.0).unwrap();
+        std::fs::create_dir(&file.0).unwrap();
+        assert!(save_settings_at(&file.0, &settings).is_err());
+        assert!(file.0.is_dir());
+    }
+
+    #[test]
+    fn form_payload_cannot_overwrite_hidden_fields_or_omit_settings() {
+        let mut payload: serde_json::Value = serde_json::from_str(FORM).unwrap();
+        payload["bridge_password"] = serde_json::Value::String("stale-password".into());
+        assert!(serde_json::from_value::<EditableSettings>(payload.clone()).is_err());
+        payload.as_object_mut().unwrap().remove("bridge_password");
+        payload.as_object_mut().unwrap().remove("auto_update");
+        assert!(serde_json::from_value::<EditableSettings>(payload).is_err());
     }
 }
