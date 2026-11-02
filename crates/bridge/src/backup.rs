@@ -448,6 +448,13 @@ mod tests {
         async fn trash_mails(&self, _ids: Vec<IdTupleGenerated>) -> Result<(), String> {
             unimplemented!()
         }
+        async fn delete_mails(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _folder: &FolderInfo,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
         async fn move_mails(
             &self,
             _ids: Vec<IdTupleGenerated>,

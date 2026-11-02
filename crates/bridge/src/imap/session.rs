@@ -12,6 +12,7 @@ use crate::mail::rfc2822::{
 use crate::store::LocalStore;
 use crate::sync::MailStore;
 use crate::tuta::{FolderInfo, MailBackend};
+use tutabridge_tuta::folder_system::MailSetKind;
 
 #[derive(Debug, Clone, PartialEq)]
 enum State {
@@ -710,8 +711,19 @@ impl ImapSession {
             .collect();
 
         if !deleted_ids.is_empty() {
-            if let Err(e) = self.backend.trash_mails(deleted_ids).await {
-                log::warn!("Failed to trash mails: {}", e);
+            // Trash and Spam are where Tuta deletes permanently; anywhere else
+            // an expunged mail goes to Trash, as before.
+            match self.selected_folder.as_ref() {
+                Some(folder) if matches!(folder.kind, MailSetKind::Trash | MailSetKind::Spam) => {
+                    if let Err(e) = self.backend.delete_mails(deleted_ids, folder).await {
+                        log::warn!("Failed to delete mails from {}: {}", folder.imap_path, e);
+                    }
+                }
+                _ => {
+                    if let Err(e) = self.backend.trash_mails(deleted_ids).await {
+                        log::warn!("Failed to trash mails: {}", e);
+                    }
+                }
             }
         }
 
@@ -1976,6 +1988,7 @@ mod tests {
         mails: Mutex<Vec<Mail>>,
         details: Mutex<std::collections::HashMap<String, MailDetails>>,
         trashed: Mutex<Vec<IdTupleGenerated>>,
+        deleted: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
         unread_calls: Mutex<Vec<(Vec<IdTupleGenerated>, bool)>>,
         sent: Mutex<Vec<ParsedMessage>>,
         moved: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
@@ -1991,6 +2004,7 @@ mod tests {
                 mails: Mutex::new(Vec::new()),
                 details: Mutex::new(std::collections::HashMap::new()),
                 trashed: Mutex::new(Vec::new()),
+                deleted: Mutex::new(Vec::new()),
                 unread_calls: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
                 moved: Mutex::new(Vec::new()),
@@ -2460,6 +2474,17 @@ mod tests {
             self.trashed.lock().unwrap().extend(mail_ids);
             Ok(())
         }
+        async fn delete_mails(
+            &self,
+            mail_ids: Vec<IdTupleGenerated>,
+            folder: &FolderInfo,
+        ) -> Result<(), String> {
+            self.deleted
+                .lock()
+                .unwrap()
+                .push((mail_ids, folder.id.clone()));
+            Ok(())
+        }
         async fn move_mails(
             &self,
             mail_ids: Vec<IdTupleGenerated>,
@@ -2665,6 +2690,61 @@ mod tests {
         // Verify local state updated
         let resp = session.handle_command("A004 FETCH 1 (FLAGS)").await;
         assert!(resp[0].contains("\\Seen"));
+    }
+
+    /// Expunging in Trash or Spam deletes for real: trashing a mail that is
+    /// already in Trash changes nothing, so it would come back on the next
+    /// sync.
+    #[tokio::test]
+    async fn expunge_in_trash_or_spam_deletes_permanently() {
+        for (id, kind, path, special_use) in [
+            ("trash", MailSetKind::Trash, "Trash", "\\Trash"),
+            ("spam", MailSetKind::Spam, "Spam", "\\Junk"),
+        ] {
+            let backend = Arc::new(MockBackend::with_mails(vec![
+                make_mail("m1", "Mail 1", false),
+                make_mail("m2", "Mail 2", false),
+            ]));
+            let store = MailStore::new();
+            let folder = FolderInfo {
+                id: id.into(),
+                list_id: "folders".into(),
+                entries_list_id: format!("{id}_entries"),
+                kind,
+                imap_path: path.into(),
+                special_use: Some(special_use.into()),
+            };
+            store.set_folder_list(vec![inbox_folder(), folder]).await;
+            let stored: Vec<StoredMail> = backend
+                .mails
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, m)| StoredMail {
+                    mail: m.clone(),
+                    body_loaded: false,
+                    uid: (i + 1) as u32,
+                    attachments_pending: false,
+                })
+                .collect();
+            store.set_folder(id, stored).await;
+            let mut session = ImapSession::new(store, backend.clone(), None, None);
+
+            session.handle_command("A001 LOGIN user pass").await;
+            session.handle_command(&format!("A002 SELECT {path}")).await;
+            session
+                .handle_command("A003 STORE 2 +FLAGS (\\Deleted)")
+                .await;
+            let resp = session.handle_command("A004 EXPUNGE").await;
+            assert!(resp.iter().any(|r| r.contains("* 2 EXPUNGE")), "{path}");
+
+            assert!(backend.trashed.lock().unwrap().is_empty(), "{path}");
+            let deleted = backend.deleted.lock().unwrap();
+            assert_eq!(deleted.len(), 1, "{path}");
+            assert_eq!(deleted[0].0.len(), 1, "{path}");
+            assert_eq!(deleted[0].1, id, "{path}");
+        }
     }
 
     #[tokio::test]

@@ -979,6 +979,13 @@ mod startup_tests {
         async fn trash_mails(&self, _ids: Vec<IdTupleGenerated>) -> Result<(), String> {
             Err("offline".into())
         }
+        async fn delete_mails(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _folder: &FolderInfo,
+        ) -> Result<(), String> {
+            Err("offline".into())
+        }
         async fn move_mails(
             &self,
             _ids: Vec<IdTupleGenerated>,

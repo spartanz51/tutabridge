@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tutasdk::crypto::crypto_facade::{BucketKeyError, ResolvedSessionKey};
 use tutasdk::entities::generated::tutanota::{
-    Mail, MailBox, MailDetails, MailDetailsBlob, MailDetailsDraft, MailSet, MoveMailData,
-    TutanotaFile,
+    DeleteMailData, Mail, MailBox, MailDetails, MailDetailsBlob, MailDetailsDraft, MailSet,
+    MoveMailData, TutanotaFile,
 };
 use tutasdk::entities::{
     entity_facade::{
@@ -19,7 +19,7 @@ use tutasdk::entities::{
     },
     Entity,
 };
-use tutasdk::services::generated::tutanota::MoveMailService;
+use tutasdk::services::generated::tutanota::{MailService, MoveMailService};
 use tutasdk::tutanota_constants::ArchiveDataType;
 use tutasdk::{ApiCallError, GeneratedId, IdTupleGenerated, ListLoadDirection, LoggedInSdk};
 
@@ -167,6 +167,47 @@ impl MailExtensions {
                     Default::default(),
                 )
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes mails permanently. Mirrors TS `MailFacade.deleteMails`: one
+    /// request per mail list, in chunks of the same size as moves. The server
+    /// only deletes mails that are in `folder`, so an id that has meanwhile
+    /// moved elsewhere is left alone.
+    pub async fn delete_mails(
+        &self,
+        mails: Vec<IdTupleGenerated>,
+        folder: IdTupleGenerated,
+    ) -> Result<(), ApiCallError> {
+        let mut by_list: Vec<Vec<IdTupleGenerated>> = Vec::new();
+        for mail in mails {
+            match by_list
+                .iter_mut()
+                .find(|group| group[0].list_id == mail.list_id)
+            {
+                Some(group) => {
+                    if !group.contains(&mail) {
+                        group.push(mail);
+                    }
+                }
+                None => by_list.push(vec![mail]),
+            }
+        }
+        for group in by_list {
+            for chunk in group.chunks(MOVE_MAIL_LIMIT) {
+                self.sdk
+                    .get_service_executor()
+                    .delete::<MailService>(
+                        DeleteMailData {
+                            _format: 0,
+                            mails: chunk.to_vec(),
+                            folder: Some(folder.clone()),
+                        },
+                        Default::default(),
+                    )
+                    .await?;
+            }
         }
         Ok(())
     }
