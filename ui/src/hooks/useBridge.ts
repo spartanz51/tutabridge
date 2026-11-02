@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -30,7 +30,10 @@ export function useBridge() {
     mails_synced: 0,
     ws_status: "Stopped",
   });
-  const [hasSavedSession, setHasSavedSession] = useState(false);
+  // null means unchecked or unreadable, not a confirmed missing session.
+  const [hasSavedSession, setHasSavedSession] = useState<boolean | null>(null);
+  const [sessionReadError, setSessionReadError] = useState<string | null>(null);
+  const sessionReadEpoch = useRef(0);
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -53,14 +56,43 @@ export function useBridge() {
   // more rights): the banner offers the install instead.
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
 
+  const acceptStatus = useCallback((next: BridgeStatus) => {
+    setStatus(next);
+    if (next === "Running") {
+      // Auto-start may succeed after the initial store probe failed. Its
+      // success supersedes that error and any probe still in flight.
+      sessionReadEpoch.current += 1;
+      setSessionReadError(null);
+      setHasSavedSession(true);
+    }
+  }, []);
+
   const refresh = useCallback(() => {
-    invoke<BridgeStatus>("get_status").then(setStatus);
+    invoke<BridgeStatus>("get_status").then(acceptStatus);
     invoke<BridgeStats>("get_stats").then(setStats);
+  }, [acceptStatus]);
+
+  const readSavedSession = useCallback(async () => {
+    const epoch = ++sessionReadEpoch.current;
+    try {
+      const saved = await invoke<boolean>("has_saved_session");
+      if (epoch !== sessionReadEpoch.current) return null;
+      setHasSavedSession(saved);
+      setSessionReadError(null);
+      return saved;
+    } catch (e) {
+      if (epoch !== sessionReadEpoch.current) return null;
+      setHasSavedSession(null);
+      setSessionReadError(String(e));
+      return null;
+    }
   }, []);
 
   useEffect(() => {
     invoke<Config>("get_config").then(setConfig);
-    invoke<boolean>("has_saved_session").then(setHasSavedSession);
+    // The error is displayed independently of status refreshes. It must not
+    // turn into a password prompt or an unhandled promise rejection.
+    void readSavedSession();
     invoke<string | null>("get_bridge_password").then(setBridgePassword);
     invoke<string>("get_app_version").then(setAppVersion);
     refresh();
@@ -68,7 +100,7 @@ export function useBridge() {
     // The bridge pushes `bridge://stats` and `bridge://status` whenever
     // anything changes (mail count, ws state, start/stop). No setInterval.
     const unlistenStats = listen<BridgeStats>("bridge://stats", (e) => setStats(e.payload));
-    const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => setStatus(e.payload));
+    const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => acceptStatus(e.payload));
     // The login (still in progress) needs a 2FA code: show the field.
     const unlistenTotp = listen("bridge://need-totp", () => setNeedsTotp(true));
     const unlistenUpdate = listen<{ version: string }>("bridge://update-ready", (e) => {
@@ -88,7 +120,7 @@ export function useBridge() {
       unlistenUpdate.then((fn) => fn());
       unlistenAvailable.then((fn) => fn());
     };
-  }, [refresh]);
+  }, [refresh, readSavedSession, acceptStatus]);
 
   useEffect(() => {
     const unlisten = listen<string>("bridge://log", (event) => {
@@ -136,6 +168,10 @@ export function useBridge() {
       setLoading(true);
       setNeedsTotp(false);
       try {
+        // A previous pinentry failure may have been resolved, or the user
+        // may have removed the entry. Recheck before deciding to sign in.
+        const saved = await readSavedSession();
+        if (saved === null || (!saved && !password)) return;
         await invoke("start_bridge", {
           password: password || null,
           email: email || null,
@@ -150,7 +186,7 @@ export function useBridge() {
         setLoading(false);
       }
     },
-    [refresh],
+    [refresh, readSavedSession],
   );
 
   // Deliver the 2FA code to the login that's currently waiting for it.
@@ -237,7 +273,9 @@ export function useBridge() {
 
   return {
     config,
-    status,
+    status: sessionReadError && status !== "Running" && status !== "Starting"
+      ? { Error: sessionReadError }
+      : status,
     stats,
     hasSavedSession,
     bridgePassword,

@@ -110,8 +110,13 @@ async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
         log::warn!("Bridge password setup failed: {e}");
     }
 
-    if !tuta::has_saved_session(&cfg.email) {
-        return;
+    match tuta::has_saved_session(&cfg) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            log::warn!("Auto-start failed: {e}");
+            return;
+        }
     }
 
     let mut handle = state.lock().await;

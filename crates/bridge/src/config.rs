@@ -22,6 +22,11 @@ pub struct Config {
     /// it never contacts GitHub on its own. The CLI never updates itself.
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    /// Keep the login session in pass (password-store) as
+    /// `<pass_path>/<email>` instead of the OS keyring. Unset means the
+    /// keyring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_path: Option<String>,
 }
 
 /// What a connected LLM may read over the MCP server. Strictly read-only — the
@@ -107,6 +112,7 @@ impl Default for Config {
             mcp_permission: McpPermission::default(),
             mcp_port: default_mcp_port(),
             auto_update: default_auto_update(),
+            pass_path: None,
         }
     }
 }
@@ -304,6 +310,7 @@ smtp_port = 1025
             mcp_permission: McpPermission::Full,
             mcp_port: 1944,
             auto_update: false,
+            pass_path: Some("Tuta/Bridge".to_string()),
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
