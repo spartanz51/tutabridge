@@ -717,11 +717,13 @@ impl ImapSession {
                 Some(folder) if matches!(folder.kind, MailSetKind::Trash | MailSetKind::Spam) => {
                     if let Err(e) = self.backend.delete_mails(deleted_ids, folder).await {
                         log::warn!("Failed to delete mails from {}: {}", folder.imap_path, e);
+                        return vec![format!("{} NO EXPUNGE failed\r\n", tag)];
                     }
                 }
                 _ => {
                     if let Err(e) = self.backend.trash_mails(deleted_ids).await {
                         log::warn!("Failed to trash mails: {}", e);
+                        return vec![format!("{} NO EXPUNGE failed\r\n", tag)];
                     }
                 }
             }
@@ -1989,6 +1991,7 @@ mod tests {
         details: Mutex<std::collections::HashMap<String, MailDetails>>,
         trashed: Mutex<Vec<IdTupleGenerated>>,
         deleted: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
+        fail_expunge: Mutex<bool>,
         unread_calls: Mutex<Vec<(Vec<IdTupleGenerated>, bool)>>,
         sent: Mutex<Vec<ParsedMessage>>,
         moved: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
@@ -2005,6 +2008,7 @@ mod tests {
                 details: Mutex::new(std::collections::HashMap::new()),
                 trashed: Mutex::new(Vec::new()),
                 deleted: Mutex::new(Vec::new()),
+                fail_expunge: Mutex::new(false),
                 unread_calls: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
                 moved: Mutex::new(Vec::new()),
@@ -2471,6 +2475,9 @@ mod tests {
             Ok(())
         }
         async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String> {
+            if *self.fail_expunge.lock().unwrap() {
+                return Err("server unavailable".into());
+            }
             self.trashed.lock().unwrap().extend(mail_ids);
             Ok(())
         }
@@ -2479,6 +2486,9 @@ mod tests {
             mail_ids: Vec<IdTupleGenerated>,
             folder: &FolderInfo,
         ) -> Result<(), String> {
+            if *self.fail_expunge.lock().unwrap() {
+                return Err("server unavailable".into());
+            }
             self.deleted
                 .lock()
                 .unwrap()
@@ -2744,6 +2754,81 @@ mod tests {
             assert_eq!(deleted.len(), 1, "{path}");
             assert_eq!(deleted[0].0.len(), 1, "{path}");
             assert_eq!(deleted[0].1, id, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_expunge_preserves_messages_and_can_be_retried() {
+        for (id, kind, path, special_use) in [
+            ("trash", MailSetKind::Trash, "Trash", "\\Trash"),
+            ("spam", MailSetKind::Spam, "Spam", "\\Junk"),
+            ("inbox", MailSetKind::Inbox, "INBOX", "\\Inbox"),
+        ] {
+            let backend = Arc::new(MockBackend::with_mails(vec![
+                make_mail("m1", "Mail 1", false),
+                make_mail("m2", "Mail 2", false),
+            ]));
+            let store = MailStore::new();
+            let folder = FolderInfo {
+                id: id.into(),
+                list_id: "folders".into(),
+                entries_list_id: format!("{id}_entries"),
+                kind,
+                imap_path: path.into(),
+                special_use: Some(special_use.into()),
+            };
+            store.set_folder_list(vec![folder]).await;
+            let stored: Vec<StoredMail> = backend
+                .mails
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, m)| StoredMail {
+                    mail: m.clone(),
+                    body_loaded: false,
+                    uid: (i + 1) as u32,
+                    attachments_pending: false,
+                })
+                .collect();
+            store.set_folder(id, stored).await;
+            *backend.fail_expunge.lock().unwrap() = true;
+            let mut session = ImapSession::new(store, backend.clone(), None, None);
+
+            session.handle_command("A001 LOGIN user pass").await;
+            session.handle_command(&format!("A002 SELECT {path}")).await;
+            session
+                .handle_command("A003 STORE 2 +FLAGS (\\Deleted)")
+                .await;
+            let resp = session.handle_command("A004 EXPUNGE").await;
+            assert_eq!(resp, vec!["A004 NO EXPUNGE failed\r\n"], "{path}");
+            assert_eq!(session.mails.len(), 2, "{path}");
+            assert_eq!(session.mails[1].uid, 2, "{path}");
+            assert!(session.mails[1].deleted, "{path}");
+            assert!(backend.trashed.lock().unwrap().is_empty());
+            assert!(backend.deleted.lock().unwrap().is_empty());
+
+            // Retrying needs neither a new SELECT nor another STORE.
+            *backend.fail_expunge.lock().unwrap() = false;
+            let resp = session.handle_command("A005 EXPUNGE").await;
+            assert_eq!(
+                resp,
+                vec!["* 2 EXPUNGE\r\n", "A005 OK EXPUNGE completed\r\n"],
+                "{path}"
+            );
+            assert_eq!(session.mails.len(), 1, "{path}");
+            assert_eq!(session.mails[0].uid, 1, "{path}");
+            let expected = vec![IdTupleGenerated::new(test_id("list1"), test_id("m2"))];
+            if kind == MailSetKind::Inbox {
+                assert_eq!(*backend.trashed.lock().unwrap(), expected);
+                assert!(backend.deleted.lock().unwrap().is_empty());
+            } else {
+                assert_eq!(
+                    *backend.deleted.lock().unwrap(),
+                    vec![(expected, id.into())]
+                );
+                assert!(backend.trashed.lock().unwrap().is_empty());
+            }
         }
     }
 
