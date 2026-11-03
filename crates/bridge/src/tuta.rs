@@ -1323,15 +1323,9 @@ fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
         },
     });
 
-    match keyring::Entry::new(KEYRING_SERVICE, email) {
-        Ok(entry) => {
-            if let Err(e) = entry.set_password(&data.to_string()) {
-                log::warn!("Failed to save session to keychain: {e}");
-            } else {
-                log::info!("Session saved to keychain");
-            }
-        }
-        Err(e) => log::warn!("Failed to create keychain entry: {e}"),
+    match crate::session_store::set(KEYRING_SERVICE, email, &data.to_string()) {
+        Ok(()) => log::info!("Session saved to keychain"),
+        Err(e) => log::warn!("Failed to save session to keychain: {e}"),
     }
     *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(creds.clone()));
 }
@@ -1348,9 +1342,7 @@ fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
 }
 
 fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credentials> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, email).ok()?;
-
-    let json_str = entry.get_password().ok()?;
+    let json_str = crate::session_store::get(KEYRING_SERVICE, email).ok()?;
 
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
     Some(tutasdk::login::Credentials {
@@ -1375,8 +1367,8 @@ fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credenti
 /// is never read back and retried. A leftover entry is overwritten by the
 /// next successful login.
 fn delete_credentials(email: &str) {
-    match keyring::Entry::new(KEYRING_SERVICE, email).and_then(|e| e.delete_credential()) {
-        Ok(()) | Err(keyring::Error::NoEntry) => {}
+    match crate::session_store::delete(KEYRING_SERVICE, email) {
+        Ok(()) | Err(crate::session_store::StoreError::NoEntry) => {}
         Err(e) => log::warn!(
             "Could not remove the stale session from the keyring ({e}); it will be replaced on the next login"
         ),

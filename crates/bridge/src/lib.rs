@@ -14,6 +14,7 @@ pub mod store;
 pub mod sync;
 pub mod tls;
 pub mod tuta;
+pub(crate) mod session_store;
 pub mod util;
 
 /// The version people see: the release tag without its `v` when the release

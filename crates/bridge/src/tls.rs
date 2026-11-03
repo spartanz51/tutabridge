@@ -23,20 +23,20 @@ pub fn load_or_create_tls_acceptor() -> Result<TlsAcceptor, Box<dyn std::error::
     let cert_file = cert_path();
     let key_file = key_path();
 
-    let (cert_pem, key_pem) = if cert_file.exists() && key_file.exists() {
+    let existing_key = if cert_file.exists() {
+        read_existing_key(&key_file)?
+    } else {
+        None
+    };
+    let (cert_pem, key_pem) = if let Some(key_pem) = existing_key {
         log::info!("Loading TLS certificate from {}", cert_file.display());
-        // Heal installs whose key was written before it was created owner-only.
-        crate::fs_private::tighten(&key_file);
-        (
-            std::fs::read_to_string(&cert_file)?,
-            std::fs::read_to_string(&key_file)?,
-        )
+        (std::fs::read_to_string(&cert_file)?, key_pem)
     } else {
         log::info!("Generating self-signed TLS certificate...");
         let (cert, key) = generate_self_signed()?;
         crate::fs_private::create_dir_all_private(cert_dir())?;
         std::fs::write(&cert_file, &cert)?;
-        crate::fs_private::write_private(&key_file, &key)?;
+        persist_key(&key_file, &key)?;
         log::info!("Certificate saved to {}", cert_file.display());
         (cert, key)
     };
@@ -100,5 +100,67 @@ mod tests {
             .with_no_client_auth()
             .with_single_cert(certs, key);
         assert!(config.is_ok());
+    }
+}
+
+// ---- TLS key storage ----------------------------------------------------
+// Desktop: plaintext key.pem, as before. Android/Termux: the key lives in the
+// OpenKeychain-encrypted store and key.pem is removed after migration.
+
+type BoxErr = Box<dyn std::error::Error + Send + Sync>;
+
+#[cfg(not(target_os = "android"))]
+fn read_existing_key(key_file: &PathBuf) -> Result<Option<String>, BoxErr> {
+    if !key_file.exists() {
+        return Ok(None);
+    }
+    // Heal installs whose key was written before it was created owner-only.
+    crate::fs_private::tighten(key_file);
+    Ok(Some(std::fs::read_to_string(key_file)?))
+}
+
+#[cfg(not(target_os = "android"))]
+fn persist_key(key_file: &PathBuf, key: &str) -> Result<(), BoxErr> {
+    crate::fs_private::write_private(key_file, key)?;
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+const KEY_SERVICE: &str = "tutabridge";
+#[cfg(target_os = "android")]
+const KEY_ACCOUNT: &str = "tls-key";
+
+#[cfg(target_os = "android")]
+fn read_existing_key(key_file: &PathBuf) -> Result<Option<String>, BoxErr> {
+    use crate::session_store::{self, StoreError};
+    match session_store::get(KEY_SERVICE, KEY_ACCOUNT) {
+        Ok(k) => return Ok(Some(k)),
+        Err(StoreError::NoEntry) => {}
+        Err(e) => return Err(format!("could not unlock the TLS key: {e}").into()),
+    }
+    if !key_file.exists() {
+        return Ok(None);
+    }
+    crate::fs_private::tighten(key_file);
+    let key = std::fs::read_to_string(key_file)?;
+    match session_store::set(KEY_SERVICE, KEY_ACCOUNT, &key) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(key_file);
+            log::info!("TLS key moved out of key.pem into encrypted storage");
+        }
+        Err(e) => log::warn!("Could not encrypt the TLS key, leaving key.pem in place: {e}"),
+    }
+    Ok(Some(key))
+}
+
+#[cfg(target_os = "android")]
+fn persist_key(key_file: &PathBuf, key: &str) -> Result<(), BoxErr> {
+    match crate::session_store::set(KEY_SERVICE, KEY_ACCOUNT, key) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            log::warn!("Could not encrypt the TLS key, writing key.pem instead: {e}");
+            crate::fs_private::write_private(key_file, key)?;
+            Ok(())
+        }
     }
 }

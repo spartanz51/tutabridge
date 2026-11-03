@@ -129,7 +129,7 @@ pub fn store_mails_dir() -> PathBuf {
     data_dir().join("mails")
 }
 
-pub fn load_config() -> Result<Option<Config>, Box<dyn std::error::Error>> {
+fn load_config_raw() -> Result<Option<Config>, Box<dyn std::error::Error>> {
     let path = config_path();
     if path.exists() {
         // The file holds the bridge password; heal installs whose config was
@@ -142,7 +142,7 @@ pub fn load_config() -> Result<Option<Config>, Box<dyn std::error::Error>> {
     }
 }
 
-pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+fn save_config_raw(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let path = config_path();
     crate::fs_private::create_dir_all_private(path.parent().unwrap())?;
     let content = toml::to_string_pretty(cfg)?;
@@ -360,4 +360,79 @@ unknown_field = "ignored"
         let result = parse_config(toml);
         assert!(result.is_ok());
     }
+}
+
+// ---- Bridge password storage -------------------------------------------
+// Desktop: unchanged. Android/Termux: the bridge password is kept encrypted
+// via OpenKeychain (session_store) instead of plaintext in config.toml.
+
+#[cfg(not(target_os = "android"))]
+pub fn load_config() -> Result<Option<Config>, Box<dyn std::error::Error>> {
+    load_config_raw()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    save_config_raw(cfg)
+}
+
+#[cfg(target_os = "android")]
+const PW_SERVICE: &str = "tutabridge";
+#[cfg(target_os = "android")]
+const PW_ACCOUNT: &str = "bridge-password";
+#[cfg(target_os = "android")]
+static PERSISTED_PW: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "android")]
+pub fn load_config() -> Result<Option<Config>, Box<dyn std::error::Error>> {
+    use crate::session_store::{self, StoreError};
+    let Some(mut cfg) = load_config_raw()? else {
+        return Ok(None);
+    };
+    let cached_pw = PERSISTED_PW.lock().unwrap().clone();
+    if let Some(pw) = cfg.bridge_password.clone() {
+        // Legacy plaintext password: move it into the encrypted store.
+        match session_store::set(PW_SERVICE, PW_ACCOUNT, &pw) {
+            Ok(()) => {
+                *PERSISTED_PW.lock().unwrap() = Some(pw);
+                let mut stripped = cfg.clone();
+                stripped.bridge_password = None;
+                save_config_raw(&stripped)?;
+                log::info!("Bridge password moved out of config.toml into encrypted storage");
+            }
+            Err(e) => log::warn!("Could not encrypt bridge password, leaving it in config.toml: {e}"),
+        }
+    } else if let Some(pw) = cached_pw {
+        cfg.bridge_password = Some(pw);
+    } else {
+        match session_store::get(PW_SERVICE, PW_ACCOUNT) {
+            Ok(pw) => {
+                *PERSISTED_PW.lock().unwrap() = Some(pw.clone());
+                cfg.bridge_password = Some(pw);
+            }
+            Err(StoreError::NoEntry) => {}
+            Err(e) => {
+                return Err(format!("could not unlock the bridge password: {e}").into());
+            }
+        }
+    }
+    Ok(Some(cfg))
+}
+
+#[cfg(target_os = "android")]
+pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let mut to_write = cfg.clone();
+    if let Some(pw) = to_write.bridge_password.take() {
+        let unchanged = PERSISTED_PW.lock().unwrap().as_deref() == Some(pw.as_str());
+        if !unchanged {
+            match crate::session_store::set(PW_SERVICE, PW_ACCOUNT, &pw) {
+                Ok(()) => *PERSISTED_PW.lock().unwrap() = Some(pw),
+                Err(e) => {
+                    log::warn!("Could not encrypt bridge password, keeping it in config.toml: {e}");
+                    to_write.bridge_password = Some(pw);
+                }
+            }
+        }
+    }
+    save_config_raw(&to_write)
 }
