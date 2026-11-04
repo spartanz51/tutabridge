@@ -1230,7 +1230,7 @@ pub async fn login_with_persistence(
     // Only an explicit password login may continue without persistence when
     // the OS keychain cannot be accessed. Automatic resume remains strict.
     let credentials = if persistence == PersistencePolicy::Required {
-        store.load_persisted().await?
+        store.load_persisted(password.is_some()).await?
     } else if password.is_some() {
         store.load_interactive().await?
     } else {

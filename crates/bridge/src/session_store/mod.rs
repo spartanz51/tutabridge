@@ -141,9 +141,18 @@ impl SessionStore {
 
     /// Initialization and services cannot rely on credentials whose last save
     /// failed, even when a caller reuses a store from an interactive login.
-    pub async fn load_persisted(&self) -> Result<Option<Credentials>, SessionStoreError> {
-        self.run(|state| {
-            let credentials = state.load()?;
+    /// An explicit password can replace readable invalid data after successful
+    /// authentication, but never opts into an unavailable keyring's volatile mode.
+    pub async fn load_persisted(
+        &self,
+        password_supplied: bool,
+    ) -> Result<Option<Credentials>, SessionStoreError> {
+        self.run(move |state| {
+            let credentials = if password_supplied {
+                state.load_for_password(false)?
+            } else {
+                state.load()?
+            };
             if state.persistence == Persistence::Volatile
                 || (credentials.is_some() && state.warning.is_some())
             {

@@ -359,7 +359,7 @@ async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<
     } else {
         tuta::PersistencePolicy::Required
     };
-    if !mode.may_prompt() && store.load_persisted().await?.is_none() {
+    if !mode.may_prompt() && store.load_persisted(false).await?.is_none() {
         anyhow::bail!("No saved session; run `tutabridge init` interactively first");
     }
     match tuta::login_with_persistence(cfg, &store, None, None, policy).await {

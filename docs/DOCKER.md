@@ -69,9 +69,12 @@ docker compose run --rm tutabridge init
 docker compose up -d
 ```
 
-An inaccessible or corrupt password store is an error, not permission to
-replace its contents. Restore the existing key/recipient file from backup
-before retrying. `init` refuses to guess among multiple GPG keys or to
+If the session decrypts successfully but its JSON or encoding is invalid,
+`init` identifies the entry and offers a password login. Only successful
+authentication replaces the entry; cancelling or failing login preserves it.
+An access or decryption failure still stops initialization. Restore the
+existing key/recipient file from backup before retrying. `init` refuses to
+guess among multiple GPG keys or to
 initialize over encrypted entries without a `.gpg-id` file. `init` and `run`
 cannot use the same volume concurrently. Use a local Docker volume; network
 filesystems can have different lock semantics.
@@ -119,7 +122,9 @@ TUTABRIDGE_DOCKER_IMAGE=tutabridge:test \
 The first suite uses isolated fake executables and tests initialization,
 recovery, argument handling, locking and signals. The opt-in image suite uses
 real GPG/pass and disposable volumes to check encryption across container
-recreation, error handling, permissions, lock ownership and SIGTERM. It
+recreation, error handling, permissions, lock ownership and SIGTERM. It also
+kills `gpg-agent` and restarts it through `pass show` from the process holding
+the volume lock, checking that the new agent does not keep that lock open. It
 substitutes a tiny CLI only for account-free provisioning and signal checks;
 missing/corrupt-session checks use the real bridge binary. No test signs in
 to Tuta or accesses an existing host keyring.

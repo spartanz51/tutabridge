@@ -348,7 +348,7 @@ async fn persisted_load_accepts_readable_entries_confirmed_absence_and_successfu
         let clone = session_store.clone();
 
         for instance in [&session_store, &clone] {
-            let loaded = instance.load_persisted().await.unwrap();
+            let loaded = instance.load_persisted(false).await.unwrap();
             assert_eq!(loaded.is_some(), initially_present);
             if let Some(loaded) = loaded {
                 assert_eq!(loaded.access_token, expected.access_token);
@@ -361,7 +361,7 @@ async fn persisted_load_accepts_readable_entries_confirmed_absence_and_successfu
         session_store.save(&replacement).await.unwrap();
         assert_eq!(
             session_store
-                .load_persisted()
+                .load_persisted(false)
                 .await
                 .unwrap()
                 .unwrap()
@@ -385,10 +385,12 @@ async fn persisted_load_refuses_the_interactive_keyring_fallback_cache() {
     let session_store = store(&config(&old.login, None), backend);
 
     assert!(session_store.load_interactive().await.unwrap().is_none());
-    assert!(matches!(
-        session_store.load_persisted().await,
-        Err(SessionStoreError::PersistenceRequired)
-    ));
+    for password_supplied in [false, true] {
+        assert!(matches!(
+            session_store.load_persisted(password_supplied).await,
+            Err(SessionStoreError::PersistenceRequired)
+        ));
+    }
     assert!(matches!(
         session_store.save(&replacement).await,
         Err(SessionStoreError::VolatileSession)
@@ -397,10 +399,15 @@ async fn persisted_load_refuses_the_interactive_keyring_fallback_cache() {
         session_store.load().await.unwrap().unwrap().access_token,
         replacement.access_token
     );
-    assert!(matches!(
-        session_store.clone().load_persisted().await,
-        Err(SessionStoreError::PersistenceRequired)
-    ));
+    for password_supplied in [false, true] {
+        assert!(matches!(
+            session_store
+                .clone()
+                .load_persisted(password_supplied)
+                .await,
+            Err(SessionStoreError::PersistenceRequired)
+        ));
+    }
     assert_eq!(observations.reads.load(Ordering::SeqCst), 1);
     assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
     assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
@@ -422,15 +429,17 @@ async fn persisted_load_refuses_a_failed_save_instead_of_reusing_the_old_disk_en
     let observations = Arc::clone(&backend.observations);
     let session_store = store(&config(&old.login, Some("Tuta")), backend);
 
-    assert!(session_store.load_persisted().await.unwrap().is_some());
+    assert!(session_store.load_persisted(false).await.unwrap().is_some());
     assert!(matches!(
         session_store.save(&replacement).await,
         Err(SessionStoreError::Write { .. })
     ));
-    assert!(matches!(
-        session_store.load_persisted().await,
-        Err(SessionStoreError::PersistenceRequired)
-    ));
+    for password_supplied in [false, true] {
+        assert!(matches!(
+            session_store.load_persisted(password_supplied).await,
+            Err(SessionStoreError::PersistenceRequired)
+        ));
+    }
     assert_eq!(
         session_store.load().await.unwrap().unwrap().access_token,
         replacement.access_token
@@ -455,19 +464,20 @@ async fn persisted_login_can_replace_a_rejected_session_after_deletion_failed() 
     let observations = Arc::clone(&backend.observations);
     let session_store = store(&config(&rejected.login, Some("Tuta")), backend);
 
-    assert!(session_store.load_persisted().await.unwrap().is_some());
+    assert!(session_store.load_persisted(false).await.unwrap().is_some());
     assert!(matches!(
         session_store.delete().await,
         Err(SessionStoreError::Delete { .. })
     ));
     // The rejected token is still on disk, but initialization must be able to
     // request a fresh login and save its replacement without resuming it.
-    assert!(session_store.load_persisted().await.unwrap().is_none());
+    assert!(session_store.load_persisted(false).await.unwrap().is_none());
+    assert!(session_store.load_persisted(true).await.unwrap().is_none());
     assert_eq!(observations.reads.load(Ordering::SeqCst), 1);
     session_store.save(&replacement).await.unwrap();
     assert_eq!(
         session_store
-            .load_persisted()
+            .load_persisted(false)
             .await
             .unwrap()
             .unwrap()
@@ -483,6 +493,145 @@ async fn persisted_login_can_replace_a_rejected_session_after_deletion_failed() 
         replacement.access_token
     );
     assert!(session_store.inspect().await.unwrap().warning.is_none());
+}
+
+#[tokio::test]
+async fn persisted_password_login_can_replace_corrupt_data_only_when_the_save_succeeds() {
+    for fail_save in [false, true] {
+        let mut backend = FakeBackend::new(None);
+        if fail_save {
+            backend.write_result = Err("encryption failed".into());
+        }
+        let observations = Arc::clone(&backend.observations);
+        *observations.persisted.lock().unwrap() = Some("private corrupt data".into());
+        let session_store = store(&config("me@tuta.io", Some("Tuta")), backend);
+
+        assert!(matches!(
+            session_store.load_persisted(false).await,
+            Err(SessionStoreError::InvalidSession { .. })
+        ));
+        assert!(session_store.load_persisted(true).await.unwrap().is_none());
+        assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            session_store.delete().await,
+            Err(SessionStoreError::UnreadableStore)
+        ));
+        assert_eq!(
+            observations.persisted.lock().unwrap().as_deref(),
+            Some("private corrupt data")
+        );
+
+        let authenticated = credentials("me@tuta.io");
+        let saved = session_store.save(&authenticated).await;
+        if fail_save {
+            assert!(matches!(saved, Err(SessionStoreError::Write { .. })));
+        } else {
+            saved.unwrap();
+        }
+        for password_supplied in [false, true] {
+            let resumed = session_store.load_persisted(password_supplied).await;
+            if fail_save {
+                assert!(matches!(
+                    resumed,
+                    Err(SessionStoreError::PersistenceRequired)
+                ));
+            } else {
+                assert_eq!(
+                    resumed.unwrap().unwrap().access_token,
+                    authenticated.access_token
+                );
+            }
+        }
+        assert_eq!(
+            session_store.load().await.unwrap().unwrap().access_token,
+            authenticated.access_token
+        );
+        assert_eq!(
+            session_store.inspect().await.unwrap().warning.is_some(),
+            fail_save
+        );
+        let persisted = observations.persisted.lock().unwrap().clone().unwrap();
+        if fail_save {
+            assert_eq!(persisted, "private corrupt data");
+        } else {
+            assert_eq!(
+                codec::decode(persisted).unwrap().access_token,
+                authenticated.access_token
+            );
+        }
+        assert_eq!(observations.reads.load(Ordering::SeqCst), 2);
+        assert_eq!(observations.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn abandoned_persisted_password_login_leaves_corruption_strict_and_unchanged() {
+    let backend = FakeBackend::new(None);
+    let observations = Arc::clone(&backend.observations);
+    *observations.persisted.lock().unwrap() = Some("private corrupt data".into());
+    let session_store = store(&config("me@tuta.io", Some("Tuta")), backend);
+
+    assert!(session_store.load_persisted(true).await.unwrap().is_none());
+    // A rejected password or cancelled login never reaches save. The next
+    // automatic start must still reject the original entry as corrupt.
+    assert!(matches!(
+        session_store.load_persisted(false).await,
+        Err(SessionStoreError::InvalidSession { .. })
+    ));
+    assert!(matches!(
+        session_store.save(&credentials("me@tuta.io")).await,
+        Err(SessionStoreError::UnreadableStore)
+    ));
+    assert_eq!(
+        observations.persisted.lock().unwrap().as_deref(),
+        Some("private corrupt data")
+    );
+    assert_eq!(observations.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn persisted_password_login_never_falls_back_on_keyring_or_pass_read_errors() {
+    for password_supplied in [false, true] {
+        for error in [
+            unavailable(KeyringUnavailableKind::StorageAccess),
+            unavailable(KeyringUnavailableKind::Platform),
+            SessionStoreError::Read {
+                backend: "pass",
+                message: "GPG is locked".into(),
+            },
+            SessionStoreError::Read {
+                backend: "the keychain",
+                message: "multiple matching keyring entries".into(),
+            },
+        ] {
+            let expected = error.to_string();
+            let mut backend = FakeBackend::new(None);
+            backend.read_results.push_back(Err(error));
+            let observations = Arc::clone(&backend.observations);
+            let session_store = store(&config("me@tuta.io", None), backend);
+
+            let failure = session_store
+                .load_persisted(password_supplied)
+                .await
+                .err()
+                .expect("strict storage failure");
+            assert_eq!(failure.to_string(), expected);
+            assert!(matches!(
+                session_store.save(&credentials("me@tuta.io")).await,
+                Err(SessionStoreError::UnreadableStore)
+            ));
+            assert!(matches!(
+                session_store.delete().await,
+                Err(SessionStoreError::UnreadableStore)
+            ));
+            assert_eq!(observations.reads.load(Ordering::SeqCst), 1);
+            assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
+            assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
+        }
+    }
 }
 
 #[tokio::test]

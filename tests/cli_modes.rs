@@ -158,11 +158,12 @@ fn service_reports_decryption_and_corruption_without_password_fallback() {
 fn initialization_fills_only_the_missing_account_in_a_template() {
     let fixture = Fixture::new("template");
     fixture.configure("");
-    fixture.fake_pass("echo 'invalid-session'");
-    // Corrupt session stops init before any real login or password prompt.
+    fixture.fake_pass("echo 'test key is locked' >&2; exit 9");
+    // A decryption failure stops init before any real login or password prompt.
     let output = fixture.run(&["init"], "test@example.invalid\n");
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid session"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("test key is locked"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Password for"));
     let config = fs::read_to_string(&fixture.config).unwrap();
     for expected in ["test@example.invalid", "Docker/Session", "0.0.0.0"] {
         assert!(config.contains(expected), "{config}");
