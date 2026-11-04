@@ -125,6 +125,23 @@ class DockerSmokeTests(unittest.TestCase):
         # A failed read must leave the encrypted entry in place.
         self.run_image("-c", "test -s /data/pass/Tuta/Bridge/nobody@example.invalid.gpg", entrypoint="/bin/sh")
 
+    def test_init_without_terminal_explains_recovery_and_preserves_corrupt_entry(self):
+        self.initialize()
+        self.configure_email()
+        entry = "Tuta/Bridge/nobody@example.invalid"
+        self.run_image("insert", "--multiline", "--force", entry,
+                       entrypoint="pass", input="secret-invalid-json-never-log-this\n")
+        before = self.run_image("/data/pass/" + entry + ".gpg", entrypoint="sha256sum").stdout
+        # run_image does not allocate a TTY, even when stdin is supplied.
+        result = self.run_image("init", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid session", result.stderr)
+        self.assertIn("interactive terminal is required", result.stderr)
+        self.assertIn("docker compose run --rm tutabridge init", result.stderr)
+        self.assertNotIn("secret-invalid-json-never-log-this", result.stdout + result.stderr)
+        after = self.run_image("/data/pass/" + entry + ".gpg", entrypoint="sha256sum").stdout
+        self.assertEqual(before, after)
+
     def test_lock_agent_descriptors_and_sigterm(self):
         self.initialize()
         self.run_image("insert", "--multiline", "--force", "Tuta/Bridge/agent-restart@example.invalid",
