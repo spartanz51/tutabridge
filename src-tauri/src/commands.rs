@@ -32,12 +32,17 @@ pub async fn save_config(config: config::EditableSettings) -> Result<Config, Str
 }
 
 #[tauri::command]
-pub async fn has_saved_session() -> Result<bool, String> {
+pub async fn has_saved_session(state: State<'_, BridgeState>) -> Result<bool, String> {
     let cfg = match config::load_config() {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
         _ => return Ok(false),
     };
-    tuta::has_saved_session(&cfg).map_err(|e| e.to_string())
+    let store = state.lock().await.session_store(&cfg);
+    store
+        .load()
+        .await
+        .map(|session| session.is_some())
+        .map_err(|e| e.to_string())
 }
 
 /// Holds the sender side of the channel the 2FA callback blocks on. `submit_totp`
