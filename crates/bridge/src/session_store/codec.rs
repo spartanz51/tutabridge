@@ -18,8 +18,8 @@ pub(super) fn encode(credentials: &Credentials) -> String {
     .to_string()
 }
 
-pub(super) fn decode(json: &str) -> Option<Credentials> {
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+pub(super) fn decode(json: impl AsRef<[u8]>) -> Option<Credentials> {
+    let value: serde_json::Value = serde_json::from_slice(json.as_ref()).ok()?;
     Some(Credentials {
         login: value["login"].as_str()?.to_owned(),
         user_id: tutasdk::GeneratedId(value["user_id"].as_str()?.to_owned()),
@@ -66,15 +66,32 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_same_legacy_session_from_text_or_bytes() {
+        let from_text = decode(LEGACY_SESSION).unwrap();
+        let from_slice = decode(LEGACY_SESSION.as_bytes()).unwrap();
+        assert_eq!(encode(&from_text), encode(&from_slice));
+    }
+
+    #[test]
+    fn rejects_non_utf8_bytes_in_an_otherwise_valid_session() {
+        let mut bytes = LEGACY_SESSION.as_bytes().to_vec();
+        let token_start = LEGACY_SESSION.find("example-token").unwrap();
+        bytes[token_start] = 0xff;
+        assert!(decode(bytes.as_slice()).is_none());
+        assert!(decode([0xff, 0xfe]).is_none());
+        assert!(decode([]).is_none());
+    }
+
+    #[test]
     fn preserves_external_credentials_and_legacy_unknown_type_fallback() {
         for (name, external) in [("External", true), ("FutureType", false)] {
             let json = LEGACY_SESSION.replace("Internal", name);
-            let credentials = decode(&json).unwrap();
+            let credentials = decode(json.as_bytes()).unwrap();
             assert_eq!(
                 matches!(credentials.credential_type, CredentialType::External),
                 external
             );
-            let roundtrip = decode(&encode(&credentials)).unwrap();
+            let roundtrip = decode(encode(&credentials)).unwrap();
             assert_eq!(roundtrip.access_token, credentials.access_token);
             assert_eq!(
                 roundtrip.encrypted_passphrase_key,
@@ -91,7 +108,7 @@ mod tests {
     fn rejects_malformed_or_incomplete_entries() {
         assert!(decode("not json").is_none());
         assert!(decode("[]").is_none());
-        assert!(decode(&LEGACY_SESSION.replace("AAECA/7/", "invalid base64")).is_none());
+        assert!(decode(LEGACY_SESSION.replace("AAECA/7/", "invalid base64")).is_none());
         let value: serde_json::Value = serde_json::from_str(LEGACY_SESSION).unwrap();
         for key in [
             "login",
@@ -102,13 +119,10 @@ mod tests {
         ] {
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(key);
-            assert!(decode(&missing.to_string()).is_none(), "missing {key}");
+            assert!(decode(missing.to_string()).is_none(), "missing {key}");
             let mut wrong_type = value.clone();
             wrong_type[key] = serde_json::json!(42);
-            assert!(
-                decode(&wrong_type.to_string()).is_none(),
-                "non-string {key}"
-            );
+            assert!(decode(wrong_type.to_string()).is_none(), "non-string {key}");
         }
     }
 }

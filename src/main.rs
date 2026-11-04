@@ -370,6 +370,12 @@ async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<
             ));
         }
         Err(e)
+            if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
+                .is_some_and(|error| error.allows_reauthentication()) =>
+        {
+            warn!("{e}");
+        }
+        Err(e)
             if mode.allows_volatile_login()
                 && e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
                     .is_some_and(|error| error.allows_volatile_login()) =>

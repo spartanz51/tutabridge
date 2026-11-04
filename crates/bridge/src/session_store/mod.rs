@@ -34,8 +34,11 @@ pub enum SessionStoreError {
         backend: &'static str,
         message: String,
     },
-    #[error("{backend} returned an invalid session")]
-    InvalidSession { backend: &'static str },
+    #[error("Saved entry in {backend} ({entry}) contains an invalid session. Sign in with your Tuta password to replace it after successful authentication; automatic resume leaves it unchanged")]
+    InvalidSession {
+        backend: &'static str,
+        entry: String,
+    },
     #[error("The saved session could not be read; refusing to change it")]
     UnreadableStore,
     #[error("The session is only kept in memory; the unreadable saved entry was left unchanged")]
@@ -62,11 +65,19 @@ impl SessionStoreError {
         matches!(self, Self::KeyringUnavailable { .. })
     }
 
+    /// Bytes were read successfully, but do not represent usable credentials.
+    /// This never includes access/decryption failures or ambiguous entries.
+    pub fn allows_reauthentication(&self) -> bool {
+        matches!(self, Self::InvalidSession { .. })
+    }
+
     fn warning(&self) -> String {
         if self.allows_volatile_login() {
             format!(
                 "{self}. You can sign in for this run, but the saved entry will be left \
-                 untouched and you may need to sign in again after restarting."
+                 untouched and you may need to sign in again after restarting. \
+                 To retry persistent storage after unlocking the keychain, quit and \
+                 reopen the application; restarting only the bridge keeps this session in memory."
             )
         } else {
             self.to_string()
@@ -144,22 +155,24 @@ impl SessionStore {
     }
 
     /// Report availability and any persistence warning without opting into
-    /// volatile login. Corrupt sessions and all pass failures remain errors.
+    /// volatile login or authorizing replacement of an invalid entry.
     pub async fn inspect(&self) -> Result<SessionStatus, SessionStoreError> {
         self.run(State::inspect).await
     }
 
     /// Use only when a caller has explicitly supplied a password for an
     /// interactive login. Unavailable keyrings may then be left untouched
-    /// while the new session lives in this instance's memory.
+    /// while the new session lives in this instance's memory. Readable but
+    /// invalid entries may be replaced after successful authentication.
     pub async fn load_interactive(&self) -> Result<Option<Credentials>, SessionStoreError> {
-        self.run(State::load_interactive).await
+        self.run(|state| state.load_for_password(true)).await
     }
 
     /// Keep the session usable in this process even if persistence fails.
     /// The error still tells the caller that a restart will require login.
     /// After an unreadable entry, changes are refused until a successful read
-    /// or an explicit interactive login allows a session in memory only.
+    /// or an explicit password login authorizes replacement of invalid bytes
+    /// (or a session in memory only for an unavailable keyring).
     pub async fn save(&self, credentials: &Credentials) -> Result<(), SessionStoreError> {
         let credentials = credentials.clone();
         self.run(move |state| state.save(credentials)).await
@@ -243,6 +256,9 @@ enum Persistence {
     Writable,
     /// A failed read is never permission to overwrite or delete an entry.
     Unreadable,
+    /// An explicit password login may replace bytes that were read but could
+    /// not be decoded. Keep the entry intact until authentication and save.
+    ReplaceInvalid,
     /// The caller explicitly chose an interactive login without persistence.
     Volatile,
 }
@@ -264,6 +280,7 @@ impl State {
         if raw.is_some() && credentials.is_none() {
             let error = SessionStoreError::InvalidSession {
                 backend: self.backend.name(),
+                entry: self.backend.entry(),
             };
             self.persistence = Persistence::Unreadable;
             self.warning = Some(error.warning());
@@ -284,17 +301,31 @@ impl State {
                 available: credentials.is_some(),
                 warning: self.warning.clone(),
             }),
-            Err(error) if error.allows_volatile_login() => Ok(SessionStatus {
-                available: false,
-                warning: Some(error.warning()),
-            }),
+            Err(error) if error.allows_volatile_login() || error.allows_reauthentication() => {
+                Ok(SessionStatus {
+                    available: false,
+                    warning: Some(error.warning()),
+                })
+            }
             Err(error) => Err(error),
         }
     }
 
-    fn load_interactive(&mut self) -> Result<Option<Credentials>, SessionStoreError> {
+    fn load_for_password(
+        &mut self,
+        allow_volatile: bool,
+    ) -> Result<Option<Credentials>, SessionStoreError> {
         match self.load() {
-            Err(error) if error.allows_volatile_login() => {
+            Err(error) if error.allows_reauthentication() => {
+                self.persistence = Persistence::ReplaceInvalid;
+                // Do not cache absence: an abandoned/failed login must leave
+                // the next strict resume reporting the original corruption.
+                let warning = error.warning();
+                log::warn!("{warning}");
+                self.warning = Some(warning);
+                Ok(None)
+            }
+            Err(error) if allow_volatile && error.allows_volatile_login() => {
                 self.persistence = Persistence::Volatile;
                 self.cache = Cache::Loaded(None);
                 let warning = error.warning();
@@ -315,6 +346,7 @@ impl State {
         if self.persistence == Persistence::Volatile {
             return Err(SessionStoreError::VolatileSession);
         }
+        self.persistence = Persistence::Writable;
         let result = self
             .backend
             .write(&encoded)
@@ -329,7 +361,10 @@ impl State {
     }
 
     fn delete(&mut self) -> Result<(), SessionStoreError> {
-        if self.persistence == Persistence::Unreadable {
+        if matches!(
+            self.persistence,
+            Persistence::Unreadable | Persistence::ReplaceInvalid
+        ) {
             return Err(SessionStoreError::UnreadableStore);
         }
         self.cache = Cache::Loaded(None);
@@ -358,6 +393,14 @@ enum Backend {
 }
 
 impl Backend {
+    fn entry(&self) -> String {
+        match self {
+            Self::Keyring { email } => format!("service tutabridge, account {email}"),
+            Self::Pass(store) => store.entry().to_owned(),
+            #[cfg(test)]
+            Self::Fake(_) => "test-entry".to_owned(),
+        }
+    }
     fn name(&self) -> &'static str {
         match self {
             Self::Keyring { .. } => "the keychain",
@@ -367,7 +410,7 @@ impl Backend {
         }
     }
 
-    fn read(&mut self) -> Result<Option<String>, SessionStoreError> {
+    fn read(&mut self) -> Result<Option<Vec<u8>>, SessionStoreError> {
         match self {
             Self::Keyring { email } => keyring::read(email),
             Self::Pass(store) => store.read().map_err(|message| SessionStoreError::Read {
@@ -375,7 +418,7 @@ impl Backend {
                 message,
             }),
             #[cfg(test)]
-            Self::Fake(backend) => backend.read(),
+            Self::Fake(backend) => backend.read().map(|raw| raw.map(String::into_bytes)),
         }
     }
 

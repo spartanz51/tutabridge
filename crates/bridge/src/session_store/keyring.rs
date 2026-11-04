@@ -2,15 +2,19 @@ use super::{KeyringUnavailableKind, SessionStoreError};
 
 const SERVICE: &str = "tutabridge";
 
-pub(super) fn read(email: &str) -> Result<Option<String>, SessionStoreError> {
+pub(super) fn read(email: &str) -> Result<Option<Vec<u8>>, SessionStoreError> {
     classify_read_result(keyring::Entry::new(SERVICE, email).and_then(|entry| entry.get_password()))
 }
 
 fn classify_read_result(
     result: keyring::Result<String>,
-) -> Result<Option<String>, SessionStoreError> {
+) -> Result<Option<Vec<u8>>, SessionStoreError> {
     match result {
-        Ok(secret) => Ok(Some(secret)),
+        Ok(secret) => Ok(Some(secret.into_bytes())),
+        // The keyring read succeeded even if its bytes were not UTF-8. Pass
+        // those bytes to the shared codec so all backends classify corrupt
+        // sessions alike, without confusing corruption with denied access.
+        Err(keyring::Error::BadEncoding(bytes)) => Ok(Some(bytes)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => {
             let message = diagnostic(&error);
@@ -68,16 +72,24 @@ mod tests {
             classify_read_result(Ok("session".into()))
                 .unwrap()
                 .as_deref(),
-            Some("session")
+            Some(b"session".as_slice())
         );
         for error in [
-            keyring::Error::BadEncoding(vec![255]),
             keyring::Error::Ambiguous(Vec::new()),
             keyring::Error::Invalid("service".into(), "invalid".into()),
             keyring::Error::TooLong("service".into(), 1),
         ] {
             let error = classify_read_result(Err(error)).unwrap_err();
             assert!(!error.allows_volatile_login(), "{error}");
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_and_empty_entries_are_present_bytes_not_storage_failures() {
+        for bytes in [vec![0xff, 0xfe], Vec::new()] {
+            let result =
+                classify_read_result(Err(keyring::Error::BadEncoding(bytes.clone()))).unwrap();
+            assert_eq!(result, Some(bytes));
         }
     }
 
@@ -103,11 +115,8 @@ mod tests {
 
     #[test]
     fn diagnostics_omit_invalid_bytes_and_matching_credential_objects() {
-        let error =
-            classify_read_result(Err(keyring::Error::BadEncoding(b"secret-token".to_vec())))
-                .unwrap_err();
-        assert!(!error.to_string().contains("secret-token"));
-        assert!(!format!("{error:?}").contains("secret-token"));
+        let message = diagnostic(&keyring::Error::BadEncoding(b"secret-token".to_vec()));
+        assert!(!message.contains("secret-token"));
         assert_eq!(
             diagnostic(&keyring::Error::Ambiguous(Vec::new())),
             "multiple matching keyring entries"

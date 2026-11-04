@@ -35,19 +35,25 @@ interactive operation and is not made cancellable by this module.
 | Entry absent | Ask for password, save the new session | No session to resume |
 | Valid entry | Resume it | Resume it |
 | Keychain access/platform failure | Show a warning and allow a password login in memory | Return the storage error |
-| Invalid or ambiguous keychain entry | Return an error; preserve the entry | Return an error |
-| `pass` read/decryption failure or invalid session | Return an error; preserve the entry | Return an error |
+| Readable bytes with invalid session JSON or encoding | Show the backend and entry; replace only after an explicit password login succeeds | Return an error; preserve the entry |
+| Ambiguous keychain entry or `pass` read/decryption failure | Return an error; preserve the entry | Return an error |
 | Save failure after successful authentication | Keep the session in memory and show a warning | Caller must decide whether persistence is required |
 
 An inaccessible entry is not an absent entry. After a failed read, writes and
 deletions are inhibited until a successful read establishes what is stored.
 Choosing a memory-only login keeps persistence disabled for that session: it
 must not overwrite an entry that the process could not read. Restarting the app
-retries the configured backend. No backend is selected as an automatic fallback.
+retries the configured backend; stopping and starting only the bridge in the GUI
+keeps the in-memory session and does not retry persistence. No backend is selected
+as an automatic fallback.
 
 `load()` is strict; `inspect()` reports whether a session is available and a
-user-facing warning, without choosing a volatile login. Only an explicit
-password login uses `load_interactive()`. A cached session remains usable after a
+user-facing warning, without choosing a volatile login or authorizing replacement.
+Only an explicit password login uses `load_interactive()`. It reads a corrupt
+entry again before authorizing replacement, so an intervening repair or access
+failure is respected. It never deletes the old entry before authentication; an
+abandoned or failed login leaves it intact and automatic resume remains strict.
+A cached session remains usable after a
 failed write. A rejected token is removed from the cache even if its persistent
 deletion fails, so the same process cannot resume it again.
 
