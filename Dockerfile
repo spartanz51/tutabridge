@@ -17,10 +17,11 @@ RUN test -f sdk/generated/tuta-sdk/rust/sdk/Cargo.toml || \
     (echo 'Prepare the SDK first: python3 scripts/sdk-prepare.py' >&2; exit 1)
 ARG TUTABRIDGE_VERSION
 ENV TUTABRIDGE_VERSION=${TUTABRIDGE_VERSION}
+ARG CARGO_BUILD_JOBS=3
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=tutabridge-target-${TARGETARCH},target=/build/target,sharing=locked \
-    cargo build --locked --release --jobs 3 -p tutabridge \
+    cargo build --locked --release --jobs "${CARGO_BUILD_JOBS}" -p tutabridge \
     && cp target/release/tutabridge /build/tutabridge
 
 FROM debian:bookworm-slim AS runtime

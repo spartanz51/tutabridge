@@ -50,14 +50,28 @@ async fn run() -> anyhow::Result<()> {
         Command::Help => {
             println!("tutabridge {VERSION}");
             println!();
-            println!("tutabridge                 run the IMAP/SMTP bridge (default)");
-            println!("tutabridge init            sign in and persist a session, then exit");
-            println!("tutabridge run --non-interactive  resume a session without prompts");
-            println!("tutabridge backup <dir>    export every mail to <dir> as .eml files");
-            println!(
-                "tutabridge password        print the local bridge password (mail client setup)"
-            );
-            println!("tutabridge --version       print the version");
+            for (command, description) in [
+                ("tutabridge", "run the IMAP/SMTP bridge (default)"),
+                (
+                    "tutabridge init",
+                    "sign in and persist a session, then exit",
+                ),
+                (
+                    "tutabridge run --non-interactive",
+                    "resume a session without prompts",
+                ),
+                (
+                    "tutabridge backup <dir>",
+                    "export every mail to <dir> as .eml files",
+                ),
+                (
+                    "tutabridge password",
+                    "print the local bridge password (mail client setup)",
+                ),
+                ("tutabridge --version", "print the version"),
+            ] {
+                println!("{command:<34}{description}");
+            }
             Ok(())
         }
         Command::Init => initialize().await,

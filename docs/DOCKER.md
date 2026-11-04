@@ -58,7 +58,10 @@ volume access and backups accordingly; this does not protect against theft
 of the complete volume. The Tuta account password is not saved.
 
 Normal `run` never creates replacement GPG keys or prompts for credentials.
-When Tuta rejects the saved session, stop the service and sign in again:
+When Tuta rejects an expired or revoked session, the bridge removes that
+session and exits. Compose's `restart: unless-stopped` policy then retries
+without a saved login and keeps failing until you stop the service and sign
+in again:
 
 ```sh
 docker compose stop
@@ -93,6 +96,13 @@ Docker context allowlist excludes Git metadata, the upstream checkout, host
 build outputs and unrelated local files. Run SDK preparation again after
 changing the SDK base or patches. Override `TUTABRIDGE_VERSION` as a Docker
 build argument when preparing a release build.
+
+The build defaults to three Cargo jobs to limit concurrent compiler memory
+use in Docker VMs. Adjust this for the memory available to your builder:
+
+```sh
+docker compose build --build-arg CARGO_BUILD_JOBS=2
+```
 
 These inputs are pinned, but Debian package repositories and base-image tags
 can change; the build does not claim bit-identical output. The runtime keeps

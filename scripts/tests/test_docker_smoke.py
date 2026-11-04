@@ -21,7 +21,17 @@ case "$1" in
   run)
     trap 'exit 0' TERM INT
     echo smoke-ready
-    while true; do sleep 1 & wait "$!"; done
+    while true; do
+      if [[ -e /data/smoke-load ]]; then
+        # This is the bridge process itself, so the real pass child inherits
+        # the same descriptor environment as a CLI-initiated session read.
+        readlink "/proc/$$/fd/9" > /data/smoke-lock
+        pass show Tuta/Bridge/agent-restart@example.invalid > /dev/null
+        rm /data/smoke-load
+        touch /data/smoke-loaded
+      fi
+      sleep 0.1 & wait "$!"
+    done
     ;;
   *) exit 2 ;;
 esac
@@ -117,6 +127,8 @@ class DockerSmokeTests(unittest.TestCase):
 
     def test_lock_agent_descriptors_and_sigterm(self):
         self.initialize()
+        self.run_image("insert", "--multiline", "--force", "Tuta/Bridge/agent-restart@example.invalid",
+                       entrypoint="pass", input="agent restart test value\n")
         name = self.id + "-running"
         self.containers.append(name)
         self.docker("run", "--detach", "--name", name, "--volume", self.volume + ":/data",
@@ -133,7 +145,25 @@ class DockerSmokeTests(unittest.TestCase):
             result = self.run_image(command, fake=True, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("already in use", result.stderr)
-        # Check the running real gpg-agent has not inherited the volume lock.
+        before = self.docker("exec", name, "gpg-connect-agent", "GETINFO pid", "/bye").stdout
+        old_pid = next(line[2:] for line in before.splitlines() if line.startswith("D "))
+        self.assertTrue(old_pid.isdigit(), before)
+        # Simulate an agent crash, including its stale socket, not just a
+        # graceful shutdown performed by gpgconf.
+        self.docker("exec", name, "/bin/sh", "-c", 'kill -KILL "$1"', "sh", old_pid)
+        self.docker("exec", name, "touch", "/data/smoke-load")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.docker("exec", name, "test", "-e", "/data/smoke-loaded", check=False).returncode == 0:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("the bridge's pass subprocess did not reload: " + self.docker("logs", name).stderr)
+        self.assertEqual(self.docker("exec", name, "cat", "/data/smoke-lock").stdout.strip(), "/data/.lock")
+        after = self.docker("exec", name, "gpg-connect-agent", "GETINFO pid", "/bye").stdout
+        self.assertNotEqual(before, after, "pass should have launched a replacement agent")
+        # Check the replacement real gpg-agent has not inherited the volume
+        # lock after pass relaunched it from the process holding descriptor 9.
         self.docker("exec", name, "/bin/sh", "-ec", '''
             found=0
             for process in /proc/[0-9]*; do

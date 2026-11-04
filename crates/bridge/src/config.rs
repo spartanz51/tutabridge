@@ -9,7 +9,10 @@ pub struct Config {
     pub smtp_port: u16,
     /// Address for the mail listeners only. MCP always remains on loopback.
     /// Kept outside EditableSettings so desktop saves preserve manual values.
-    #[serde(default = "default_bind_addr")]
+    #[serde(
+        default = "default_bind_addr",
+        skip_serializing_if = "is_default_bind_addr"
+    )]
     pub bind_addr: IpAddr,
     #[serde(default = "default_api_url")]
     pub api_url: String,
@@ -84,6 +87,10 @@ fn default_sync_limit() -> usize {
 
 fn default_bind_addr() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+fn is_default_bind_addr(address: &IpAddr) -> bool {
+    *address == default_bind_addr()
 }
 
 fn default_mcp_port() -> u16 {
@@ -365,6 +372,20 @@ smtp_port = 1025
             assert_eq!(cfg.imap_addr().to_string(), imap);
             assert_eq!(cfg.smtp_addr().to_string(), smtp);
             assert_eq!(cfg.validate_ports(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn mail_bind_address_serialization_omits_only_the_default() {
+        for ip in ["127.0.0.1", "0.0.0.0", "::1"] {
+            let cfg = Config {
+                bind_addr: ip.parse().unwrap(),
+                ..Config::default()
+            };
+            let serialized = toml::to_string_pretty(&cfg).unwrap();
+            let table: toml::Table = toml::from_str(&serialized).unwrap();
+            assert_eq!(table.contains_key("bind_addr"), ip != "127.0.0.1");
+            assert_eq!(parse_config(&serialized).unwrap(), cfg);
         }
     }
 
