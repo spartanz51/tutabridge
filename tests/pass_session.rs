@@ -233,8 +233,7 @@ fn pass_probe() {
                 std::fs::write(root.join("mode"), "fail").unwrap();
                 let error = runtime
                     .block_on(store.save(&credentials))
-                    .err()
-                    .expect("insert must fail");
+                    .expect_err("insert must fail");
                 assert!(matches!(error, SessionStoreError::Write { .. }));
                 let message = error.to_string();
                 assert!(
@@ -295,8 +294,7 @@ fn pass_probe() {
                 std::fs::write(root.join("mode"), "fail").unwrap();
                 let error = runtime
                     .block_on(store.delete())
-                    .err()
-                    .expect("delete must fail");
+                    .expect_err("delete must fail");
                 assert!(matches!(error, SessionStoreError::Delete { .. }));
                 let message = error.to_string();
                 assert!(message.contains("pass rm exited with"), "{message}");
