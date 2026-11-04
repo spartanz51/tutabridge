@@ -298,6 +298,12 @@ async fn login_session(cfg: &config::Config) -> anyhow::Result<tuta::TutaSession
         Ok(s) => return Ok(s),
         Err(e)
             if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
+                .is_some_and(|error| error.allows_reauthentication()) =>
+        {
+            warn!("{e}");
+        }
+        Err(e)
+            if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
                 .is_some_and(|error| error.allows_volatile_login()) =>
         {
             warn!("{e}. Sign in to continue for this run without saving the session.");

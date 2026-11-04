@@ -16,6 +16,10 @@ impl PassStore {
         }
     }
 
+    pub(super) fn entry(&self) -> &str {
+        &self.entry
+    }
+
     fn directory(&self) -> Result<&Path, String> {
         self.directory
             .as_deref()
@@ -37,7 +41,7 @@ impl PassStore {
         Ok(command)
     }
 
-    pub(super) fn read(&self) -> Result<Option<String>, String> {
+    pub(super) fn read(&self) -> Result<Option<Vec<u8>>, String> {
         // A nonzero exit status cannot distinguish a missing entry from a GPG
         // failure. Only a confirmed missing file means there is no session.
         if !self.entry_exists()? {
@@ -58,9 +62,7 @@ impl PassStore {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        String::from_utf8(output.stdout)
-            .map(Some)
-            .map_err(|_| "pass returned a session that is not UTF-8".to_owned())
+        Ok(Some(output.stdout))
     }
 
     pub(super) fn write(&self, secret: &str) -> Result<(), String> {
