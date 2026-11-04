@@ -1,0 +1,12 @@
+# Dedicated container key. The volume must be protected as a secret.
+%no-protection
+Key-Type: RSA
+Key-Length: 3072
+Key-Usage: cert,sign
+Subkey-Type: RSA
+Subkey-Length: 3072
+Subkey-Usage: encrypt
+Name-Real: TutaBridge container
+Name-Email: tutabridge@localhost
+Expire-Date: 0
+%commit

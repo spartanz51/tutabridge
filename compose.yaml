@@ -1,0 +1,18 @@
+services:
+  tutabridge:
+    build: .
+    image: tutabridge:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1143:1143"
+      - "127.0.0.1:1025:1025"
+    volumes:
+      - tutabridge-data:/data
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  tutabridge-data:
