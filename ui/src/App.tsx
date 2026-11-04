@@ -118,6 +118,7 @@ function App() {
             stats={bridge.stats}
             config={bridge.config}
             hasSavedSession={bridge.hasSavedSession}
+            sessionWarning={bridge.sessionWarning}
             loading={bridge.loading}
             logs={bridge.logs}
             needsTotp={bridge.needsTotp}

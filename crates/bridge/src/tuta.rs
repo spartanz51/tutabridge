@@ -1165,7 +1165,13 @@ pub async fn login_with_2fa(
     if !store.matches_config(cfg) {
         return Err("Session store does not match the configured account and backend".into());
     }
-    let credentials = store.load().await?;
+    // Only an explicit password login may continue without persistence when
+    // the OS keychain cannot be accessed. Automatic resume remains strict.
+    let credentials = if password.is_some() {
+        store.load_interactive().await?
+    } else {
+        store.load().await?
+    };
     let raw_client: Arc<dyn RestClient> =
         Arc::new(tutasdk::net::native_rest_client::NativeRestClient::try_new()?);
     // Route every SDK request through the rate governor (bounded concurrency +

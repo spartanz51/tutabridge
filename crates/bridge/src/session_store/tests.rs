@@ -13,10 +13,9 @@ struct Observations {
 
 pub(super) struct FakeBackend {
     observations: Arc<Observations>,
-    read_results: VecDeque<Result<Option<String>, String>>,
+    read_results: VecDeque<Result<Option<String>, SessionStoreError>>,
     write_result: Result<(), String>,
     delete_result: Result<(), String>,
-    pub(super) legacy_fallback: bool,
     read_gate: Option<ReadGate>,
 }
 
@@ -35,12 +34,11 @@ impl FakeBackend {
             read_results: VecDeque::new(),
             write_result: Ok(()),
             delete_result: Ok(()),
-            legacy_fallback: false,
             read_gate: None,
         }
     }
 
-    pub(super) fn read(&mut self) -> Result<Option<String>, String> {
+    pub(super) fn read(&mut self) -> Result<Option<String>, SessionStoreError> {
         self.observations.reads.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = self.read_gate.take() {
             let _ = gate.started.send(());
@@ -92,6 +90,8 @@ fn store(config: &Config, backend: FakeBackend) -> SessionStore {
         state: Arc::new(Mutex::new(State {
             backend: Backend::Fake(backend),
             cache: Cache::Unloaded,
+            persistence: Persistence::Writable,
+            warning: None,
         })),
     }
 }
@@ -188,7 +188,10 @@ async fn a_confirmed_missing_session_is_cached() {
 async fn failed_reads_can_be_retried_after_the_backend_is_unlocked() {
     let expected = credentials("me@tuta.io");
     let mut backend = FakeBackend::new(Some(&expected));
-    backend.read_results.push_back(Err("locked".to_owned()));
+    backend.read_results.push_back(Err(SessionStoreError::Read {
+        backend: "pass",
+        message: "locked".to_owned(),
+    }));
     let observations = Arc::clone(&backend.observations);
     let session_store = store(&config(&expected.login, Some("Tuta")), backend);
 
@@ -226,20 +229,144 @@ async fn malformed_sessions_are_not_cached_or_disclosed_in_errors() {
 }
 
 #[tokio::test]
-async fn legacy_keyring_read_errors_and_malformed_entries_remain_nonblocking() {
-    for result in [
-        Err("keyring unavailable".to_owned()),
-        Ok(Some("invalid json".to_owned())),
+async fn inspecting_an_unavailable_keyring_does_not_allow_mutations_or_activate_volatile_login() {
+    for kind in [
+        KeyringUnavailableKind::StorageAccess,
+        KeyringUnavailableKind::Platform,
     ] {
         let mut backend = FakeBackend::new(None);
-        backend.legacy_fallback = true;
+        backend.read_results.push_back(Err(unavailable(kind)));
+        backend.read_results.push_back(Err(unavailable(kind)));
+        let observations = Arc::clone(&backend.observations);
+        let session_store = store(&config("me@tuta.io", None), backend);
+
+        let status = session_store.inspect().await.unwrap();
+        assert!(!status.available);
+        assert!(status
+            .warning
+            .unwrap()
+            .contains("sign in again after restarting"));
+        assert!(matches!(
+            session_store.save(&credentials("me@tuta.io")).await,
+            Err(SessionStoreError::UnreadableStore)
+        ));
+        assert!(matches!(
+            session_store.delete().await,
+            Err(SessionStoreError::UnreadableStore)
+        ));
+        assert!(matches!(
+            session_store.load().await,
+            Err(SessionStoreError::KeyringUnavailable { .. })
+        ));
+        assert_eq!(observations.reads.load(Ordering::SeqCst), 2);
+        assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
+    }
+}
+
+fn unavailable(kind: KeyringUnavailableKind) -> SessionStoreError {
+    SessionStoreError::KeyringUnavailable {
+        kind,
+        message: "keyring could not be accessed".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn explicitly_interactive_login_keeps_sessions_in_memory_and_preserves_unreadable_entries() {
+    let old = credentials("me@tuta.io");
+    let mut new = old.clone();
+    new.access_token = "new-token".to_owned();
+    let mut backend = FakeBackend::new(Some(&old));
+    backend
+        .read_results
+        .push_back(Err(unavailable(KeyringUnavailableKind::StorageAccess)));
+    let observations = Arc::clone(&backend.observations);
+    let session_store = store(&config(&old.login, None), backend);
+
+    assert!(session_store.load_interactive().await.unwrap().is_none());
+    assert!(matches!(
+        session_store.save(&new).await,
+        Err(SessionStoreError::VolatileSession)
+    ));
+    assert_eq!(
+        session_store.load().await.unwrap().unwrap().access_token,
+        new.access_token
+    );
+    let status = session_store.inspect().await.unwrap();
+    assert!(status.available);
+    assert!(status
+        .warning
+        .unwrap()
+        .contains("sign in again after restarting"));
+    assert!(matches!(
+        session_store.delete().await,
+        Err(SessionStoreError::VolatileSession)
+    ));
+    assert!(session_store.load().await.unwrap().is_none());
+    assert!(session_store.inspect().await.unwrap().warning.is_some());
+    assert_eq!(observations.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        codec::decode(observations.persisted.lock().unwrap().as_deref().unwrap())
+            .unwrap()
+            .access_token,
+        old.access_token
+    );
+}
+
+#[tokio::test]
+async fn a_successful_retry_restores_persistence_before_any_volatile_login() {
+    for initially_present in [false, true] {
+        let expected = credentials("me@tuta.io");
+        let mut backend = FakeBackend::new(initially_present.then_some(&expected));
+        backend
+            .read_results
+            .push_back(Err(unavailable(KeyringUnavailableKind::Platform)));
+        let observations = Arc::clone(&backend.observations);
+        let session_store = store(&config(&expected.login, None), backend);
+
+        assert!(!session_store.inspect().await.unwrap().available);
+        assert_eq!(
+            session_store.load_interactive().await.unwrap().is_some(),
+            initially_present
+        );
+        session_store.save(&expected).await.unwrap();
+        assert!(session_store.inspect().await.unwrap().warning.is_none());
+        assert_eq!(observations.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(observations.reads.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn malformed_sessions_and_pass_failures_remain_strict_even_with_an_interactive_password() {
+    for result in [
+        Ok(Some("malformed-secret".to_owned())),
+        Err(SessionStoreError::Read {
+            backend: "pass",
+            message: "GPG is locked".to_owned(),
+        }),
+    ] {
+        let mut backend = FakeBackend::new(None);
         backend.read_results.push_back(result);
         let observations = Arc::clone(&backend.observations);
         let session_store = store(&config("me@tuta.io", None), backend);
 
-        assert!(session_store.load().await.unwrap().is_none());
-        assert!(session_store.load().await.unwrap().is_none());
-        assert_eq!(observations.reads.load(Ordering::SeqCst), 1);
+        let error = session_store
+            .load_interactive()
+            .await
+            .err()
+            .expect("strict read failure");
+        assert!(!error.allows_volatile_login());
+        assert!(matches!(
+            session_store.save(&credentials("me@tuta.io")).await,
+            Err(SessionStoreError::UnreadableStore)
+        ));
+        assert!(matches!(
+            session_store.delete().await,
+            Err(SessionStoreError::UnreadableStore)
+        ));
+        assert_eq!(observations.writes.load(Ordering::SeqCst), 0);
         assert_eq!(observations.deletes.load(Ordering::SeqCst), 0);
     }
 }
@@ -276,6 +403,12 @@ async fn failed_saves_keep_the_new_session_in_memory_and_report_failure() {
     );
     assert_eq!(observations.reads.load(Ordering::SeqCst), 1);
     assert_eq!(observations.writes.load(Ordering::SeqCst), 1);
+    let status = session_store.inspect().await.unwrap();
+    assert!(status.available);
+    assert!(status
+        .warning
+        .unwrap()
+        .contains("only available for this run"));
 }
 
 #[tokio::test]

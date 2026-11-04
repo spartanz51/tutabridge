@@ -6,6 +6,11 @@ import type { Config, BridgeStatus, BridgeStats, UpdateInfo } from "../types";
 
 const MAX_LOG_LINES = 500;
 
+interface SessionStatus {
+  available: boolean;
+  warning: string | null;
+}
+
 export interface BackupStats {
   folders: number;
   mails_written: number;
@@ -33,7 +38,9 @@ export function useBridge() {
   // null means unchecked or unreadable, not a confirmed missing session.
   const [hasSavedSession, setHasSavedSession] = useState<boolean | null>(null);
   const [sessionReadError, setSessionReadError] = useState<string | null>(null);
+  const [sessionWarning, setSessionWarning] = useState<string | null>(null);
   const sessionReadEpoch = useRef(0);
+  const wasRunning = useRef(false);
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -56,42 +63,44 @@ export function useBridge() {
   // more rights): the banner offers the install instead.
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
 
-  const acceptStatus = useCallback((next: BridgeStatus) => {
-    setStatus(next);
-    if (next === "Running") {
-      // Auto-start may succeed after the initial store probe failed. Its
-      // success supersedes that error and any probe still in flight.
-      sessionReadEpoch.current += 1;
+  const readSavedSession = useCallback(async () => {
+    const epoch = ++sessionReadEpoch.current;
+    try {
+      const session = await invoke<SessionStatus>("has_saved_session");
+      if (epoch !== sessionReadEpoch.current) return null;
+      setHasSavedSession(session.available);
+      setSessionWarning(session.warning);
       setSessionReadError(null);
-      setHasSavedSession(true);
+      return session.available;
+    } catch (e) {
+      if (epoch !== sessionReadEpoch.current) return null;
+      setHasSavedSession(null);
+      setSessionWarning(null);
+      setSessionReadError(String(e));
+      return null;
     }
   }, []);
+
+  const acceptStatus = useCallback((next: BridgeStatus) => {
+    setStatus(next);
+    if (next === "Running" && !wasRunning.current) {
+      // A successful login can still be memory-only. Refresh the storage
+      // status so its warning survives successful startup and status events.
+      setSessionReadError(null);
+      void readSavedSession();
+    }
+    wasRunning.current = next === "Running";
+  }, [readSavedSession]);
 
   const refresh = useCallback(() => {
     invoke<BridgeStatus>("get_status").then(acceptStatus);
     invoke<BridgeStats>("get_stats").then(setStats);
   }, [acceptStatus]);
 
-  const readSavedSession = useCallback(async () => {
-    const epoch = ++sessionReadEpoch.current;
-    try {
-      const saved = await invoke<boolean>("has_saved_session");
-      if (epoch !== sessionReadEpoch.current) return null;
-      setHasSavedSession(saved);
-      setSessionReadError(null);
-      return saved;
-    } catch (e) {
-      if (epoch !== sessionReadEpoch.current) return null;
-      setHasSavedSession(null);
-      setSessionReadError(String(e));
-      return null;
-    }
-  }, []);
-
   useEffect(() => {
     invoke<Config>("get_config").then(setConfig);
-    // The error is displayed independently of status refreshes. It must not
-    // turn into a password prompt or an unhandled promise rejection.
+    // Strict storage errors block login; an unavailable OS keychain offers
+    // a manual login with a visible warning that it cannot be persisted.
     void readSavedSession();
     invoke<string | null>("get_bridge_password").then(setBridgePassword);
     invoke<string>("get_app_version").then(setAppVersion);
@@ -159,7 +168,8 @@ export function useBridge() {
   const saveConfig = useCallback(async (cfg: Config) => {
     const saved = await invoke<Config>("save_config", { config: cfg });
     setConfig(saved);
-  }, []);
+    await readSavedSession();
+  }, [readSavedSession]);
 
   // One login. If the account has 2FA, the backend emits `bridge://need-totp`
   // mid-login and waits for `submitTotp`; this promise stays pending until then.
@@ -176,6 +186,7 @@ export function useBridge() {
           password: password || null,
           email: email || null,
         });
+        await readSavedSession();
         setNeedsTotp(false);
         refresh();
         invoke<string | null>("get_bridge_password").then(setBridgePassword);
@@ -215,13 +226,14 @@ export function useBridge() {
     try {
       await invoke("stop_bridge");
       await invoke("start_bridge", { password: null });
+      await readSavedSession();
       refresh();
     } catch (e) {
       setStatus({ Error: String(e) });
     } finally {
       setLoading(false);
     }
-  }, [refresh]);
+  }, [refresh, readSavedSession]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
@@ -278,6 +290,7 @@ export function useBridge() {
       : status,
     stats,
     hasSavedSession,
+    sessionWarning,
     bridgePassword,
     logs,
     loading,

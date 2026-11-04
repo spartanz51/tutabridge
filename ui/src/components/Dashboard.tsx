@@ -7,6 +7,7 @@ interface Props {
   stats: BridgeStats;
   config: Config | null;
   hasSavedSession: boolean | null;
+  sessionWarning: string | null;
   loading: boolean;
   logs: string[];
   needsTotp: boolean;
@@ -29,6 +30,7 @@ export function Dashboard({
   stats,
   config,
   hasSavedSession,
+  sessionWarning,
   loading,
   logs,
   needsTotp,
@@ -119,6 +121,7 @@ export function Dashboard({
       </div>
 
       {errored && <p className="error-text">{status.Error}</p>}
+      {sessionWarning && <p className="field-hint" role="status">{sessionWarning}</p>}
 
       {needsTotp ? (
         <div className="start-section">
