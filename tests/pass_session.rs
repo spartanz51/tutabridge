@@ -198,6 +198,54 @@ fn pass_probe() {
             assert!(runtime.block_on(store.load()).unwrap().is_some());
             assert_eq!(calls(&root), 2);
         }
+        "replace-invalid" | "replace-utf8" => {
+            std::fs::write(
+                root.join("mode"),
+                scenario.strip_prefix("replace-").unwrap(),
+            )
+            .unwrap();
+            let status = runtime.block_on(store.inspect()).unwrap();
+            assert!(!status.available);
+            let warning = status.warning.unwrap();
+            assert!(warning.contains("pass (Tuta/Bridge/nobody@example.invalid)"));
+            assert!(warning.contains("Tuta password"));
+            assert!(!warning.contains("secret-token-must-not-be-logged"));
+
+            // Preparing a password login neither deletes nor overwrites the
+            // entry. Abandoning it still leaves strict resume reporting it.
+            assert!(runtime
+                .block_on(store.load_interactive())
+                .unwrap()
+                .is_none());
+            assert!(matches!(
+                runtime.block_on(store.load()),
+                Err(SessionStoreError::InvalidSession { .. })
+            ));
+            assert_eq!(calls(&root), 3);
+            assert!(!root.join("inserted-session").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("store").join(ENTRY)).unwrap(),
+                "dummy encrypted entry"
+            );
+
+            assert!(runtime
+                .block_on(store.load_interactive())
+                .unwrap()
+                .is_none());
+            // Authentication has now succeeded: persist its new credentials.
+            runtime.block_on(store.save(&credentials())).unwrap();
+            assert!(runtime.block_on(store.load()).unwrap().is_some());
+            assert!(runtime.block_on(store.inspect()).unwrap().warning.is_none());
+            let arguments = std::fs::read_to_string(root.join("calls")).unwrap();
+            assert_eq!(calls(&root), 5);
+            assert!(arguments
+                .ends_with("insert --multiline --force -- Tuta/Bridge/nobody@example.invalid\n"));
+            assert!(!arguments.contains("rm --"));
+            assert_eq!(
+                std::fs::read_to_string(root.join("store").join(ENTRY)).unwrap(),
+                "replacement encrypted entry\n"
+            );
+        }
         "login-error" => {
             std::fs::write(root.join("mode"), "fail").unwrap();
             // Even an explicitly supplied password must not overwrite a
@@ -344,6 +392,12 @@ fn missing_pass_executable_is_an_error_and_can_be_retried() {
 fn malformed_session_is_an_error_and_can_be_retried() {
     run_probe("invalid");
     run_probe("utf8");
+}
+
+#[test]
+fn corrupt_session_can_be_replaced_only_after_explicit_login() {
+    run_probe("replace-invalid");
+    run_probe("replace-utf8");
 }
 
 #[test]
