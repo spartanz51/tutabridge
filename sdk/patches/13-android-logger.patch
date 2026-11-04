@@ -1,0 +1,12 @@
+diff --git a/tuta-sdk/rust/sdk/src/logging.rs b/tuta-sdk/rust/sdk/src/logging.rs
+--- a/tuta-sdk/rust/sdk/src/logging.rs
++++ b/tuta-sdk/rust/sdk/src/logging.rs
+@@ -10,7 +10,7 @@ pub(crate) fn init_logger() {
+ 	if !LOG_INIT.swap(true, Ordering::Relaxed) {
+ 		// We need to use android_log so our logs show up in logcat, as standard output isn't so trivial to access.
+-		#[cfg(target_os = "android")]
++		#[cfg(all(target_os = "android", feature = "logging"))]
+ 		{
+ 			android_log::init("TutaSDK").expect("failed to load android_log logger");
+ 			return;
+ 		}

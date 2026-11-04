@@ -90,6 +90,10 @@ The build is not code-signed, so the first launch needs one click to allow it:
 [`tutabridge-git`](https://aur.archlinux.org/packages/tutabridge-git),
 e.g. `yay -S tutabridge-desktop-bin`.
 
+**Android / Termux (experimental CLI):** see the
+[setup and device-validation guide](docs/TERMUX.md). This path requires `pass`
+and GnuPG; it is not an Android desktop-app release.
+
 ---
 
 ## Updates
