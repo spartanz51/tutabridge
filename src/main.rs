@@ -1,35 +1,42 @@
 use log::{info, warn};
+mod cli;
+mod shutdown;
+use cli::{Command, LoginMode};
 use std::sync::Arc;
 use tutabridge_core::{
     backup, bridge as bridge_helpers, config, event_handler, imap, mcp, smtp, store::LocalStore,
     sync, tls, tuta, VERSION,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // Dropping an async startup future cannot stop a synchronous keyring/pass
+    // worker. Bound runtime teardown as well so SIGTERM can finish. A child
+    // process already launched by that worker may remain until the container
+    // namespace exits; the Docker entrypoint disables interactive GPG prompts.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
     tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install TLS crypto provider"))?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Subcommand dispatch. With no subcommand we run the bridge (the default
-    // and overwhelmingly common case); `backup <dir>` does a one-shot export
-    // and exits.
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("--version") | Some("-V") | Some("version") => {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = cli::parse(&args).map_err(anyhow::Error::msg)?;
+    match command {
+        Command::Version => {
             println!("tutabridge {VERSION}");
-            return Ok(());
+            Ok(())
         }
-        Some("backup") => {
-            let Some(output) = args.get(2) else {
-                eprintln!("usage: tutabridge backup <output-directory>");
-                std::process::exit(2);
-            };
-            return run_backup(output).await;
-        }
-        Some("password") => {
+        Command::Backup(output) => run_backup(&output).await,
+        Command::Password => {
             let pw = config::load_config()
                 .map_err(|e| anyhow::anyhow!("{e}"))?
                 .and_then(|cfg| cfg.bridge_password);
@@ -38,43 +45,85 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             };
             println!("{pw}");
-            return Ok(());
+            Ok(())
         }
-        Some("--help") | Some("-h") | Some("help") => {
+        Command::Help => {
             println!("tutabridge {VERSION}");
             println!();
             println!("tutabridge                 run the IMAP/SMTP bridge (default)");
+            println!("tutabridge init            sign in and persist a session, then exit");
+            println!("tutabridge run --non-interactive  resume a session without prompts");
             println!("tutabridge backup <dir>    export every mail to <dir> as .eml files");
             println!(
                 "tutabridge password        print the local bridge password (mail client setup)"
             );
             println!("tutabridge --version       print the version");
-            return Ok(());
+            Ok(())
         }
-        _ => {}
+        Command::Init => initialize().await,
+        Command::Run(LoginMode::Interactive) => {
+            // Keep the OS signal behavior while synchronous terminal prompts
+            // run. Once authenticated, use the same controlled shutdown as
+            // the service. Init and backup likewise retain normal OS signals.
+            let cfg = load_account(LoginMode::Interactive)?;
+            let session = login_session(&cfg, LoginMode::Interactive).await?;
+            shutdown::run(|stop| serve_bridge(cfg, session, stop)).await
+        }
+        Command::Run(mode) => shutdown::run(|stop| run_bridge(mode, stop)).await,
     }
+}
 
-    let mut cfg = match config::load_config().map_err(|e| anyhow::anyhow!("{e}"))? {
-        Some(cfg) if !cfg.email.is_empty() => cfg,
-        _ => {
-            use std::io::{BufRead, Write};
-            print!("Tuta email address: ");
-            std::io::stdout().flush()?;
-            let mut email = String::new();
-            std::io::stdin().lock().read_line(&mut email)?;
-            let email = email.trim().to_string();
-            if email.is_empty() {
-                anyhow::bail!("Email address is required");
-            }
-            let cfg = config::Config {
-                email,
-                ..Default::default()
-            };
-            config::save_config(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
-            cfg
+fn load_account(mode: LoginMode) -> anyhow::Result<config::Config> {
+    let mut cfg = config::load_config()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .unwrap_or_default();
+    if cfg.email.trim().is_empty() {
+        if !mode.may_prompt() {
+            anyhow::bail!("No account configured; run `tutabridge init` interactively first");
         }
-    };
+        use std::io::{BufRead, Write};
+        print!("Tuta email address: ");
+        std::io::stdout().flush()?;
+        let mut email = String::new();
+        std::io::stdin().lock().read_line(&mut email)?;
+        cfg.email = email.trim().to_string();
+        if cfg.email.is_empty() {
+            anyhow::bail!("Email address is required");
+        }
+        // Preserve the existing backend and listening settings in a Docker
+        // template or a partly configured desktop installation.
+        config::save_config(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    cfg.validate_ports().map_err(anyhow::Error::msg)?;
+    Ok(cfg)
+}
 
+async fn initialize() -> anyhow::Result<()> {
+    let mut cfg = load_account(LoginMode::Initialize)?;
+    login_session(&cfg, LoginMode::Initialize).await?;
+    config::ensure_bridge_password(&mut cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("{e}"))?;
+    info!("Session saved. Start the service with `tutabridge run --non-interactive`.");
+    info!("Use `tutabridge password` to display the local mail-client password.");
+    Ok(())
+}
+
+async fn run_bridge(
+    mode: LoginMode,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let cfg = load_account(mode)?;
+    // Fail on missing/unreadable credentials before creating local runtime
+    // files. Service mode never asks for an account password or a TOTP code.
+    let session = login_session(&cfg, mode).await?;
+    serve_bridge(cfg, session, shutdown_rx).await
+}
+
+async fn serve_bridge(
+    mut cfg: config::Config,
+    session: tuta::TutaSession,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let bridge_password_is_new = cfg.bridge_password.is_none();
     let bridge_password = config::ensure_bridge_password(&mut cfg)
         .map_err(|e| anyhow::anyhow!("Bridge password setup failed: {e}"))?;
@@ -84,10 +133,8 @@ async fn main() -> anyhow::Result<()> {
         tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("TLS setup failed: {e}"))?;
     info!("TLS initialized");
 
-    info!("IMAP will listen on 127.0.0.1:{}", cfg.imap_port);
-    info!("SMTP will listen on 127.0.0.1:{}", cfg.smtp_port);
-
-    let session = login_session(&cfg).await?;
+    info!("IMAP will listen on {}", cfg.imap_addr());
+    info!("SMTP will listen on {}", cfg.smtp_addr());
     info!("Logged in as {}", cfg.email);
 
     let storage_key = session
@@ -158,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
     let backend: Arc<dyn tuta::MailBackend> = Arc::new(session);
 
     let store = sync::MailStore::new();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut background = tokio::task::JoinSet::new();
 
     let imap_tls = tls_acceptor.clone();
     let smtp_tls = tls_acceptor;
@@ -171,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
     // `event_handler::run_event_handler`).
     let (startup_done_tx, startup_done_rx) = tokio::sync::watch::channel(false);
 
-    let syncer_handle = tokio::spawn(sync::run_syncer(
+    background.spawn(sync::run_syncer(
         store.clone(),
         local_store.clone(),
         backend.clone(),
@@ -179,27 +226,27 @@ async fn main() -> anyhow::Result<()> {
         startup_done_tx,
         shutdown_rx.clone(),
     ));
-    let bus_handle = {
+    {
         let client = Arc::clone(&bus_client);
         let token = bus_access_token;
         let uid = bus_user_id;
         let shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
+        background.spawn(async move {
             if let Err(e) = client.run(token, uid, event_tx, shutdown).await {
                 use tutabridge_tuta::event_bus::EventBusError;
                 if !matches!(e, EventBusError::Stopped) {
                     warn!("Event bus exited: {e}");
                 }
             }
-        })
-    };
+        });
+    }
     // Log every WsState transition at INFO so production logs reveal
     // reconnect storms without RUST_LOG=debug.
     {
         let mut ws_watch = bus_client.state();
         let mut shutdown_watch = shutdown_rx.clone();
         let mut last = *ws_watch.borrow();
-        tokio::spawn(async move {
+        background.spawn(async move {
             loop {
                 tokio::select! {
                     _ = ws_watch.changed() => {
@@ -214,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    let handler_handle = tokio::spawn(event_handler::run_event_handler(
+    background.spawn(event_handler::run_event_handler(
         store.clone(),
         local_store.clone(),
         backend.clone(),
@@ -223,19 +270,19 @@ async fn main() -> anyhow::Result<()> {
         startup_done_rx,
         shutdown_rx.clone(),
     ));
-    let imap_handle = tokio::spawn(imap::serve(
-        cfg.imap_port,
+    let imap_server = imap::serve(
+        cfg.imap_addr(),
         store.clone(),
         backend.clone(),
         local_store.clone(),
         imap_tls,
         pw.clone(),
-    ));
+    );
     // Read-only MCP server — a no-op (returns immediately) when the permission
     // tier is Disabled, so it's always safe to spawn. Not awaited in the
     // select! below for exactly that reason: a disabled server returns Ok at
     // once and must not tear the bridge down.
-    let mcp_handle = tokio::spawn(mcp::serve(
+    let mcp_server = mcp::serve(
         cfg.mcp_port,
         store.clone(),
         local_store.clone(),
@@ -243,12 +290,15 @@ async fn main() -> anyhow::Result<()> {
         pw.clone(),
         cfg.mcp_permission,
         shutdown_rx.clone(),
-    ));
-    let smtp_handle = tokio::spawn(smtp::serve(cfg.smtp_port, backend.clone(), smtp_tls, pw));
+    );
+    background.spawn(async move {
+        let _ = mcp_server.await;
+    });
+    let smtp_server = smtp::serve(cfg.smtp_addr(), backend.clone(), smtp_tls, pw);
 
     info!("Bridge is running. Configure Thunderbird with:");
-    info!("  IMAP server: 127.0.0.1:{} (SSL/TLS)", cfg.imap_port);
-    info!("  SMTP server: 127.0.0.1:{} (SSL/TLS)", cfg.smtp_port);
+    info!("  IMAP listening: {} (SSL/TLS)", cfg.imap_addr());
+    info!("  SMTP listening: {} (SSL/TLS)", cfg.smtp_addr());
     info!("  Username: {}", cfg.email);
     info!("  Password: ******** (run 'tutabridge password' to view)");
     info!("  Accept the self-signed certificate when prompted");
@@ -259,19 +309,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Shutting down...");
-            let _ = shutdown_tx.send(true);
-            syncer_handle.abort();
-            bus_handle.abort();
-            handler_handle.abort();
-            mcp_handle.abort();
-            Ok(())
-        }
-        r = imap_handle => r.map_err(|e| anyhow::anyhow!("{e}"))?.map_err(|e| anyhow::anyhow!("{e}")),
-        r = smtp_handle => r.map_err(|e| anyhow::anyhow!("{e}"))?.map_err(|e| anyhow::anyhow!("{e}")),
-    }
+    let result = tokio::select! {
+        _ = shutdown_rx.wait_for(|stop| *stop) => Ok(()),
+        r = imap_server => r.map_err(|e| anyhow::anyhow!("{e}")),
+        r = smtp_server => r.map_err(|e| anyhow::anyhow!("{e}")),
+    };
+    // JoinSet also aborts on drop if startup is cancelled by a signal. Normal
+    // exit awaits cancellation so background tasks release their resources.
+    background.shutdown().await;
+    result
 }
 
 /// Interactive TOTP prompt used during a fresh (non-keyring) login.
@@ -292,13 +338,27 @@ fn make_totp_cb() -> tuta::TwoFactorCallback {
 
 /// Resume the saved keychain session if possible, otherwise prompt for the
 /// Tuta password (and TOTP). Shared by the bridge-run path and `backup`.
-async fn login_session(cfg: &config::Config) -> anyhow::Result<tuta::TutaSession> {
+async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<tuta::TutaSession> {
     let store = tutabridge_core::session_store::SessionStore::new(cfg);
-    match tuta::login_with_2fa(cfg, &store, None, Some(make_totp_cb())).await {
+    let policy = if mode.allows_volatile_login() {
+        tuta::PersistencePolicy::AllowVolatile
+    } else {
+        tuta::PersistencePolicy::Required
+    };
+    if !mode.may_prompt() && store.load_persisted().await?.is_none() {
+        anyhow::bail!("No saved session; run `tutabridge init` interactively first");
+    }
+    match tuta::login_with_persistence(cfg, &store, None, None, policy).await {
         Ok(s) => return Ok(s),
+        Err(e) if !mode.may_prompt() => {
+            return Err(anyhow::anyhow!(
+                "{e}. If the session has expired, run `tutabridge init` interactively."
+            ));
+        }
         Err(e)
-            if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
-                .is_some_and(|error| error.allows_volatile_login()) =>
+            if mode.allows_volatile_login()
+                && e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
+                    .is_some_and(|error| error.allows_volatile_login()) =>
         {
             warn!("{e}. Sign in to continue for this run without saving the session.");
         }
@@ -314,7 +374,7 @@ async fn login_session(cfg: &config::Config) -> anyhow::Result<tuta::TutaSession
         Err(_) => {}
     }
     let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email))?;
-    tuta::login_with_2fa(cfg, &store, Some(&password), Some(make_totp_cb()))
+    tuta::login_with_persistence(cfg, &store, Some(&password), Some(make_totp_cb()), policy)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -332,7 +392,7 @@ async fn run_backup(output: &str) -> anyhow::Result<()> {
             anyhow::anyhow!("No account configured — run `tutabridge` once to sign in first")
         })?;
 
-    let session = login_session(&cfg).await?;
+    let session = login_session(&cfg, LoginMode::Interactive).await?;
     info!("Logged in as {}", cfg.email);
 
     let storage_key = session

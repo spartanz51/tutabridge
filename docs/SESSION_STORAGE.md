@@ -51,6 +51,13 @@ password login uses `load_interactive()`. A cached session remains usable after 
 failed write. A rejected token is removed from the cache even if its persistent
 deletion fails, so the same process cannot resume it again.
 
+The CLI's `init` and `run --non-interactive` modes require persistence.
+`load_persisted()` rejects a previously cached memory-only session, and
+`PersistencePolicy::Required` propagates a failed save instead of treating
+authentication alone as successful initialization. The service never supplies
+a password or a TOTP callback. A missing or expired session requires a separate
+interactive `init`.
+
 The local IMAP/SMTP password, TLS private key, and encrypted mail cache have
 separate lifecycles and are outside this module.
 

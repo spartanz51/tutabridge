@@ -40,6 +40,8 @@ pub enum SessionStoreError {
     UnreadableStore,
     #[error("The session is only kept in memory; the unreadable saved entry was left unchanged")]
     VolatileSession,
+    #[error("A persisted session is required; the current session is only available in memory")]
+    PersistenceRequired,
     #[error("Session storage is unavailable after an earlier worker failure")]
     Poisoned,
     #[error("Session storage worker failed")]
@@ -124,6 +126,21 @@ impl SessionStore {
 
     pub async fn load(&self) -> Result<Option<Credentials>, SessionStoreError> {
         self.run(State::load).await
+    }
+
+    /// Initialization and services cannot rely on credentials whose last save
+    /// failed, even when a caller reuses a store from an interactive login.
+    pub async fn load_persisted(&self) -> Result<Option<Credentials>, SessionStoreError> {
+        self.run(|state| {
+            let credentials = state.load()?;
+            if state.persistence == Persistence::Volatile
+                || (credentials.is_some() && state.warning.is_some())
+            {
+                return Err(SessionStoreError::PersistenceRequired);
+            }
+            Ok(credentials)
+        })
+        .await
     }
 
     /// Report availability and any persistence warning without opting into
