@@ -40,7 +40,10 @@ mod tests {
     fn secret_eq_matches_only_identical_secrets() {
         assert!(secret_eq("abcde-fghjk", "abcde-fghjk"));
         assert!(!secret_eq("abcde-fghjk", "abcde-fghjX"));
-        assert!(!secret_eq("abcde", "abcde-fghjk"), "a prefix is not a match");
+        assert!(
+            !secret_eq("abcde", "abcde-fghjk"),
+            "a prefix is not a match"
+        );
         assert!(!secret_eq("", "abcde"));
         assert!(secret_eq("", ""));
     }
