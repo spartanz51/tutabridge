@@ -1162,12 +1162,76 @@ pub async fn login_with_2fa(
     password: Option<&str>,
     totp_callback: Option<TwoFactorCallback>,
 ) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
+    login_with_persistence(
+        cfg,
+        store,
+        password,
+        totp_callback,
+        PersistencePolicy::AllowVolatile,
+    )
+    .await
+}
+
+/// Initialization must fail when fresh credentials cannot be saved. Desktop
+/// logins may keep working in memory, with a visible persistence warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistencePolicy {
+    AllowVolatile,
+    Required,
+}
+
+fn accept_session_save(
+    policy: PersistencePolicy,
+    result: Result<(), crate::session_store::SessionStoreError>,
+) -> Result<(), crate::session_store::SessionStoreError> {
+    match (policy, result) {
+        (PersistencePolicy::Required, result) => result,
+        (_, Err(error)) => {
+            log::warn!("Session is available only in memory: {error}");
+            Ok(())
+        }
+        (_, Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod persistence_policy_tests {
+    use super::*;
+
+    #[test]
+    fn initialization_reports_a_save_failure_but_desktop_can_keep_the_session() {
+        let failure = || crate::session_store::SessionStoreError::Write {
+            backend: "pass",
+            message: "encryption failed".into(),
+        };
+        assert!(accept_session_save(PersistencePolicy::Required, Err(failure())).is_err());
+        assert!(accept_session_save(PersistencePolicy::AllowVolatile, Err(failure())).is_ok());
+        for policy in [
+            PersistencePolicy::Required,
+            PersistencePolicy::AllowVolatile,
+        ] {
+            assert!(accept_session_save(policy, Ok(())).is_ok());
+        }
+    }
+}
+
+/// Required persistence also rejects a cached session whose earlier save
+/// failed, so reusing an interactive store cannot bypass initialization checks.
+pub async fn login_with_persistence(
+    cfg: &Config,
+    store: &crate::session_store::SessionStore,
+    password: Option<&str>,
+    totp_callback: Option<TwoFactorCallback>,
+    persistence: PersistencePolicy,
+) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
     if !store.matches_config(cfg) {
         return Err("Session store does not match the configured account and backend".into());
     }
     // Only an explicit password login may continue without persistence when
     // the OS keychain cannot be accessed. Automatic resume remains strict.
-    let credentials = if password.is_some() {
+    let credentials = if persistence == PersistencePolicy::Required {
+        store.load_persisted(password.is_some()).await?
+    } else if password.is_some() {
         store.load_interactive().await?
     } else {
         store.load().await?
@@ -1283,9 +1347,7 @@ pub async fn login_with_2fa(
         Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))
     })?;
 
-    if let Err(error) = store.save(&credentials).await {
-        log::warn!("Session is available only in memory: {error}");
-    }
+    accept_session_save(persistence, store.save(&credentials).await)?;
 
     Ok(TutaSession {
         logged_in,

@@ -3,6 +3,7 @@ mod session;
 mod utf7;
 
 use log::{debug, error, info};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -22,14 +23,14 @@ use session::ImapSession;
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub async fn serve(
-    port: u16,
+    address: SocketAddr,
     store: Arc<MailStore>,
     backend: Arc<dyn MailBackend>,
     local_store: Arc<LocalStore>,
     tls: TlsAcceptor,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = crate::net::bind_local("IMAP", port).await?;
+    let listener = crate::net::bind("IMAP", address).await?;
     serve_listener(listener, store, backend, local_store, tls, password_hash).await
 }
 

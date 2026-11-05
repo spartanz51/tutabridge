@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -6,6 +7,13 @@ pub struct Config {
     pub email: String,
     pub imap_port: u16,
     pub smtp_port: u16,
+    /// Address for the mail listeners only. MCP always remains on loopback.
+    /// Kept outside EditableSettings so desktop saves preserve manual values.
+    #[serde(
+        default = "default_bind_addr",
+        skip_serializing_if = "is_default_bind_addr"
+    )]
+    pub bind_addr: IpAddr,
     #[serde(default = "default_api_url")]
     pub api_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +85,14 @@ fn default_sync_limit() -> usize {
     500
 }
 
+fn default_bind_addr() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+fn is_default_bind_addr(address: &IpAddr) -> bool {
+    *address == default_bind_addr()
+}
+
 fn default_mcp_port() -> u16 {
     1944
 }
@@ -90,6 +106,14 @@ fn default_auto_update() -> bool {
 }
 
 impl Config {
+    pub fn imap_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.bind_addr, self.imap_port)
+    }
+
+    pub fn smtp_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.bind_addr, self.smtp_port)
+    }
+
     /// The listening ports must be usable and distinct. Two services on one
     /// port make the second bind fail at start; port 0 makes the system pick
     /// a random port no mail client would ever find. The MCP port only counts
@@ -121,6 +145,7 @@ impl Default for Config {
             email: String::new(),
             imap_port: 1143,
             smtp_port: 1025,
+            bind_addr: default_bind_addr(),
             api_url: default_api_url(),
             bridge_password: None,
             sync_limit: default_sync_limit(),
@@ -301,6 +326,9 @@ mod tests {
         assert_eq!(cfg.email, "");
         assert_eq!(cfg.imap_port, 1143);
         assert_eq!(cfg.smtp_port, 1025);
+        assert_eq!(cfg.bind_addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(cfg.imap_addr().to_string(), "127.0.0.1:1143");
+        assert_eq!(cfg.smtp_addr().to_string(), "127.0.0.1:1025");
         assert_eq!(cfg.api_url, "https://app.tuta.com");
     }
 
@@ -329,6 +357,48 @@ smtp_port = 1025
         let cfg = parse_config(toml).unwrap();
         assert_eq!(cfg.email, "test@tuta.com");
         assert_eq!(cfg.api_url, "https://app.tuta.com");
+        assert_eq!(cfg.bind_addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn mail_bind_address_accepts_ipv4_and_ipv6_literals() {
+        let base = "email = \"test@tuta.com\"\nimap_port = 1143\nsmtp_port = 1025\n";
+        for (ip, imap, smtp) in [
+            ("0.0.0.0", "0.0.0.0:1143", "0.0.0.0:1025"),
+            ("::1", "[::1]:1143", "[::1]:1025"),
+            ("::", "[::]:1143", "[::]:1025"),
+        ] {
+            let cfg = parse_config(&format!("{base}bind_addr = \"{ip}\"\n")).unwrap();
+            assert_eq!(cfg.imap_addr().to_string(), imap);
+            assert_eq!(cfg.smtp_addr().to_string(), smtp);
+            assert_eq!(cfg.validate_ports(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn mail_bind_address_serialization_omits_only_the_default() {
+        for ip in ["127.0.0.1", "0.0.0.0", "::1"] {
+            let cfg = Config {
+                bind_addr: ip.parse().unwrap(),
+                ..Config::default()
+            };
+            let serialized = toml::to_string_pretty(&cfg).unwrap();
+            let table: toml::Table = toml::from_str(&serialized).unwrap();
+            assert_eq!(table.contains_key("bind_addr"), ip != "127.0.0.1");
+            assert_eq!(parse_config(&serialized).unwrap(), cfg);
+        }
+    }
+
+    #[test]
+    fn mail_bind_address_rejects_hostnames_ports_and_invalid_values() {
+        let base = "email = \"test@tuta.com\"\nimap_port = 1143\nsmtp_port = 1025\n";
+        for value in ["localhost", "127.0.0.1:1143", "[::1]", "256.0.0.1", ""] {
+            assert!(
+                parse_config(&format!("{base}bind_addr = \"{value}\"\n")).is_err(),
+                "{value}"
+            );
+        }
+        assert!(parse_config(&format!("{base}bind_addr = 123\n")).is_err());
     }
 
     #[test]
@@ -358,6 +428,7 @@ smtp_port = 1025
             email: "roundtrip@tuta.com".to_string(),
             imap_port: 2143,
             smtp_port: 2025,
+            bind_addr: "::1".parse().unwrap(),
             api_url: "https://app.tuta.com".to_string(),
             bridge_password: None,
             sync_limit: 500,
@@ -472,6 +543,7 @@ mcp_port = 1944
 auto_update = true
 bridge_password = "keep-me"
 pass_path = "Tuta/Bridge"
+bind_addr = "0.0.0.0"
 [future_settings]
 enabled = true
 "#;
@@ -489,9 +561,11 @@ enabled = true
         assert_eq!(config.mcp_port, 2944);
         assert!(!config.auto_update);
         assert_eq!(config.bridge_password.as_deref(), Some("keep-me"));
+        assert_eq!(config.bind_addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         let merged: toml::Table = toml::from_str(&content).unwrap();
         assert_eq!(merged["bridge_password"].as_str(), Some("keep-me"));
         assert_eq!(merged["pass_path"].as_str(), Some("Tuta/Bridge"));
+        assert_eq!(merged["bind_addr"].as_str(), Some("0.0.0.0"));
         assert_eq!(merged["future_settings"]["enabled"].as_bool(), Some(true));
         assert_eq!(config, toml::from_str::<Config>(&content).unwrap());
     }
@@ -503,6 +577,7 @@ enabled = true
         assert_eq!(config.email, "me@tuta.io");
         assert_eq!(config.imap_port, 2143);
         assert_eq!(config.bridge_password, None);
+        assert_eq!(config.bind_addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(config, toml::from_str::<Config>(&content).unwrap());
     }
 
@@ -541,6 +616,7 @@ enabled = true
         assert_eq!(saved.imap_port, 2143);
         let persisted: toml::Table = toml::from_str(&file.read()).unwrap();
         assert_eq!(persisted["pass_path"].as_str(), Some("Tuta/Bridge"));
+        assert_eq!(persisted["bind_addr"].as_str(), Some("0.0.0.0"));
         assert_eq!(saved, toml::from_str::<Config>(&file.read()).unwrap());
         #[cfg(unix)]
         {
@@ -578,6 +654,9 @@ enabled = true
         payload["bridge_password"] = serde_json::Value::String("stale-password".into());
         assert!(serde_json::from_value::<EditableSettings>(payload.clone()).is_err());
         payload.as_object_mut().unwrap().remove("bridge_password");
+        payload["bind_addr"] = serde_json::Value::String("0.0.0.0".into());
+        assert!(serde_json::from_value::<EditableSettings>(payload.clone()).is_err());
+        payload.as_object_mut().unwrap().remove("bind_addr");
         payload.as_object_mut().unwrap().remove("auto_update");
         assert!(serde_json::from_value::<EditableSettings>(payload).is_err());
     }

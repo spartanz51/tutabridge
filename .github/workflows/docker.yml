@@ -1,0 +1,39 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', '.github/workflows/docker.yml']
+  pull_request:
+    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', '.github/workflows/docker.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Prepare and verify the pinned SDK
+        run: python3 scripts/sdk-prepare.py
+      - name: Install shell checker
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check entrypoint and unit tests
+        run: |
+          shellcheck docker/entrypoint.sh
+          python3 -m unittest discover -s scripts/tests -p 'test_docker_entrypoint.py' -v
+          docker compose config --quiet
+      - name: Build the CLI image
+        run: docker build --tag tutabridge:test .
+      - name: Exercise pass, GPG and container lifecycle
+        env:
+          TUTABRIDGE_DOCKER_IMAGE: tutabridge:test
+        run: python3 -m unittest discover -s scripts/tests -p 'test_docker_smoke.py' -v

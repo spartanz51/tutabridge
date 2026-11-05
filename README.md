@@ -115,6 +115,10 @@ releases.
 
 ## Getting started
 
+For an unattended CLI deployment, see the experimental [Docker guide](docs/DOCKER.md).
+It uses the existing `pass` backend, an interactive initialization command, and
+a persistent volume; normal container starts never prompt for credentials.
+
 The desktop app has a tray icon (the menu bar on macOS). Closing its window
 keeps the bridge running; use **Open TutaBridge** to bring it back or
 **Quit TutaBridge** to stop the app. Launching the app again also restores
