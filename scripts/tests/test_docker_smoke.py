@@ -180,22 +180,27 @@ class DockerSmokeTests(unittest.TestCase):
         for sig in ('HUP','QUIT','TERM'):
             with self.subTest(signal=sig):
                 name=self.id+'-init-'+sig.lower(); self.containers.append(name)
-                self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
-                            'set -m; mkfifo /tmp/input; exec 3<>/tmp/input; tutabridge init < /tmp/input & echo $! >/tmp/owner; wait $!; echo $? >/tmp/result; sleep 60')
-                deadline=time.monotonic()+15
-                while self.docker('exec',name,'bash','-c', 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = tutabridge ] && [ "$(cat "$p/wchan" 2>/dev/null)" = pipe_read ] && exit 0; done; exit 1',check=False).returncode:
-                    self.assertLess(time.monotonic(),deadline,'init did not block on its input pipe');time.sleep(.05)
-                # Job control prevents Bash from imposing SIG_IGN on background QUIT.
-                self.docker('exec',name,'bash','-ec','ignored=$(awk \'/^SigIgn:/ {print $2}\' /proc/$(cat /tmp/owner)/status); test $((16#$ignored & 4)) -eq 0')
-                self.docker('exec',name,'bash','-c','kill -'+sig+' "$(cat /tmp/owner)"')
-                deadline=time.monotonic()+7
-                while self.docker('exec',name,'test','-f','/tmp/result',check=False).returncode:
-                    self.assertLess(time.monotonic(),deadline);time.sleep(.05)
-                self.assertNotEqual(self.docker('exec',name,'cat','/tmp/result').stdout.strip(),'0')
-                self.docker('exec',name,'flock','-w','3','/data/.lock','true')
-                logs=self.docker('logs',name)
-                self.assertIn('Initialization failed or cancelled',logs.stderr)
-                self.docker('rm','-f','-v',name);self.containers.remove(name)
+                try:
+                    self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
+                                'set -m; mkfifo /tmp/input; exec 3<>/tmp/input; tutabridge init < /tmp/input > /tmp/init-output & echo $! >/tmp/owner; wait $!; echo $? >/tmp/result; sleep 60')
+                    deadline=time.monotonic()+15
+                    # The CLI flushes this prompt before reading stdin. Unlike
+                    # /proc/PID/wchan, it is observable on every runner architecture.
+                    while self.docker('exec',name,'grep','-Fq','Tuta email address:','/tmp/init-output',check=False).returncode:
+                        self.assertLess(time.monotonic(),deadline,'init did not reach its email prompt');time.sleep(.05)
+                    # Job control prevents Bash from imposing SIG_IGN on background QUIT.
+                    self.docker('exec',name,'bash','-ec','ignored=$(awk \'/^SigIgn:/ {print $2}\' /proc/$(cat /tmp/owner)/status); test $((16#$ignored & 4)) -eq 0')
+                    self.docker('exec',name,'bash','-c','kill -'+sig+' "$(cat /tmp/owner)"')
+                    deadline=time.monotonic()+7
+                    while self.docker('exec',name,'test','-f','/tmp/result',check=False).returncode:
+                        self.assertLess(time.monotonic(),deadline);time.sleep(.05)
+                    self.assertNotEqual(self.docker('exec',name,'cat','/tmp/result').stdout.strip(),'0')
+                    self.docker('exec',name,'flock','-w','3','/data/.lock','true')
+                    logs=self.docker('logs',name)
+                    self.assertIn('Initialization failed or cancelled',logs.stderr)
+                finally:
+                    self.docker('rm','-f','-v',name)
+                    self.containers.remove(name)
 
     @unittest.skipUnless(os.name=='posix','PTY requires Unix')
     def test_ctrl_c_at_init_prompt_releases_lock(self):
