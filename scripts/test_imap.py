@@ -12,7 +12,7 @@ Connects to the local IMAP bridge and verifies:
 
 Prerequisites:
 - Bridge must be running (cargo run or dev.sh)
-- Config must have bridge_password set
+- The bridge password is read from `tutabridge password` (cargo build first) unless --password is given
 
 Usage:
     python3 scripts/test_imap.py [--password BRIDGE_PASSWORD]
@@ -44,6 +44,21 @@ def load_config():
         return None
     with open(config_path, "rb") as f:
         return tomllib.load(f)
+
+def bridge_password_from_cli():
+    """The bridge password lives in the keychain or pass, not in config.toml;
+    the CLI knows where to look."""
+    import shutil, subprocess
+    root = Path(__file__).resolve().parent.parent
+    candidates = [root / "target" / "debug" / "tutabridge", root / "target" / "release" / "tutabridge"]
+    binary = next((c for c in candidates if c.exists()), None) or shutil.which("tutabridge")
+    if not binary:
+        return None
+    try:
+        out = subprocess.run([str(binary), "password"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
 
 def ok(msg):
     print(f"  {GREEN}PASS{RESET} {msg}")
@@ -199,11 +214,11 @@ def main():
     config = load_config()
 
     email = args.email or (config and config.get("email")) or "user@tuta.io"
-    password = args.password or (config and config.get("bridge_password"))
+    password = args.password or bridge_password_from_cli()
     port = args.port or (config and config.get("imap_port")) or 1143
 
     if not password:
-        print(f"{RED}No bridge password found. Pass --password or set bridge_password in config.{RESET}")
+        print(f"{RED}No bridge password found. Pass --password or run the bridge once so `tutabridge password` works.{RESET}")
         sys.exit(1)
 
     print(f"TutaBridge IMAP Integration Test")

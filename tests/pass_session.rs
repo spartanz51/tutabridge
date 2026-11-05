@@ -30,6 +30,14 @@ impl Fixture {
             root.join("bin/pass"),
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$PASS_TEST_ROOT/calls"
+# The bridge password entry is a plain file in the dummy store: `insert`
+# writes it, `show` prints it. Only the session entry has failure modes.
+case "$1 $2 $3 $4" in
+  "insert --multiline --force Tuta/Bridge/nobody@example.invalid.bridge-password")
+    /bin/cat > "$PASSWORD_STORE_DIR/$4.gpg"; exit 0 ;;
+  "show -- Tuta/Bridge/nobody@example.invalid.bridge-password ")
+    /bin/cat "$PASSWORD_STORE_DIR/$3.gpg"; exit $? ;;
+esac
 [ "$1" = show ] && [ "$2" = -- ] && [ "$3" = Tuta/Bridge/nobody@example.invalid ] || exit 91
 mode=$(/bin/cat "$PASS_TEST_ROOT/mode")
 case "$mode" in
@@ -194,13 +202,61 @@ fn login_preserves_the_storage_error_type() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn cli_moves_a_bridge_password_from_the_config_file_into_pass() {
+    let fixture = Fixture::new("cli-migrate");
+    let config_dir = fixture.0.join("config");
+    let config_file = config_dir.join("tutabridge/config.toml");
+    std::fs::create_dir_all(config_dir.join("tutabridge")).unwrap();
+    std::fs::write(
+        &config_file,
+        "email = 'nobody@example.invalid'\nimap_port = 1143\nsmtp_port = 1025\nbridge_password = 'AbCdE-FgHjK-mNpQr-StUvW'\npass_path = 'Tuta/Bridge'\n",
+    ).unwrap();
+    let run = || {
+        fixture
+            .command(env!("CARGO_BIN_EXE_tutabridge"))
+            .arg("password")
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    // First run: the password is found in the file, moved to pass, and the
+    // file is rewritten without it.
+    let output = run();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "AbCdE-FgHjK-mNpQr-StUvW\n");
+    let entry = fixture
+        .0
+        .join("store/Tuta/Bridge/nobody@example.invalid.bridge-password.gpg");
+    assert_eq!(
+        std::fs::read_to_string(&entry).unwrap(),
+        "AbCdE-FgHjK-mNpQr-StUvW"
+    );
+    let rewritten = std::fs::read_to_string(&config_file).unwrap();
+    assert!(!rewritten.contains("bridge_password"), "{rewritten}");
+    assert!(rewritten.contains("pass_path = \"Tuta/Bridge\""), "{rewritten}");
+    assert_eq!(calls(&fixture.0), 1, "one `pass insert`");
+
+    // Second run: read back from pass, nothing written.
+    let output = run();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "AbCdE-FgHjK-mNpQr-StUvW\n");
+    assert_eq!(calls(&fixture.0), 2, "one `pass show`");
+    assert!(!std::fs::read_to_string(&config_file)
+        .unwrap()
+        .contains("bridge_password"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn cli_reports_gpg_error_without_prompting_for_a_tuta_password() {
     let fixture = Fixture::new("cli-error");
     let config_dir = fixture.0.join("config");
     std::fs::create_dir_all(config_dir.join("tutabridge")).unwrap();
     std::fs::write(
         config_dir.join("tutabridge/config.toml"),
-        "email = 'nobody@example.invalid'\nimap_port = 1143\nsmtp_port = 1025\nbridge_password = 'dummy'\npass_path = 'Tuta/Bridge'\n",
+        "email = 'nobody@example.invalid'\nimap_port = 1143\nsmtp_port = 1025\npass_path = 'Tuta/Bridge'\n",
     ).unwrap();
     std::fs::write(fixture.0.join("store").join(ENTRY), "dummy encrypted entry").unwrap();
     std::fs::write(fixture.0.join("mode"), "fail").unwrap();

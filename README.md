@@ -226,10 +226,15 @@ Config and cache live under your platform's app-data directory. On macOS that is
 `~/Library/Application Support/tutabridge/`:
 
 ```
-config.toml          account + ports + bridge_password + sync_limit
+config.toml          account + ports + sync_limit
 store.db             SQLCipher metadata + full-text body index
 mails/<id>.eml.enc   per-mail encrypted bodies
 ```
+
+The bridge password lives in the OS keychain (or `pass`, see below) next to
+the login session, not in `config.toml`; `tutabridge password` prints it. It
+is written to the file only when no keychain is available, with a warning in
+the log.
 
 `sync_limit` controls how many recent message bodies are kept offline. The full
 mailbox is always listed and metadata-searchable regardless. Set it to `0` (or
@@ -246,7 +251,8 @@ with your GPG key. Add a `pass_path` to `config.toml`:
 pass_path = "Tuta/Bridge"
 ```
 
-The session is then stored as `Tuta/Bridge/<your address>`. `pass` must be on
+The session is then stored as `Tuta/Bridge/<your address>` and the bridge
+password as `Tuta/Bridge/<your address>.bridge-password`. `pass` must be on
 `PATH`, and `gpg-agent` must be able to decrypt the entry when the bridge
 starts, so a bridge started without a terminal needs a cached passphrase or a
 graphical pinentry. Log in once after setting it; an existing keychain session

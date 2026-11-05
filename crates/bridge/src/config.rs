@@ -8,6 +8,12 @@ pub struct Config {
     pub smtp_port: u16,
     #[serde(default = "default_api_url")]
     pub api_url: String,
+    /// The password mail clients present to the local IMAP/SMTP servers.
+    /// Kept in the OS keyring or `pass` beside the saved session
+    /// ([`load_config`] fills it in from there). It is written to
+    /// `config.toml` only when no secret store is available, so a file
+    /// that holds it is a fallback, not the normal state; see
+    /// [`ensure_bridge_password`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_password: Option<String>,
     #[serde(default = "default_sync_limit")]
@@ -152,15 +158,78 @@ pub fn store_mails_dir() -> PathBuf {
 
 pub fn load_config() -> Result<Option<Config>, Box<dyn std::error::Error>> {
     let path = config_path();
-    if path.exists() {
-        // The file holds the bridge password; heal installs whose config was
-        // written before files were created owner-only.
-        crate::fs_private::tighten(&path);
-        let content = std::fs::read_to_string(&path)?;
-        Ok(Some(toml::from_str(&content)?))
-    } else {
-        Ok(None)
+    if !path.exists() {
+        return Ok(None);
     }
+    // The file may hold the bridge password (installs that predate the
+    // secret store, or ones without a keyring); heal installs whose config
+    // was written before files were created owner-only.
+    crate::fs_private::tighten(&path);
+    let content = std::fs::read_to_string(&path)?;
+    let mut cfg: Config = toml::from_str(&content)?;
+    if cfg.email.is_empty() {
+        // Nothing to key a store entry by yet.
+        return Ok(Some(cfg));
+    }
+    let in_file = cfg.bridge_password.take();
+    match crate::tuta::load_bridge_password(&cfg) {
+        Ok(Some(stored)) => {
+            if in_file.is_some() {
+                // A copy left behind by a migration whose rewrite failed.
+                if let Err(e) = save_config_without_password(&cfg) {
+                    log::warn!("Could not drop the bridge password from config.toml: {e}");
+                }
+            }
+            cfg.bridge_password = Some(stored);
+        }
+        Ok(None) => {
+            if let Some(password) = in_file {
+                migrate_bridge_password(&mut cfg, password);
+            }
+        }
+        Err(e) => {
+            return Err(format!(
+                "Could not read the bridge password from {}: {}",
+                crate::tuta::describe_bridge_password_store(&cfg),
+                e.detail()
+            )
+            .into());
+        }
+    }
+    Ok(Some(cfg))
+}
+
+/// Move a bridge password found in `config.toml` into the secret store and
+/// rewrite the file without it. When the store refuses the write (no
+/// keyring on a headless machine, GPG unavailable) the password stays
+/// where it was, so the bridge keeps working, and a warning says why.
+fn migrate_bridge_password(cfg: &mut Config, password: String) {
+    let store = crate::tuta::describe_bridge_password_store(cfg);
+    match crate::tuta::store_bridge_password(cfg, &password) {
+        Ok(()) => match save_config_without_password(cfg) {
+            Ok(()) => log::info!("Bridge password moved from config.toml to {store}"),
+            Err(e) => log::warn!(
+                "Bridge password saved to {store}, but config.toml could not be rewritten \
+                 without it: {e}"
+            ),
+        },
+        Err(e) => log::warn!(
+            "Bridge password stays in config.toml: could not save it to {store} ({e}). \
+             Set pass_path or make a keyring available to keep it out of the file."
+        ),
+    }
+    cfg.bridge_password = Some(password);
+}
+
+/// Write `cfg` to disk with the bridge password left out, whatever the
+/// in-memory value is. Used whenever the password is known to be in the
+/// secret store.
+fn save_config_without_password(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let on_disk = Config {
+        bridge_password: None,
+        ..cfg.clone()
+    };
+    save_config(&on_disk)
 }
 
 pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -210,22 +279,40 @@ fn merge_settings(
     Ok((config, content))
 }
 
+/// The bridge password, generating and saving one if there is none yet.
+/// `config` must come from [`load_config`], which fills the field in from
+/// the secret store.
 pub fn ensure_bridge_password(config: &mut Config) -> Result<String, Box<dyn std::error::Error>> {
     if let Some(ref pw) = config.bridge_password {
         return Ok(pw.clone());
     }
-    let password = generate_bridge_password();
-    config.bridge_password = Some(password.clone());
-    save_config(config)?;
-    Ok(password)
+    regenerate_bridge_password(config)
 }
 
+/// Generate a new bridge password and save it: to the keyring or `pass`
+/// when one is available, otherwise to `config.toml` (owner-only) with a
+/// warning, so a headless machine without a keyring still works.
 pub fn regenerate_bridge_password(
     config: &mut Config,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let password = generate_bridge_password();
-    config.bridge_password = Some(password.clone());
-    save_config(config)?;
+    let store = crate::tuta::describe_bridge_password_store(config);
+    match crate::tuta::store_bridge_password(config, &password) {
+        Ok(()) => {
+            // The file must not keep an older copy.
+            save_config_without_password(config)?;
+            log::info!("Bridge password saved to {store}");
+            config.bridge_password = Some(password.clone());
+        }
+        Err(e) => {
+            log::warn!(
+                "Could not save the bridge password to {store} ({e}); keeping it in config.toml. \
+                 Set pass_path or make a keyring available to keep it out of the file."
+            );
+            config.bridge_password = Some(password.clone());
+            save_config(config)?;
+        }
+    }
     Ok(password)
 }
 

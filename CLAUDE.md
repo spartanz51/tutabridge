@@ -42,14 +42,14 @@ Requires a running bridge instance (either `cargo run` or `./dev.sh` for GUI).
 python3 scripts/test_imap.py
 ```
 
-This connects to the local IMAP server and verifies: TLS, auth, folder list, mail count, body fetch, search. It reads the bridge password from `~/Library/Application Support/tutabridge/config.toml` automatically.
+This connects to the local IMAP server and verifies: TLS, auth, folder list, mail count, body fetch, search. It reads the email and port from `config.toml` and the bridge password from `tutabridge password` (pass `--password` to override).
 
 ### Manual Thunderbird test
 
 1. Start bridge: `./dev.sh` (GUI) or `cargo run` (CLI)
 2. Wait for "Event bus initial sync done" in logs
 3. In Thunderbird: IMAP server `127.0.0.1:1143` SSL/TLS, SMTP `127.0.0.1:1025` SSL/TLS
-4. Username: your tuta email, Password: bridge_password from config
+4. Username: your tuta email, Password: the bridge password (`tutabridge password`, or the GUI)
 5. Accept self-signed cert
 
 ## Build

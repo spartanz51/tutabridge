@@ -1332,8 +1332,48 @@ fn classify_resume_failure(e: &tutasdk::login::LoginError) -> ResumeFailure {
 #[error("Could not read the saved session: {0}")]
 pub struct SessionStoreError(String);
 
+impl SessionStoreError {
+    /// What went wrong, without the "saved session" framing, for callers
+    /// that read something else from the same store.
+    pub fn detail(&self) -> &str {
+        &self.0
+    }
+}
+
 pub fn has_saved_session(cfg: &Config) -> Result<bool, SessionStoreError> {
     load_credentials(cfg).map(|credentials| credentials.is_some())
+}
+
+/// Where the bridge password lives: beside the saved session, in the OS
+/// keyring (service `tutabridge`, user `<email>/bridge-password`) or in the
+/// password-store as `<pass_path>/<email>.bridge-password`.
+fn bridge_password_store(cfg: &Config) -> SessionStore {
+    match SessionStore::for_config(cfg) {
+        SessionStore::Keyring { email } => SessionStore::Keyring {
+            email: format!("{email}/bridge-password"),
+        },
+        SessionStore::Pass { entry } => SessionStore::Pass {
+            entry: format!("{entry}.bridge-password"),
+        },
+    }
+}
+
+/// Human-readable name of the place the bridge password is kept.
+pub fn describe_bridge_password_store(cfg: &Config) -> String {
+    bridge_password_store(cfg).describe()
+}
+
+/// The bridge password from the keyring or `pass`, `None` when none has
+/// been stored there yet. A store that cannot be read (GPG locked, `pass`
+/// missing) is an error, never silently "no password".
+pub fn load_bridge_password(cfg: &Config) -> Result<Option<String>, SessionStoreError> {
+    Ok(bridge_password_store(cfg)
+        .read()?
+        .map(|secret| secret.trim_end_matches(['\r', '\n']).to_string()))
+}
+
+pub fn store_bridge_password(cfg: &Config, password: &str) -> Result<(), String> {
+    bridge_password_store(cfg).write(password)
 }
 
 /// Where the saved login session lives: the OS keyring by default, or
@@ -1870,6 +1910,24 @@ mod forget_session_tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn the_bridge_password_lives_beside_the_session() {
+        // Same backend as the session, distinct entry, so one `pass_path`
+        // (or one keyring) holds both without either overwriting the other.
+        assert_eq!(
+            bridge_password_store(&cfg_with_pass_path(None)),
+            SessionStore::Keyring {
+                email: "me@tuta.io/bridge-password".to_string()
+            }
+        );
+        assert_eq!(
+            bridge_password_store(&cfg_with_pass_path(Some("Tuta/Bridge"))),
+            SessionStore::Pass {
+                entry: "Tuta/Bridge/me@tuta.io.bridge-password".to_string()
+            }
+        );
     }
 }
 
