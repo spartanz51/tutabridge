@@ -4,6 +4,7 @@
 //! or storage selection changes; there is deliberately no process-global cache.
 
 mod codec;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod keyring;
 mod pass;
 
@@ -11,9 +12,17 @@ use crate::config::Config;
 use std::sync::{Arc, Mutex};
 use tutasdk::login::Credentials;
 
+const KEYRING_SUPPORTED: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux"
+));
+
 /// Storage failures never contain the session JSON or command stdout.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionStoreError {
+    #[error("This platform has no supported keyring; configure a non-empty pass_path to use pass")]
+    PassRequired,
     #[error("The keyring is unavailable: {message}")]
     KeyringUnavailable {
         kind: KeyringUnavailableKind,
@@ -104,9 +113,7 @@ impl SessionStore {
     pub fn new(config: &Config) -> Self {
         let context = Context::from_config(config);
         let backend = match &context.selection {
-            Selection::Keyring => Backend::Keyring {
-                email: context.email.clone(),
-            },
+            Selection::Keyring => Backend::keyring(context.email.clone()),
             Selection::Pass { entry } => Backend::Pass(pass::PassStore::new(entry.clone())),
         };
         Self {
@@ -171,6 +178,10 @@ impl SessionStore {
         &self,
         operation: impl FnOnce(&mut State) -> Result<T, SessionStoreError> + Send + 'static,
     ) -> Result<T, SessionStoreError> {
+        // Reject unsupported configurations before starting backend work or
+        // caching a session. The login caller performs this read before any
+        // Tuta network request, including when a password was supplied.
+        self.context.selection.validate(KEYRING_SUPPORTED)?;
         let state = Arc::clone(&self.state);
         // Acquire the lock inside the blocking worker as well: another clone
         // may be waiting for GPG/pinentry while holding it. This serializes
@@ -218,6 +229,16 @@ impl Selection {
                 entry: format!("{prefix}/{}", config.email),
             },
             _ => Self::Keyring,
+        }
+    }
+
+    /// Platform capability is an input so both supported and unsupported
+    /// targets can be tested on any host without a real keyring or Android.
+    fn validate(&self, keyring_supported: bool) -> Result<(), SessionStoreError> {
+        if matches!(self, Self::Keyring) && !keyring_supported {
+            Err(SessionStoreError::PassRequired)
+        } else {
+            Ok(())
         }
     }
 }
@@ -367,18 +388,34 @@ impl State {
 }
 
 enum Backend {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     Keyring {
         email: String,
     },
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Unavailable,
     Pass(pass::PassStore),
     #[cfg(test)]
     Fake(tests::FakeBackend),
 }
 
 impl Backend {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn keyring(email: String) -> Self {
+        Self::Keyring { email }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    fn keyring(_email: String) -> Self {
+        Self::Unavailable
+    }
+
     fn entry(&self) -> String {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::Keyring { email } => format!("service tutabridge, account {email}"),
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            Self::Unavailable => "no supported keyring on this platform".to_owned(),
             Self::Pass(store) => store.entry().to_owned(),
             #[cfg(test)]
             Self::Fake(_) => "test-entry".to_owned(),
@@ -386,7 +423,10 @@ impl Backend {
     }
     fn name(&self) -> &'static str {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::Keyring { .. } => "the keychain",
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            Self::Unavailable => "the unavailable keychain",
             Self::Pass(_) => "pass",
             #[cfg(test)]
             Self::Fake(_) => "test store",
@@ -395,7 +435,10 @@ impl Backend {
 
     fn read(&mut self) -> Result<Option<Vec<u8>>, SessionStoreError> {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::Keyring { email } => keyring::read(email),
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            Self::Unavailable => Err(SessionStoreError::PassRequired),
             Self::Pass(store) => store.read().map_err(|message| SessionStoreError::Read {
                 backend: "pass",
                 message,
@@ -407,7 +450,10 @@ impl Backend {
 
     fn write(&mut self, secret: &str) -> Result<(), String> {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::Keyring { email } => keyring::write(email, secret),
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            Self::Unavailable => Err(SessionStoreError::PassRequired.to_string()),
             Self::Pass(store) => store.write(secret),
             #[cfg(test)]
             Self::Fake(backend) => backend.write(secret),
@@ -416,7 +462,10 @@ impl Backend {
 
     fn delete(&mut self) -> Result<(), String> {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::Keyring { email } => keyring::delete(email),
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            Self::Unavailable => Err(SessionStoreError::PassRequired.to_string()),
             Self::Pass(store) => store.delete(),
             #[cfg(test)]
             Self::Fake(backend) => backend.delete(),

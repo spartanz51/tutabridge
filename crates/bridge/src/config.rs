@@ -24,7 +24,7 @@ pub struct Config {
     pub auto_update: bool,
     /// Keep the login session in pass (password-store) as
     /// `<pass_path>/<email>` instead of the OS keyring. Unset means the
-    /// keyring.
+    /// keyring on supported desktop platforms; Android requires this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_path: Option<String>,
 }

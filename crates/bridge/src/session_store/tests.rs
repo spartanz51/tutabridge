@@ -117,6 +117,39 @@ fn backend_selection_preserves_legacy_path_normalization() {
 }
 
 #[test]
+fn targets_without_a_keyring_require_an_explicit_pass_entry() {
+    for path in [None, Some(""), Some("/"), Some("///")] {
+        let selection = Selection::from_config(&config("me@tuta.io", path));
+        let error = selection
+            .validate(false)
+            .expect_err("pass must be configured");
+        assert!(matches!(error, SessionStoreError::PassRequired));
+        assert!(!error.allows_volatile_login());
+        assert!(error.to_string().contains("pass_path"));
+        assert!(
+            selection.validate(true).is_ok(),
+            "desktop keyring remains the default"
+        );
+    }
+}
+
+#[test]
+fn configured_pass_is_available_regardless_of_native_keyring_support() {
+    for path in ["Tuta/Bridge", "/Tuta/Bridge/"] {
+        let selection = Selection::from_config(&config("me@tuta.io", Some(path)));
+        for keyring_supported in [false, true] {
+            assert!(selection.validate(keyring_supported).is_ok());
+            assert_eq!(
+                selection,
+                Selection::Pass {
+                    entry: "Tuta/Bridge/me@tuta.io".to_owned()
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn context_comparison_tracks_only_account_endpoint_and_normalized_backend() {
     let original = config("me@tuta.io", Some("Tuta/Bridge"));
     let session_store = store(&original, FakeBackend::new(None));

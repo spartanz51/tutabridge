@@ -139,6 +139,64 @@ jobs:
       - name: Test core and the SDK extensions
         run: cargo test --locked -p tutabridge-core -p tutabridge-tuta
 
+  android-cli:
+    # Compile and link the CLI and all native dependencies for Termux. This
+    # catches cfg/android regressions; it does not replace testing on a device.
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: "28.2.13676358"
+      ANDROID_API: "24"
+    steps:
+      - name: Checkout (with official SDK submodule)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Prepare and verify patched SDK
+        run: python3 scripts/sdk-prepare.py
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm
+
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ndk;${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Cache cargo build
+        if: inputs.ref == ''
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64-ndk${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Build Android CLI (including native linking)
+        shell: bash
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          ndk_bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$ndk_bin:$PATH"
+          export CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android${ANDROID_API}-clang"
+          export CXX_aarch64_linux_android="$ndk_bin/aarch64-linux-android${ANDROID_API}-clang++"
+          export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo build --locked -p tutabridge --target aarch64-linux-android
+
+      - name: Upload experimental Android CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: tutabridge-android-aarch64
+          path: target/aarch64-linux-android/debug/tutabridge
+          if-no-files-found: error
+          retention-days: 14
+
   desktop:
     # Compile the platform-specific tray and single-instance implementations.
     strategy:
