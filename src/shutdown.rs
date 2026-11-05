@@ -38,11 +38,29 @@ where
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let mut hangup = if !cancel {
+        Some(tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::hangup(),
+        )?)
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let mut quit = if !cancel {
+        Some(tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::quit(),
+        )?)
+    } else {
+        None
+    };
     let signal = async {
         #[cfg(unix)]
         tokio::select! {
             _ = terminate.recv() => {},
             _ = interrupt.recv() => {},
+            _ = async { match &mut hangup { Some(s) => {s.recv().await;}, None => std::future::pending().await } } => {},
+            _ = async { match &mut quit { Some(s) => {s.recv().await;}, None => std::future::pending().await } } => {},
         }
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await?;

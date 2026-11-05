@@ -187,11 +187,7 @@ pub async fn serve_listener(
                         }
                     }
                     Ok(Err(e)) => {
-                        if crate::net::expected_tls_disconnect(&e) {
-                            debug!("SMTP peer TLS handshake failed: {e}");
-                        } else {
-                            error!("SMTP TLS failure: {e}");
-                        }
+                        log::log!(crate::net::tls_failure_level(&e), "SMTP TLS failure: {e}");
                     }
                     Err(_) => debug!("SMTP TLS handshake timed out"),
                 }

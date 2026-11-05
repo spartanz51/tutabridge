@@ -33,7 +33,7 @@ class DockerSmokeTests(unittest.TestCase):
 
     def tearDown(self):
         for name in self.containers:
-            self.docker('rm', '--force', name, check=False)
+            self.docker('rm', '--force', '--volumes', name, check=False)
         self.docker('volume', 'rm', self.volume, check=False)
         self.temp.cleanup()
 
@@ -114,7 +114,7 @@ class DockerSmokeTests(unittest.TestCase):
                 if select.select([master],[],[],.1)[0]:received+=os.read(master,8192)
             os.write(master,b'\n')
             self.assertNotEqual(process.wait(timeout=3),0)
-            self.docker('exec',name,'flock','-n','/data/.lock','true')
+            self.docker('exec',name,'flock','-w','3','/data/.lock','true')
         finally:
             if process.poll() is None:process.terminate();process.wait(timeout=3)
             os.close(master)
@@ -152,6 +152,75 @@ class DockerSmokeTests(unittest.TestCase):
         self.initialize(names[0]); self.configure()
         for name in names: self.wait_for(name, 'Waiting for a saved session', 15)
         self.shell('flock -n /data/.lock true')
+
+    def test_init_waits_for_short_lock_ownership(self):
+        name = self.id+'-short-owner'; self.containers.append(name)
+        self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
+                    'exec 9>/data/.lock; flock 9; echo locked; sleep 1')
+        self.wait_for(name,'locked')
+        self.initialize() # Must retry and reach the prompt, not report occupied.
+
+    def test_init_signals_reap_children_and_return_failure(self):
+        for sig in ('HUP','QUIT','TERM'):
+            with self.subTest(signal=sig):
+                name=self.id+'-init-'+sig.lower(); self.containers.append(name)
+                self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
+                            'mkfifo /tmp/input; exec 3<>/tmp/input; tutabridge init < /tmp/input & echo $! >/tmp/owner; wait $!; echo $? >/tmp/result; sleep 60')
+                deadline=time.monotonic()+15
+                while self.docker('exec',name,'bash','-c', 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = tutabridge ] && [ "$(cat "$p/wchan" 2>/dev/null)" = pipe_read ] && exit 0; done; exit 1',check=False).returncode:
+                    self.assertLess(time.monotonic(),deadline,'init did not block on its input pipe');time.sleep(.05)
+                self.docker('exec',name,'bash','-c','kill -'+sig+' "$(cat /tmp/owner)"')
+                deadline=time.monotonic()+7
+                while self.docker('exec',name,'test','-f','/tmp/result',check=False).returncode:
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.05)
+                self.assertNotEqual(self.docker('exec',name,'cat','/tmp/result').stdout.strip(),'0')
+                self.docker('exec',name,'flock','-w','3','/data/.lock','true')
+                logs=self.docker('logs',name)
+                self.assertIn('Initialization failed or cancelled',logs.stderr)
+                self.docker('rm','-f','-v',name);self.containers.remove(name)
+
+    @unittest.skipUnless(os.name=='posix','PTY requires Unix')
+    def test_ctrl_c_at_init_prompt_releases_lock(self):
+        import pty,select
+        name=self.start();self.wait_for(name,'Waiting for configuration')
+        master,slave=pty.openpty()
+        process=subprocess.Popen([DOCKER,'exec','-it',name,'tutabridge','init'],stdin=slave,stdout=slave,stderr=slave)
+        os.close(slave)
+        try:
+            received=b'';deadline=time.monotonic()+15
+            while b'Tuta email address:' not in received:
+                self.assertLess(time.monotonic(),deadline)
+                if select.select([master],[],[],.1)[0]:received+=os.read(master,8192)
+            os.write(master,b'\x03')
+            self.assertNotEqual(process.wait(timeout=7),0)
+            self.docker('exec',name,'flock','-w','3','/data/.lock','true')
+        finally:
+            if process.poll() is None:process.terminate();process.wait(timeout=3)
+            os.close(master)
+
+    def test_spawn_failure_keeps_supervisor_alive(self):
+        name=self.id+'-spawn';self.containers.append(name)
+        self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
+                    'cp /usr/local/bin/tutabridge /tmp/bridge; exec 9>/data/.lock; flock 9; /tmp/bridge run --wait 9>&- & echo $! >/tmp/owner; sleep 1; chmod 600 /tmp/bridge; exec 9>&-; wait $!; echo stopped; sleep 60')
+        self.wait_for(name,'Cannot launch worker',15)
+        self.docker('exec',name,'bash','-ec','kill -0 "$(cat /tmp/owner)"; flock -n /data/.lock true')
+        self.docker('exec',name,'bash','-ec','kill -TERM "$(cat /tmp/owner)"')
+        self.wait_for(name,'stopped',3)
+
+    @unittest.skipUnless(os.environ.get('TUTABRIDGE_HEALTH_TEST_BINARY'),'requires compiled Linux unit-test fixture')
+    def test_public_health_with_real_servers_and_one_port_down(self):
+        fixture=os.environ['TUTABRIDGE_HEALTH_TEST_BINARY']
+        name=self.id+'-health';self.containers.append(name)
+        self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data',
+                    '--mount',f'type=bind,src={fixture},dst=/tmp/test-service,readonly',
+                    '-e','TUTABRIDGE_PUBLIC_HEALTH_FIXTURE=1','--entrypoint','/tmp/test-service',IMAGE,
+                    '--exact','service::tests::health_uses_real_servers_pinned_certificate_and_configured_address','--nocapture')
+        self.wait_for(name,'public-health-fixture-ready')
+        self.docker('exec',name,'tutabridge','health')
+        self.docker('exec',name,'touch','/tmp/tutabridge/stop-smtp')
+        self.wait_for(name,'public-health-fixture-smtp-stopped')
+        failed=self.docker('exec',name,'tutabridge','health',check=False)
+        self.assertNotEqual(failed.returncode,0);self.assertIn('SMTP unavailable',failed.stderr)
 
     def test_busy_volume_refuses_direct_init_without_bootstrap(self):
         name = self.id + '-owner'; self.containers.append(name)
@@ -207,7 +276,7 @@ class DockerSmokeTests(unittest.TestCase):
         self.docker('exec',name,'bash','-ec','''found=0
             for process in /proc/[0-9]*; do
                 [ "$(cat "$process/comm" 2>/dev/null || true)" = gpg-agent ] || continue
-                [ "$(awk '{print $3}' "$process/stat")" != Z ] || continue
+                [ "$(awk '{print $3}' "$process/stat")" != Z ] || exit 1
                 found=1
                 for fd in "$process"/fd/*; do
                     [ "$(readlink "$fd" 2>/dev/null || true)" != /data/.lock ] || exit 1

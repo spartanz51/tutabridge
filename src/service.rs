@@ -27,6 +27,7 @@ pub enum State {
     Network = 17,
     Failed = 18,
     Stopping = 19,
+    Initialization = 20,
 }
 impl State {
     pub fn reason(self) -> &'static str {
@@ -41,6 +42,7 @@ impl State {
             Self::Network => "Tuta temporarily unavailable; retrying with backoff",
             Self::Failed => "Service failed; inspect startup diagnostics",
             Self::Stopping => "Stopping",
+            Self::Initialization => "Initialization failed or cancelled; existing saved entry preserved",
         }
     }
     fn from_code(code: i32) -> Self {
@@ -51,6 +53,7 @@ impl State {
             13 => Self::Rejected,
             14 => Self::Version,
             17 => Self::Network,
+            20 => Self::Initialization,
             _ => Self::Failed,
         }
     }
@@ -146,6 +149,7 @@ struct Status {
     state: State,
     ports: Option<(u16, u16)>,
     certificate: Option<String>,
+    address: Option<std::net::IpAddr>,
     password: Option<String>,
 }
 impl Status {
@@ -154,6 +158,7 @@ impl Status {
             state,
             ports: None,
             certificate: None,
+            address: None,
             password: None,
         }
     }
@@ -192,7 +197,22 @@ impl StatusServer {
         }
         let listener = UnixListener::bind(&path)?;
         let task = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
+            let mut failed = false;
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(connection) => {
+                        failed = false;
+                        connection
+                    }
+                    Err(e) => {
+                        if !failed {
+                            log::warn!("Status accept failed ({:?}); retrying", e.kind());
+                        }
+                        failed = true;
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                };
                 let mut request = [0; 1];
                 if tokio::time::timeout(Duration::from_millis(200), stream.read_exact(&mut request))
                     .await
@@ -207,7 +227,7 @@ impl StatusServer {
                     serde_json::json!({"password":snapshot.password}).to_string()
                 } else if request == [b'h'] {
                     serde_json::json!({"state":snapshot.state as i32,"reason":snapshot.state.reason(),
-                    "ports":snapshot.ports,"certificate":snapshot.certificate}).to_string()
+                    "ports":snapshot.ports,"certificate":snapshot.certificate,"address":snapshot.address}).to_string()
                 } else {
                     continue;
                 };
@@ -252,24 +272,94 @@ pub async fn health() -> anyhow::Result<()> {
         let imap = u16::try_from(ports[0].as_u64().context("Invalid IMAP port")?)?;
         let smtp = u16::try_from(ports[1].as_u64().context("Invalid SMTP port")?)?;
         let pem = status["certificate"].as_str().context("TLS is starting")?;
-        probe(imap, smtp, pem).await
+        let address = status["address"]
+            .as_str()
+            .context("Service address unavailable")?
+            .parse()?;
+        probe(address, imap, smtp, pem).await
     })
     .await
     .context("Health check timed out")?
 }
 
-async fn probe(imap: u16, smtp: u16, pem: &str) -> anyhow::Result<()> {
+/// Pin the local leaf DER, independent of SAN/expiry; still verify possession
+/// of its private key via the provider's TLS handshake signature algorithms.
+#[derive(Debug)]
+struct PinnedCertificate(tokio_rustls::rustls::pki_types::CertificateDer<'static>);
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for PinnedCertificate {
+    fn verify_server_cert(
+        &self,
+        end: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
+        if end != &self.0 {
+            return Err(tokio_rustls::rustls::Error::General(
+                "Local certificate pin mismatch".into(),
+            ));
+        }
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        signature: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        tokio_rustls::rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            signature,
+            &tokio_rustls::rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        signature: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        tokio_rustls::rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            signature,
+            &tokio_rustls::rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        tokio_rustls::rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+async fn probe(address: std::net::IpAddr, imap: u16, smtp: u16, pem: &str) -> anyhow::Result<()> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_rustls::{rustls, TlsConnector};
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(pem)) {
-        roots.add(cert?)?;
-    }
+    let certificate = CertificateDer::from_pem_slice(pem.as_bytes())?;
     let connector = TlsConnector::from(Arc::new(
         rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedCertificate(certificate)))
             .with_no_client_auth(),
     ));
+    let address = match address {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
     async fn line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> anyhow::Result<String> {
         let mut value = String::new();
         let mut limited = r.take(4097);
@@ -279,7 +369,7 @@ async fn probe(imap: u16, smtp: u16, pem: &str) -> anyhow::Result<()> {
         }
         Ok(value)
     }
-    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", imap))
+    let tcp = tokio::net::TcpStream::connect((address, imap))
         .await
         .context("IMAP unavailable")?;
     let mut connection = BufReader::new(
@@ -310,7 +400,7 @@ async fn probe(imap: u16, smtp: u16, pem: &str) -> anyhow::Result<()> {
         bail!("IMAP LOGOUT failed");
     }
     let _ = connection.get_mut().shutdown().await;
-    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", smtp))
+    let tcp = tokio::net::TcpStream::connect((address, smtp))
         .await
         .context("SMTP unavailable")?;
     let mut connection = BufReader::new(
@@ -353,6 +443,7 @@ fn configure_status() -> Status {
     let mut status = Status::waiting(State::Starting);
     if let Ok(Some(cfg)) = tutabridge_core::config::load_config() {
         status.ports = Some((cfg.imap_port, cfg.smtp_port));
+        status.address = Some(cfg.bind_addr);
         status.password = cfg.bridge_password;
         status.certificate = std::fs::read_to_string(
             tutabridge_core::config::config_path().with_file_name("cert.pem"),
@@ -368,7 +459,7 @@ fn session_fingerprint() -> Option<Vec<u8>> {
     let config = std::fs::read(tutabridge_core::config::config_path()).ok()?;
     let cfg = tutabridge_core::config::load_config().ok()??;
     let mut bytes = config;
-    // Successful init rewrites config, including for the desktop keyring.
+    // Container init rewrites config. A desktop keyring repair requires restarting --wait.
     let modified = std::fs::metadata(tutabridge_core::config::config_path())
         .ok()?
         .modified()
@@ -376,7 +467,7 @@ fn session_fingerprint() -> Option<Vec<u8>> {
     bytes.extend(format!("{modified:?}").as_bytes());
     if let (Some(root), Some(path)) = (std::env::var_os("PASSWORD_STORE_DIR"), cfg.pass_path) {
         let entry = PathBuf::from(root)
-            .join(path)
+            .join(path.trim_matches('/'))
             .join(format!("{}.gpg", cfg.email));
         if let Ok(encrypted) = std::fs::read(entry) {
             bytes.extend(encrypted);
@@ -385,24 +476,39 @@ fn session_fingerprint() -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-async fn terminate_group(child: &mut tokio::process::Child, pid: i32) -> anyhow::Result<()> {
+fn exited_without_reaping(pid: i32) -> io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } == pid)
+}
+
+async fn terminate_group(
+    child: &mut tokio::process::Child,
+    pid: i32,
+) -> anyhow::Result<std::process::ExitStatus> {
     unsafe {
         libc::kill(-pid, libc::SIGTERM);
     }
-    if tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .is_err()
-    {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-        child.wait().await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !exited_without_reaping(pid).unwrap_or(true) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // Reap orphaned foreground workers before releasing the volume lock. The
-    // independent GPG agent has another session and never inherits that lock.
+    // Keep the unreaped leader as a PID/PGID reservation until our final signal.
+    // No negative-PID kill is permitted after child.wait() (PGID reuse race).
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }
+    let status = child.wait().await?;
     #[cfg(target_os = "linux")]
     loop {
         let result = unsafe { libc::waitpid(-pid, std::ptr::null_mut(), 0) };
@@ -417,22 +523,81 @@ async fn terminate_group(child: &mut tokio::process::Child, pid: i32) -> anyhow:
             break;
         }
     }
-    Ok(())
+    reap_agents(None);
+    Ok(status)
+}
+
+fn reap_agents(keep: Option<i32>) {
+    // Reap adopted daemons without stealing the leader from Tokio or releasing
+    // its PID reservation. This also runs while the bridge is serving.
+    #[cfg(target_os = "linux")]
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::waitid(
+                libc::P_ALL,
+                0,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } != 0
+        {
+            break;
+        }
+        let pid = unsafe { info.si_pid() };
+        if pid == 0 || keep == Some(pid) {
+            break;
+        }
+        if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } <= 0 {
+            break;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = keep; // POSIX has no portable subreaper; orphan reaping is Linux-only.
+}
+
+pub fn prepare_report() {
+    if let Some(fd) = report_fd() {
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+}
+fn report_fd() -> Option<i32> {
+    std::env::var("TUTABRIDGE_REPORT_FD")
+        .ok()?
+        .parse::<i32>()
+        .ok()
+        .filter(|fd| *fd > 2)
+}
+fn report(message: &str) {
+    if let Some(fd) = report_fd() {
+        // A single bounded datagram; no plaintext credentials or tool stdout.
+        let bytes = message.as_bytes();
+        unsafe {
+            libc::send(
+                fd,
+                bytes.as_ptr().cast(),
+                bytes.len().min(2048),
+                libc::MSG_DONTWAIT,
+            );
+        }
+    }
 }
 
 /// An interactive init worker has its own process group for bounded cleanup.
 /// Give that group the terminal, otherwise a terminal read stops on SIGTTIN.
-struct Foreground(Option<libc::pid_t>);
+struct Foreground(Option<(File, libc::pid_t)>);
 impl Drop for Foreground {
     fn drop(&mut self) {
-        if let Some(group) = self.0 {
+        if let Some((terminal, group)) = &self.0 {
             unsafe {
                 let mut blocked = std::mem::zeroed();
                 let mut old = std::mem::zeroed();
                 libc::sigemptyset(&mut blocked);
                 libc::sigaddset(&mut blocked, libc::SIGTTOU);
                 libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut old);
-                libc::tcsetpgrp(libc::STDIN_FILENO, group);
+                libc::tcsetpgrp(terminal.as_raw_fd(), *group);
                 libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
             }
         }
@@ -444,21 +609,37 @@ async fn worker(
     init: bool,
     stop: &mut watch::Receiver<bool>,
     status: &watch::Sender<Status>,
-) -> anyhow::Result<Option<i32>> {
+) -> anyhow::Result<Option<(i32, String)>> {
     #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error().into());
     }
-    let terminal = init && unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
-    let _foreground = Foreground(if terminal {
-        let group = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+    let tty = if init {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open("/dev/tty")
+            .ok()
+    } else {
+        None
+    };
+    let terminal = tty.as_ref().map(AsRawFd::as_raw_fd);
+    let _foreground = Foreground(if let Some(tty) = tty {
+        let group = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
         if group < 0 || group != unsafe { libc::getpgrp() } {
-            bail!("Interactive init requires a foreground terminal");
+            return Ok(Some((
+                State::Initialization as i32,
+                "Interactive init requires a foreground terminal".into(),
+            )));
         }
-        Some(group)
+        Some((tty, group))
     } else {
         None
     });
+    let (diagnostics, report_socket) = std::os::unix::net::UnixDatagram::pair()?;
+    diagnostics.set_nonblocking(true)?;
+    let report_descriptor = report_socket.as_raw_fd();
     let descriptor = lock.0.as_raw_fd();
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command.arg(if init {
@@ -473,34 +654,79 @@ async fn worker(
     });
     command.process_group(0);
     command.env("TUTABRIDGE_LOCK_FD", descriptor.to_string());
+    command.env("TUTABRIDGE_REPORT_FD", report_descriptor.to_string());
     unsafe {
         command.pre_exec(move || {
-            if terminal {
+            if let Some(terminal) = terminal {
                 let old = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-                let result = libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
+                let result = libc::tcsetpgrp(terminal, libc::getpgrp());
                 libc::signal(libc::SIGTTOU, old);
                 if result < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
-            if libc::fcntl(descriptor, libc::F_SETFD, 0) < 0 {
+            if libc::fcntl(descriptor, libc::F_SETFD, 0) < 0
+                || libc::fcntl(report_descriptor, libc::F_SETFD, 0) < 0
+            {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    let mut child = tokio::process::Command::from(command).spawn()?;
-    let pid = child.id().context("Worker PID unavailable")? as i32;
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    let result = loop {
-        tokio::select! {
-            result=child.wait()=>break result.map(|exit|Some(exit.code().unwrap_or(State::Failed as i32))),
-            _=stop.wait_for(|stopping|*stopping)=>break Ok(None),
-            _=interval.tick()=>{status.send_replace(configure_status());},
+    let mut child = match tokio::process::Command::from(command).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return Ok(Some((
+                State::Failed as i32,
+                format!("Cannot launch worker ({:?}); retrying", e.kind()),
+            )))
         }
     };
-    terminate_group(&mut child, pid).await?;
-    result.map_err(Into::into)
+    drop(report_socket);
+    let pid = child.id().context("Worker PID unavailable")? as i32;
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    let stopped = loop {
+        tokio::select! {
+            _=poll.tick()=>{ if exited_without_reaping(pid).unwrap_or(true) { break false; } },
+            _=stop.wait_for(|stopping|*stopping)=>break true,
+            _=interval.tick()=>{reap_agents(Some(pid)); status.send_replace(configure_status());},
+        }
+    };
+    let result = terminate_group(&mut child, pid).await?;
+    if stopped {
+        return Ok(None);
+    }
+    let mut buffer = [0; 2048];
+    let detail = diagnostics
+        .recv(&mut buffer)
+        .map(|n| String::from_utf8_lossy(&buffer[..n]).into_owned())
+        .unwrap_or_default();
+    Ok(Some((
+        result.code().unwrap_or(if init {
+            State::Initialization as i32
+        } else {
+            State::Failed as i32
+        }),
+        detail,
+    )))
+}
+
+async fn acquire_for_init(
+    init: bool,
+    stop: &mut watch::Receiver<bool>,
+) -> io::Result<Option<Lock>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let result = Lock::acquire()?;
+        if result.is_some() || !init || tokio::time::Instant::now() >= deadline || *stop.borrow() {
+            return Ok(result);
+        }
+        tokio::select! {
+            _=stop.wait_for(|stopping| *stopping)=>return Ok(None),
+            _=tokio::time::sleep(Duration::from_millis(50))=>{},
+        }
+    }
 }
 
 pub async fn supervise(
@@ -520,9 +746,18 @@ pub async fn supervise(
     let mut backoff = 10;
     loop {
         if *stop.borrow() {
+            if init {
+                bail!("{}", State::Initialization.reason());
+            }
             return Ok(());
         }
-        let result = match Lock::acquire() {
+        reap_agents(None);
+        let mut detail = String::new();
+        let acquired = acquire_for_init(init, &mut stop).await;
+        if init && *stop.borrow() {
+            bail!("{}", State::Initialization.reason());
+        }
+        let result = match acquired {
             Ok(Some(lock)) => {
                 let fingerprint = session_fingerprint();
                 if blocked.as_ref().is_some_and(|(reason, old)| {
@@ -532,9 +767,11 @@ pub async fn supervise(
                 } else {
                     sender.send_replace(configure_status());
                     match worker(&lock, init, &mut stop, &sender).await? {
+                        None if init => bail!("{}", State::Initialization.reason()),
                         None => return Ok(()),
-                        Some(0) => return Ok(()),
-                        Some(code) => {
+                        Some((0, _)) => return Ok(()),
+                        Some((code, diagnostic)) => {
+                            detail = diagnostic;
                             let result = State::from_code(code);
                             if matches!(result, State::Rejected | State::Version) {
                                 blocked = Some((result, fingerprint));
@@ -545,14 +782,27 @@ pub async fn supervise(
                 }
             }
             Ok(None) => State::Occupied,
-            Err(_) => State::Storage,
+            Err(error) => {
+                detail = format!("Cannot acquire volume lock ({:?})", error.kind());
+                State::Storage
+            }
         };
         sender.send_replace(Status::waiting(result));
         if !waiting {
-            bail!("{}", result.reason());
+            bail!(
+                "{}{}{}",
+                result.reason(),
+                if detail.is_empty() { "" } else { ": " },
+                detail
+            );
         }
         if result != state || logged.elapsed() >= Duration::from_secs(300) {
-            log::info!("{}", result.reason());
+            log::info!(
+                "{}{}{}",
+                result.reason(),
+                if detail.is_empty() { "" } else { ": " },
+                detail
+            );
             logged = std::time::Instant::now();
         }
         state = result;
@@ -567,9 +817,15 @@ pub async fn supervise(
             10
         };
         // All worker activity and guards have ended before this sleep.
-        tokio::select! {
-            _=stop.wait_for(|stopping|*stopping)=>{sender.send_replace(Status::waiting(State::Stopping));return Ok(());},
-            _=tokio::time::sleep(Duration::from_secs(delay))=>{},
+        let deadline = tokio::time::sleep(Duration::from_secs(delay));
+        tokio::pin!(deadline);
+        let mut reap = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _=stop.wait_for(|stopping|*stopping)=>{sender.send_replace(Status::waiting(State::Stopping));return Ok(());},
+                _=&mut deadline=>break,
+                _=reap.tick()=>reap_agents(None),
+            }
         }
     }
 }
@@ -581,21 +837,29 @@ pub fn bootstrap(init: bool) -> Result<(), State> {
     let assets = std::env::var_os("TUTABRIDGE_ASSETS")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/local/lib/tutabridge"));
-    let status = std::process::Command::new("bash")
+    let mut command = std::process::Command::new("bash");
+    command
         .arg(assets.join("bootstrap.sh"))
-        .arg(if init { "init" } else { "check" })
-        .stdout(if init {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        })
-        .stderr(if init {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        })
-        .status()
-        .map_err(|_| State::Storage)?;
+        .arg(if init { "init" } else { "check" });
+    let status = if init {
+        command.status().map_err(|_| State::Storage)?
+    } else {
+        let output = command.stdout(Stdio::null()).output().map_err(|e| {
+            report(&format!("Cannot launch storage check ({:?})", e.kind()));
+            State::Storage
+        })?;
+        if !output.status.success() && output.status.code() != Some(10) {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let known = [
+                "Password store is not initialized",
+                "Unexpected pass recipient",
+                "The private GPG key for this password store is missing",
+            ];
+            let detail = known.into_iter().find(|message| stderr.contains(message));
+            report(detail.unwrap_or("Storage check failed; verify permissions and GPG setup"));
+        }
+        output.status
+    };
     if status.success() {
         Ok(())
     } else {
@@ -680,7 +944,7 @@ mod tests {
         use tokio_rustls::rustls::{self, pki_types::PrivatePkcs8KeyDer};
         let _ = rustls::crypto::ring::default_provider().install_default();
         let key = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+        let cert = rcgen::CertificateParams::new(vec!["nas.example.invalid".into()])
             .unwrap()
             .self_signed(&key)
             .unwrap();
@@ -763,16 +1027,173 @@ mod tests {
         let (acceptor, pem) = tls();
         let (imap, imap_task) = server(acceptor.clone(), true).await;
         let (smtp, smtp_task) = server(acceptor.clone(), false).await;
-        probe(imap, smtp, &pem).await.unwrap();
+        probe("127.0.0.1".parse().unwrap(), imap, smtp, &pem)
+            .await
+            .unwrap();
         imap_task.await.unwrap();
         smtp_task.await.unwrap();
         // An IMAP-only service must not be healthy.
         let (imap, imap_task) = server(acceptor.clone(), true).await;
-        assert!(probe(imap, smtp, &pem).await.is_err());
+        assert!(probe("127.0.0.1".parse().unwrap(), imap, smtp, &pem)
+            .await
+            .is_err());
         imap_task.await.unwrap();
         // An SMTP-only service must not be healthy either.
         let (smtp, smtp_task) = server(acceptor, false).await;
-        assert!(probe(imap, smtp, &pem).await.is_err());
+        assert!(probe("127.0.0.1".parse().unwrap(), imap, smtp, &pem)
+            .await
+            .is_err());
         smtp_task.abort();
+    }
+    use tutabridge_core::{
+        mail::ParsedMessage,
+        tuta::{FolderInfo, MailBackend},
+    };
+    use tutasdk::{
+        entities::generated::tutanota::{Mail, MailDetails, MailSetEntry, TutanotaFile},
+        IdTupleGenerated,
+    };
+    struct NoopBackend;
+    #[async_trait::async_trait]
+    impl MailBackend for NoopBackend {
+        async fn load_mail_ids_for_folder(
+            &self,
+            _f: &FolderInfo,
+            _l: usize,
+        ) -> Result<Vec<Mail>, String> {
+            unimplemented!()
+        }
+        async fn load_mail(&self, _l: &str, _e: &str) -> Result<Option<Mail>, String> {
+            unimplemented!()
+        }
+        async fn decrypt_inline_mail(&self, _j: &str) -> Result<Option<Mail>, String> {
+            unimplemented!()
+        }
+        async fn decrypt_inline_mail_set_entry(
+            &self,
+            _j: &str,
+        ) -> Result<Option<MailSetEntry>, String> {
+            unimplemented!()
+        }
+        async fn decrypt_inline_mail_details_blob(
+            &self,
+            _j: &str,
+        ) -> Result<Option<MailDetails>, String> {
+            unimplemented!()
+        }
+        async fn load_mail_details(&self, _m: &Mail) -> Result<Option<MailDetails>, String> {
+            unimplemented!()
+        }
+        async fn load_attachments(
+            &self,
+            _m: &Mail,
+        ) -> Result<Vec<(TutanotaFile, Vec<u8>)>, tutabridge_tuta::mail::AttachmentError> {
+            unimplemented!()
+        }
+        async fn list_folders(&self) -> Result<Vec<FolderInfo>, String> {
+            unimplemented!()
+        }
+        async fn set_unread_status(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _u: bool,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn trash_mails(&self, _ids: Vec<IdTupleGenerated>) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn delete_mails(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _folder: &FolderInfo,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn move_mails(
+            &self,
+            _ids: Vec<IdTupleGenerated>,
+            _t: &FolderInfo,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn send_mail(&self, _m: &ParsedMessage) -> Result<(), String> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn health_uses_real_servers_pinned_certificate_and_configured_address() {
+        use tutabridge_core::{imap, smtp, store::LocalStore, sync::MailStore};
+        let external = std::env::var_os("TUTABRIDGE_PUBLIC_HEALTH_FIXTURE").is_some();
+        let address: std::net::IpAddr = if external { "127.0.0.2" } else { "::1" }.parse().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "tutabridge-health-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let local = Arc::new(
+            LocalStore::open(
+                &root.join("db"),
+                &root.join("mails"),
+                crypto_primitives::key::GenericAesKey::from_bytes(&[7; 32]).unwrap(),
+            )
+            .unwrap(),
+        );
+        let (acceptor, pem) = tls(); // SAN deliberately excludes localhost.
+        let imap_listener = tokio::net::TcpListener::bind((address, 0)).await.unwrap();
+        let smtp_listener = tokio::net::TcpListener::bind((address, 0)).await.unwrap();
+        let imap_port = imap_listener.local_addr().unwrap().port();
+        let smtp_port = smtp_listener.local_addr().unwrap().port();
+        let backend = Arc::new(NoopBackend);
+        let imap_task = tokio::spawn(imap::serve_listener(
+            imap_listener,
+            MailStore::new(),
+            backend.clone(),
+            local,
+            acceptor.clone(),
+            Some("unusable-test-hash".into()),
+        ));
+        let smtp_task = tokio::spawn(smtp::serve_listener(
+            smtp_listener,
+            backend,
+            acceptor,
+            Some("unusable-test-hash".into()),
+        ));
+        let wrong_pem = tls().1;
+        assert!(probe(address, imap_port, smtp_port, &wrong_pem)
+            .await
+            .is_err());
+        probe(address, imap_port, smtp_port, &pem).await.unwrap();
+        if external {
+            let (_, receiver) = watch::channel(Status {
+                state: State::Starting,
+                ports: Some((imap_port, smtp_port)),
+                certificate: Some(pem.clone()),
+                address: Some(address),
+                password: None,
+            });
+            let _server = StatusServer::start(receiver).unwrap();
+            println!("public-health-fixture-ready");
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
+            // The smoke harness removes only the SMTP server to test one failed port.
+            let marker = runtime_dir().join("stop-smtp");
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            smtp_task.abort();
+            let _ = smtp_task.await;
+            println!("public-health-fixture-smtp-stopped");
+            std::io::stdout().flush().unwrap();
+            std::future::pending::<()>().await;
+        } else {
+            smtp_task.abort();
+            let _ = smtp_task.await;
+        }
+        assert!(probe(address, imap_port, smtp_port, &pem).await.is_err());
+        imap_task.abort();
+        let _ = imap_task.await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

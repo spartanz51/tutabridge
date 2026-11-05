@@ -28,7 +28,7 @@ FROM debian:bookworm-slim AS runtime
 # libdbus is still linked by the Linux keyring backend, although this image
 # explicitly selects pass. No desktop session or Secret Service is needed.
 RUN apt-get update && apt-get install --no-install-recommends -y \
-    ca-certificates pass gnupg libdbus-1-3 util-linux tini \
+    ca-certificates pass gnupg git libdbus-1-3 util-linux tini \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin tutabridge \
     && install -d -m 0700 -o 10001 -g 10001 /data

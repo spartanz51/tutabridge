@@ -16,22 +16,20 @@ use tokio::sync::Semaphore;
 
 /// Peer protocol failures are expected on public TLS ports. Keep internal
 /// TLS/provider errors visible rather than lowering every handshake failure.
-pub(crate) fn expected_tls_disconnect(error: &std::io::Error) -> bool {
+pub(crate) fn tls_failure_level(error: &std::io::Error) -> log::Level {
+    use tokio_rustls::rustls::Error;
     if is_benign_disconnect(error) {
-        return true;
+        return log::Level::Debug;
     }
-    if error.kind() != std::io::ErrorKind::InvalidData {
-        return false;
+    match error.get_ref().and_then(|e| e.downcast_ref::<Error>()) {
+        Some(
+            Error::InvalidMessage(_)
+            | Error::InappropriateMessage { .. }
+            | Error::InappropriateHandshakeMessage { .. },
+        ) => log::Level::Debug,
+        Some(Error::AlertReceived(_) | Error::PeerIncompatible(_)) => log::Level::Warn,
+        _ => log::Level::Error,
     }
-    !error
-        .get_ref()
-        .and_then(|inner| inner.downcast_ref::<tokio_rustls::rustls::Error>())
-        .is_some_and(|inner| {
-            matches!(
-                inner,
-                tokio_rustls::rustls::Error::General(_) | tokio_rustls::rustls::Error::Other(_)
-            )
-        })
 }
 
 /// Max concurrent client connections per server. Bounds file descriptors and
@@ -184,6 +182,43 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn tls_alerts_and_internal_errors_are_not_silenced() {
+        use std::io::{Error, ErrorKind};
+        use tokio_rustls::rustls::{self, AlertDescription, InvalidMessage};
+        for (error, expected) in [
+            (Error::from(ErrorKind::UnexpectedEof), log::Level::Debug),
+            (Error::from(ErrorKind::ConnectionReset), log::Level::Debug),
+            (
+                Error::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::InvalidMessage(InvalidMessage::MessageTooShort),
+                ),
+                log::Level::Debug,
+            ),
+            (
+                Error::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::AlertReceived(AlertDescription::UnknownCA),
+                ),
+                log::Level::Warn,
+            ),
+            (
+                Error::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::General("provider failure".into()),
+                ),
+                log::Level::Error,
+            ),
+            (
+                Error::new(ErrorKind::InvalidData, "unknown invalid data"),
+                log::Level::Error,
+            ),
+        ] {
+            assert_eq!(tls_failure_level(&error), expected);
+        }
+    }
 
     #[test]
     fn captured_records_are_scoped_to_the_thread_that_logged_them() {

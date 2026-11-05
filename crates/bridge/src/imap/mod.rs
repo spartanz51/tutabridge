@@ -61,7 +61,10 @@ pub async fn serve_listener(
                 match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
                 {
                     Ok(Ok(tls_stream)) => {
-                        debug!("IMAP session {session_id}: opened ({addr})");
+                        log::log!(
+                            connection_level(),
+                            "IMAP session {session_id}: opened ({addr})"
+                        );
                         if let Err(e) = handle_connection(
                             tls_stream,
                             session_id,
@@ -82,11 +85,10 @@ pub async fn serve_listener(
                         }
                     }
                     Ok(Err(e)) => {
-                        if crate::net::expected_tls_disconnect(&e) {
-                            debug!("IMAP session {session_id}: peer TLS handshake failed ({addr}): {e}");
-                        } else {
-                            error!("IMAP session {session_id}: TLS failure ({addr}): {e}");
-                        }
+                        log::log!(
+                            crate::net::tls_failure_level(&e),
+                            "IMAP session {session_id}: TLS failure ({addr}): {e}"
+                        );
                     }
                     Err(_) => debug!("IMAP session {session_id}: TLS handshake timed out ({addr})"),
                 }
@@ -245,7 +247,10 @@ where
         writer.flush().await?;
 
         if session.is_logout() {
-            debug!("IMAP session {session_id}: ended, client sent LOGOUT");
+            log::log!(
+                connection_level(),
+                "IMAP session {session_id}: ended, client sent LOGOUT"
+            );
             break;
         }
     }
@@ -736,5 +741,14 @@ mod tests {
             !resp.contains('+'),
             "a rejected folder must not get a continuation"
         );
+    }
+}
+
+// Container health probes open unauthenticated sessions every thirty seconds.
+fn connection_level() -> log::Level {
+    if std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1") {
+        log::Level::Debug
+    } else {
+        log::Level::Info
     }
 }

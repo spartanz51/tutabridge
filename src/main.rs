@@ -12,6 +12,12 @@ use tutabridge_core::{
 };
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if service::container() {
+        unsafe {
+            libc::umask(0o077);
+        }
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -68,6 +74,7 @@ async fn run() -> anyhow::Result<()> {
             #[cfg(unix)]
             {
                 let _lock = service::Lock::inherited()?;
+                service::prepare_report();
                 let init = matches!(command, Command::ContainerInit);
                 let result = container_worker(init).await;
                 if let Err(state) = result {
@@ -148,7 +155,7 @@ async fn container_worker(init: bool) -> Result<(), service::State> {
     if init {
         return initialize().await.map_err(|error| {
             log::error!("Initialization failed: {error}");
-            State::Storage
+            State::Initialization
         });
     }
     let cfg = config::load_config()
@@ -224,7 +231,10 @@ async fn initialize() -> anyhow::Result<()> {
     login_session(&cfg, LoginMode::Initialize).await?;
     config::ensure_bridge_password(&mut cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
     tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("{e}"))?;
-    config::save_config(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    #[cfg(unix)]
+    if service::container() {
+        config::save_config(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
     info!("Session saved. Start the service with `tutabridge run --non-interactive`.");
     info!("Use `tutabridge password` to display the local mail-client password.");
     Ok(())

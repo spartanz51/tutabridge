@@ -27,12 +27,7 @@ if name == "flock":
     except BlockingIOError:
         sys.exit(1)
 elif name in ("gpg", "gpgconf", "pass"):
-    try:
-        os.fstat(9)
-    except OSError:
-        pass
-    else:
-        sys.exit("GPG setup inherited the volume lock")
+    # Descriptor inheritance is exercised through the real supervisor in test_docker_smoke.py.
     if name == "gpg":
         if "--list-secret-keys" in args:
             if (root / "keys").exists():
