@@ -308,6 +308,15 @@ where
     Ok(())
 }
 
+// Container health probes open unauthenticated sessions every thirty seconds.
+fn connection_level() -> log::Level {
+    if std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1") {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,14 +750,5 @@ mod tests {
             !resp.contains('+'),
             "a rejected folder must not get a continuation"
         );
-    }
-}
-
-// Container health probes open unauthenticated sessions every thirty seconds.
-fn connection_level() -> log::Level {
-    if std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1") {
-        log::Level::Debug
-    } else {
-        log::Level::Info
     }
 }

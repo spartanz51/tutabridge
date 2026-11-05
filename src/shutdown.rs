@@ -28,6 +28,22 @@ where
     controlled(operation, false).await
 }
 
+#[cfg(unix)]
+fn optional_signal(
+    kind: tokio::signal::unix::SignalKind,
+) -> std::io::Result<Option<tokio::signal::unix::Signal>> {
+    // nohup and callers may deliberately ignore HUP/QUIT. Preserve that
+    // inherited disposition rather than silently restoring termination.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(kind.as_raw_value(), std::ptr::null(), &mut action) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if action.sa_sigaction == libc::SIG_IGN {
+        return Ok(None);
+    }
+    tokio::signal::unix::signal(kind).map(Some)
+}
+
 async fn controlled<F, Fut>(operation: F, cancel: bool) -> anyhow::Result<()>
 where
     F: FnOnce(watch::Receiver<bool>) -> Fut,
@@ -40,17 +56,13 @@ where
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     #[cfg(unix)]
     let mut hangup = if !cancel {
-        Some(tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::hangup(),
-        )?)
+        optional_signal(tokio::signal::unix::SignalKind::hangup())?
     } else {
         None
     };
     #[cfg(unix)]
     let mut quit = if !cancel {
-        Some(tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::quit(),
-        )?)
+        optional_signal(tokio::signal::unix::SignalKind::quit())?
     } else {
         None
     };

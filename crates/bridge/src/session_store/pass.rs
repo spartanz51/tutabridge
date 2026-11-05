@@ -105,7 +105,18 @@ impl PassStore {
     }
 
     pub(super) fn write_preserving(&self, secret: &str) -> Result<(), String> {
-        self.write_preserving_with(secret, Self::write)
+        self.write_preserving_with(secret, |pending, value| {
+            pending.write(value)?;
+            // A recipient may have a public key but no usable private key.
+            // Never replace a readable session with ciphertext we cannot read.
+            let verified = pending
+                .read()
+                .map_err(|_| "Encrypted session could not be decrypted for verification")?;
+            if verified.as_deref() != Some(value.as_bytes()) {
+                return Err("Encrypted session failed read-back verification".into());
+            }
+            Ok(())
+        })
     }
 
     fn write_preserving_with(
@@ -124,7 +135,7 @@ impl PassStore {
         let directory = self.directory()?;
         let relative = Path::new(&self.entry).parent().unwrap();
         let parent = directory.join(relative);
-        std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+        create_durable_directories(&parent).map_err(|e| e.to_string())?;
         // Interrupted encryption leaves only our narrowly named ciphertext
         // staging files. No recursive sweep of user-owned pass entries.
         for item in std::fs::read_dir(&parent).map_err(|e| e.to_string())? {
@@ -136,9 +147,13 @@ impl PassStore {
                 if hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
                     let kind = item.file_type().map_err(|e| e.to_string())?;
                     if kind.is_file() {
-                        std::fs::remove_file(item.path()).map_err(|e| e.to_string())?;
+                        if std::fs::remove_file(item.path()).is_err() {
+                            log::warn!("Cannot remove an interrupted encrypted session; continuing with a new staging directory");
+                        }
                     } else if kind.is_dir() {
-                        std::fs::remove_dir_all(item.path()).map_err(|e| e.to_string())?;
+                        if std::fs::remove_dir_all(item.path()).is_err() {
+                            log::warn!("Cannot remove an interrupted encrypted session; continuing with a new staging directory");
+                        }
                     }
                 }
             }
@@ -199,47 +214,69 @@ impl PassStore {
         result
     }
 
+    fn git_command(&self, parent: &Path) -> Result<Command, String> {
+        // Match pass's Git discovery boundary and environment isolation. A
+        // non-Git store inside a dotfiles repository must never commit there.
+        let root = self
+            .directory()?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let ceiling = root.parent().ok_or("Password store has no parent")?;
+        let ceiling = std::env::join_paths([ceiling])
+            .map_err(|_| "Cannot represent the password-store Git boundary")?;
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(parent)
+            .env("GIT_CEILING_DIRECTORIES", ceiling)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(Stdio::null());
+        Ok(command)
+    }
+
     fn commit_saved_entry(&self, target: &Path) {
         let parent = target.parent().unwrap();
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .arg("-C")
-                .arg(parent)
-                .args(args)
-                .stdin(Stdio::null())
+        let result = (|| -> Result<(), String> {
+            if !self
+                .git_command(parent)?
+                .args(["rev-parse", "--is-inside-work-tree"])
                 .output()
-        };
-        if !git(&["rev-parse", "--is-inside-work-tree"]).is_ok_and(|o| o.status.success()) {
-            return;
-        }
-        // Commit only this entry, preserving other staged user changes.
-        let filename = target.file_name().unwrap();
-        let signed = git(&["config", "--bool", "--get", "pass.signcommits"])
-            .is_ok_and(|o| o.stdout == b"true\n");
-        let added = Command::new("git")
-            .arg("-C")
-            .arg(parent)
-            .args(["add", "--"])
-            .arg(filename)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let mut commit = Command::new("git");
-        commit
-            .arg("-C")
-            .arg(parent)
-            .args(["commit", "--only", "-m", "Update TutaBridge session"]);
-        if signed {
-            commit.arg("-S");
-        }
-        commit
-            .arg("--")
-            .arg(filename)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if !added.is_ok_and(|s| s.success()) || !commit.status().is_ok_and(|s| s.success()) {
+                .is_ok_and(|o| o.status.success())
+            {
+                return Ok(());
+            }
+            // Commit only this entry, preserving other staged user changes.
+            let filename = target.file_name().unwrap();
+            let signed = self
+                .git_command(parent)?
+                .args(["config", "--bool", "--get", "pass.signcommits"])
+                .output()
+                .is_ok_and(|o| o.stdout == b"true\n");
+            let added = self
+                .git_command(parent)?
+                .args(["add", "--"])
+                .arg(filename)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let mut commit = self.git_command(parent)?;
+            commit.args(["commit", "--only", "-m", "Update TutaBridge session"]);
+            if signed {
+                commit.arg("-S");
+            }
+            commit
+                .arg("--")
+                .arg(filename)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if !added.is_ok_and(|s| s.success()) || !commit.status().is_ok_and(|s| s.success()) {
+                return Err("Git update failed".into());
+            }
+            Ok(())
+        })();
+        if result.is_err() {
             log::warn!(
                 "Session saved, but pass Git history update failed; inspect the password store"
             );
@@ -263,6 +300,34 @@ impl PassStore {
             Err(format!("pass rm exited with {status}"))
         }
     }
+}
+
+fn create_durable_directories(path: &Path) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    while !current.is_dir() && !current.as_os_str().is_empty() {
+        missing.push(current);
+        current = current
+            .parent()
+            .ok_or_else(|| std::io::Error::other("Missing store parent"))?;
+    }
+    for directory in missing.into_iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(e) => return Err(e),
+        }
+        #[cfg(unix)]
+        {
+            std::fs::File::open(directory)?.sync_all()?;
+            let parent = directory
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 fn store_directory(explicit: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
@@ -356,6 +421,66 @@ mod preservation_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn unversioned_store_does_not_commit_in_parent_repository() {
+        let root =
+            std::env::temp_dir().join(format!("pass-git-boundary-{:016x}", rand::random::<u64>()));
+        let directory = root.join("store");
+        std::fs::create_dir_all(&directory).unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap()
+            .success());
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\ntouch hook-ran\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let store = PassStore {
+            entry: "nested/session".into(),
+            directory: Some(directory.clone()),
+        };
+        std::fs::write(directory.join(".gpg-id"), "fixture").unwrap();
+        store
+            .write_preserving_with("fixture", |pending, _| {
+                std::fs::write(pending.directory()?.join("session.gpg"), "ciphertext")
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let command = store.git_command(&directory).unwrap();
+        let env: std::collections::HashMap<_, _> = command.get_envs().collect();
+        for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            assert_eq!(env[std::ffi::OsStr::new(name)], None);
+        }
+        assert_eq!(
+            env[std::ffi::OsStr::new("GIT_CEILING_DIRECTORIES")],
+            Some(root.canonicalize().unwrap().as_os_str())
+        );
+        assert!(!root.join("hook-ran").exists());
+        assert!(!Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--verify", "HEAD"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires an isolated process with real pass/GPG and disposable GNUPGHOME"]
     fn real_pass_atomic_roundtrip_and_git_history() {
         let root = PathBuf::from(
@@ -392,6 +517,17 @@ mod preservation_tests {
             .is_err());
         assert_eq!(std::fs::read(&target).unwrap(), original);
         std::fs::write(directory.join(".gpg-id"), recipient).unwrap();
+        let nested_recipient = target.parent().unwrap().join(".gpg-id");
+        std::fs::copy(root.join("public-only-recipient"), &nested_recipient).unwrap();
+        let failure = store
+            .write_preserving("unreadable replacement")
+            .unwrap_err();
+        assert!(
+            failure == "Encrypted session could not be decrypted for verification",
+            "encryption must succeed before read-back rejects the public-only recipient"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        std::fs::remove_file(nested_recipient).unwrap();
         // Simulate SIGKILL leftovers and an unrelated staged user change.
         std::fs::write(
             target

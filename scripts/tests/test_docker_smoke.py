@@ -55,10 +55,10 @@ class DockerSmokeTests(unittest.TestCase):
     def shell(self, code, **kwargs):
         return self.run_image('-ec', code, entrypoint='/bin/bash', **kwargs)
 
-    def start(self, options=()):
+    def start(self, options=(), args=()):
         name = self.id + '-service-' + uuid.uuid4().hex[:8]
         self.containers.append(name)
-        self.docker('run', '-d', '--name', name, *self.network, '-v', self.volume + ':/data', *options, IMAGE)
+        self.docker('run', '-d', '--name', name, *self.network, '-v', self.volume + ':/data', *options, IMAGE, *args)
         return name
 
     def wait_for(self, name, text, timeout=20):
@@ -125,7 +125,7 @@ class DockerSmokeTests(unittest.TestCase):
         health = self.docker('exec', name, 'tutabridge', 'health', check=False)
         self.assertEqual(health.returncode, 1)
         self.assertIn('Waiting for configuration', health.stderr)
-        self.shell('test ! -e /data/config && test ! -e /data/gnupg; flock -n /data/.lock true')
+        self.shell('test ! -e /data/config && test ! -e /data/gnupg; flock -w 3 /data/.lock true')
         start = time.monotonic()
         self.docker('stop', '--time', '8', name)
         self.assertLess(time.monotonic()-start, 2)
@@ -151,24 +151,42 @@ class DockerSmokeTests(unittest.TestCase):
         for name in names: self.wait_for(name, 'Waiting for configuration')
         self.initialize(names[0]); self.configure()
         for name in names: self.wait_for(name, 'Waiting for a saved session', 15)
-        self.shell('flock -n /data/.lock true')
+        self.shell('flock -w 3 /data/.lock true')
 
-    def test_init_waits_for_short_lock_ownership(self):
+    def test_init_waits_for_observed_lock_ownership(self):
         name = self.id+'-short-owner'; self.containers.append(name)
         self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
-                    'exec 9>/data/.lock; flock 9; echo locked; sleep 1')
+                    'exec 9>/data/.lock; flock 9; echo locked; while [ ! -f /tmp/release ]; do sleep .01; done; exec 9>&-; sleep 60')
         self.wait_for(name,'locked')
-        self.initialize() # Must retry and reach the prompt, not report occupied.
+        process = subprocess.Popen([DOCKER,'exec','-i',name,'tutabridge','init'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            # Wait for an actual failed flock attempt, not just process startup.
+            import select
+            observed=b''; deadline=time.monotonic()+3
+            while b'Waiting briefly for volume lock before initialization' not in observed:
+                self.assertLess(time.monotonic(),deadline,'init never observed the held lock')
+                self.assertIsNone(process.poll(),'init exited instead of waiting')
+                if select.select([process.stderr],[],[],.05)[0]:
+                    observed+=os.read(process.stderr.fileno(),8192)
+            self.docker('exec',name,'bash','-ec','test ! -e /data/config && test ! -e /data/gnupg')
+            self.docker('exec',name,'touch','/tmp/release')
+            _,stderr=process.communicate('\n',timeout=15)
+            self.assertNotEqual(process.returncode,0)
+            self.assertIn('Email address is required',stderr)
+        finally:
+            if process.poll() is None: process.terminate(); process.communicate(timeout=3)
 
-    def test_init_signals_reap_children_and_return_failure(self):
+    def test_init_signals_return_failure_and_release_lock(self):
         for sig in ('HUP','QUIT','TERM'):
             with self.subTest(signal=sig):
                 name=self.id+'-init-'+sig.lower(); self.containers.append(name)
                 self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
-                            'mkfifo /tmp/input; exec 3<>/tmp/input; tutabridge init < /tmp/input & echo $! >/tmp/owner; wait $!; echo $? >/tmp/result; sleep 60')
+                            'set -m; mkfifo /tmp/input; exec 3<>/tmp/input; tutabridge init < /tmp/input & echo $! >/tmp/owner; wait $!; echo $? >/tmp/result; sleep 60')
                 deadline=time.monotonic()+15
                 while self.docker('exec',name,'bash','-c', 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = tutabridge ] && [ "$(cat "$p/wchan" 2>/dev/null)" = pipe_read ] && exit 0; done; exit 1',check=False).returncode:
                     self.assertLess(time.monotonic(),deadline,'init did not block on its input pipe');time.sleep(.05)
+                # Job control prevents Bash from imposing SIG_IGN on background QUIT.
+                self.docker('exec',name,'bash','-ec','ignored=$(awk \'/^SigIgn:/ {print $2}\' /proc/$(cat /tmp/owner)/status); test $((16#$ignored & 4)) -eq 0')
                 self.docker('exec',name,'bash','-c','kill -'+sig+' "$(cat /tmp/owner)"')
                 deadline=time.monotonic()+7
                 while self.docker('exec',name,'test','-f','/tmp/result',check=False).returncode:
@@ -203,7 +221,7 @@ class DockerSmokeTests(unittest.TestCase):
         self.docker('run','-d','--name',name,'--network','none','-v',self.volume+':/data','--entrypoint','bash',IMAGE,'-c',
                     'cp /usr/local/bin/tutabridge /tmp/bridge; exec 9>/data/.lock; flock 9; /tmp/bridge run --wait 9>&- & echo $! >/tmp/owner; sleep 1; chmod 600 /tmp/bridge; exec 9>&-; wait $!; echo stopped; sleep 60')
         self.wait_for(name,'Cannot launch worker',15)
-        self.docker('exec',name,'bash','-ec','kill -0 "$(cat /tmp/owner)"; flock -n /data/.lock true')
+        self.docker('exec',name,'bash','-ec','kill -0 "$(cat /tmp/owner)"; flock -w 3 /data/.lock true')
         self.docker('exec',name,'bash','-ec','kill -TERM "$(cat /tmp/owner)"')
         self.wait_for(name,'stopped',3)
 
@@ -264,27 +282,36 @@ class DockerSmokeTests(unittest.TestCase):
         while self.docker('exec',name,'test','-f','/tmp/result',check=False).returncode:
             self.assertLess(time.monotonic()-start,7);time.sleep(.05)
         self.assertEqual(self.docker('exec',name,'cat','/tmp/result').stdout.strip(),'0')
-        self.docker('exec',name,'bash','-ec','! kill -0 "$(cat /data/blocked-pid)" 2>/dev/null; flock -n /data/.lock true')
+        self.docker('exec',name,'bash','-ec','! kill -0 "$(cat /data/blocked-pid)" 2>/dev/null; flock -w 3 /data/.lock true')
 
-    def test_replacement_gpg_agent_never_inherits_volume_lock(self):
-        name=self.start();self.wait_for(name,'Waiting for configuration');self.initialize(name)
-        self.configure();self.insert('fixture-invalid-json');self.wait_for(name,'Session storage unavailable')
-        # Stop all agents in this namespace; the next worker's pass read must
-        # launch its own agent while holding the inherited volume lock.
+    def test_supervisor_reaps_replacement_gpg_agent_without_inherited_lock(self):
+        # The product supervisor is PID 1 here: tini and Bash cannot hide a
+        # missing reap_agents call by collecting its abandoned daemons for it.
+        name=self.start(options=('--entrypoint','/usr/local/bin/tutabridge'), args=('run','--wait'))
+        self.wait_for(name,'Waiting for configuration'); self.initialize(name)
+        self.configure(); self.insert('fixture-invalid-json'); self.wait_for(name,'Session storage unavailable')
         self.docker('exec',name,'gpgconf','--kill','gpg-agent')
         time.sleep(12)
-        self.docker('exec',name,'bash','-ec','''found=0
+        self.docker('exec',name,'bash','-ec','''test "$(cat /proc/1/comm)" = tutabridge
+            : > /tmp/agent-pids
             for process in /proc/[0-9]*; do
                 [ "$(cat "$process/comm" 2>/dev/null || true)" = gpg-agent ] || continue
                 [ "$(awk '{print $3}' "$process/stat")" != Z ] || exit 1
-                found=1
+                [ "$(awk '/^PPid:/ {print $2}' "$process/status")" = 1 ] || exit 1
+                echo "${process##*/}" >> /tmp/agent-pids
                 for fd in "$process"/fd/*; do
                     [ "$(readlink "$fd" 2>/dev/null || true)" != /data/.lock ] || exit 1
                 done
             done
-            test "$found" = 1
-            flock -n /data/.lock true
+            test -s /tmp/agent-pids
+            flock -w 3 /data/.lock true
         ''')
+        self.docker('exec',name,'gpgconf','--kill','gpg-agent')
+        deadline=time.monotonic()+4
+        while self.docker('exec',name,'bash','-ec',
+                'while read -r pid; do test ! -d "/proc/$pid" || exit 1; done < /tmp/agent-pids',check=False).returncode:
+            self.assertLess(time.monotonic(),deadline,'supervisor left a dead GPG agent unreaped')
+            time.sleep(.1)
 
     @contextlib.contextmanager
     def server(self, status):

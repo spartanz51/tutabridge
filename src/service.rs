@@ -42,7 +42,7 @@ impl State {
             Self::Network => "Tuta temporarily unavailable; retrying with backoff",
             Self::Failed => "Service failed; inspect startup diagnostics",
             Self::Stopping => "Stopping",
-            Self::Initialization => "Initialization failed or cancelled; existing saved entry preserved",
+            Self::Initialization => "Initialization failed or cancelled; inspect diagnostics and saved session state",
         }
     }
     fn from_code(code: i32) -> Self {
@@ -344,6 +344,29 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for PinnedCertific
     }
 }
 
+async fn connect_health(address: std::net::IpAddr, port: u16) -> io::Result<tokio::net::TcpStream> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    match address {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            // Some dual-stack listeners have IPv4 loopback but no ::1 route.
+            // Only unspecified IPv6 permits fallback; explicit binds stay exact.
+            if let Ok(Ok(tcp)) = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)),
+            )
+            .await
+            {
+                return Ok(tcp);
+            }
+            tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await
+        }
+        ip => tokio::net::TcpStream::connect((ip, port)).await,
+    }
+}
+
 async fn probe(address: std::net::IpAddr, imap: u16, smtp: u16, pem: &str) -> anyhow::Result<()> {
     use rustls::pki_types::{pem::PemObject, CertificateDer};
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -355,11 +378,6 @@ async fn probe(address: std::net::IpAddr, imap: u16, smtp: u16, pem: &str) -> an
             .with_custom_certificate_verifier(Arc::new(PinnedCertificate(certificate)))
             .with_no_client_auth(),
     ));
-    let address = match address {
-        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
-        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
-        ip => ip,
-    };
     async fn line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> anyhow::Result<String> {
         let mut value = String::new();
         let mut limited = r.take(4097);
@@ -369,7 +387,7 @@ async fn probe(address: std::net::IpAddr, imap: u16, smtp: u16, pem: &str) -> an
         }
         Ok(value)
     }
-    let tcp = tokio::net::TcpStream::connect((address, imap))
+    let tcp = connect_health(address, imap)
         .await
         .context("IMAP unavailable")?;
     let mut connection = BufReader::new(
@@ -400,7 +418,7 @@ async fn probe(address: std::net::IpAddr, imap: u16, smtp: u16, pem: &str) -> an
         bail!("IMAP LOGOUT failed");
     }
     let _ = connection.get_mut().shutdown().await;
-    let tcp = tokio::net::TcpStream::connect((address, smtp))
+    let tcp = connect_health(address, smtp)
         .await
         .context("SMTP unavailable")?;
     let mut connection = BufReader::new(
@@ -530,6 +548,9 @@ async fn terminate_group(
 fn reap_agents(keep: Option<i32>) {
     // Reap adopted daemons without stealing the leader from Tokio or releasing
     // its PID reservation. This also runs while the bridge is serving.
+    // Invariant: the supervisor has exactly one direct child tracked by Tokio
+    // (keep). Every other waitable child is an adopted worker descendant. None
+    // is passed only before spawn or after that direct child has been reaped.
     #[cfg(target_os = "linux")]
     loop {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -610,10 +631,25 @@ async fn worker(
     stop: &mut watch::Receiver<bool>,
     status: &watch::Sender<Status>,
 ) -> anyhow::Result<Option<(i32, String)>> {
-    #[cfg(target_os = "linux")]
-    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
-        return Err(io::Error::last_os_error().into());
-    }
+    let prepared = (|| -> io::Result<_> {
+        #[cfg(target_os = "linux")]
+        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let executable = std::env::current_exe()?;
+        let (diagnostics, report_socket) = std::os::unix::net::UnixDatagram::pair()?;
+        diagnostics.set_nonblocking(true)?;
+        Ok((executable, diagnostics, report_socket))
+    })();
+    let (executable, diagnostics, report_socket) = match prepared {
+        Ok(value) => value,
+        Err(e) => {
+            return Ok(Some((
+                State::Failed as i32,
+                format!("Cannot prepare worker ({:?}); retrying", e.kind()),
+            )))
+        }
+    };
     let tty = if init {
         OpenOptions::new()
             .read(true)
@@ -637,11 +673,9 @@ async fn worker(
     } else {
         None
     });
-    let (diagnostics, report_socket) = std::os::unix::net::UnixDatagram::pair()?;
-    diagnostics.set_nonblocking(true)?;
     let report_descriptor = report_socket.as_raw_fd();
     let descriptor = lock.0.as_raw_fd();
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    let mut command = std::process::Command::new(executable);
     command.arg(if init {
         "__container-init"
     } else {
@@ -694,7 +728,7 @@ async fn worker(
         }
     };
     let result = terminate_group(&mut child, pid).await?;
-    if stopped {
+    if stopped && !(init && result.success()) {
         return Ok(None);
     }
     let mut buffer = [0; 2048];
@@ -716,11 +750,27 @@ async fn acquire_for_init(
     init: bool,
     stop: &mut watch::Receiver<bool>,
 ) -> io::Result<Option<Lock>> {
+    acquire_for_init_at(&data_dir().join(".lock"), init, stop).await
+}
+
+async fn acquire_for_init_at(
+    path: &Path,
+    init: bool,
+    stop: &mut watch::Receiver<bool>,
+) -> io::Result<Option<Lock>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut reported = false;
     loop {
-        let result = Lock::acquire()?;
+        if *stop.borrow() {
+            return Ok(None);
+        }
+        let result = Lock::at(path)?;
         if result.is_some() || !init || tokio::time::Instant::now() >= deadline || *stop.borrow() {
             return Ok(result);
+        }
+        if !reported {
+            log::info!("Waiting briefly for volume lock before initialization");
+            reported = true;
         }
         tokio::select! {
             _=stop.wait_for(|stopping| *stopping)=>return Ok(None),
@@ -806,9 +856,7 @@ pub async fn supervise(
             logged = std::time::Instant::now();
         }
         state = result;
-        let delay = if result == State::Failed {
-            300
-        } else if result == State::Network {
+        let delay = if matches!(result, State::Failed | State::Network) {
             let delay = backoff;
             backoff = (backoff * 2).min(300);
             delay
@@ -1197,3 +1245,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

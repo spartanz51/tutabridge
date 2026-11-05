@@ -28,12 +28,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check entrypoint and unit tests
         run: |
-          shellcheck docker/entrypoint.sh docker/bootstrap.sh
+          shellcheck docker/entrypoint.sh docker/bootstrap.sh docker/tests/run-real-pass.sh
           python3 -m unittest discover -s scripts/tests -p 'test_docker_entrypoint.py' -v
           docker compose config --quiet
       - name: Build the CLI image
         run: docker build --tag tutabridge:test .
+      - name: Build Linux test fixtures from the same source
+        run: docker build --target test-binaries --output "type=local,dest=$RUNNER_TEMP/docker-test-binaries" .
+      - name: Assert Linux subreaping and process-group cleanup
+        run: |
+          docker run --rm --network none --entrypoint /tmp/test-service \
+            --mount "type=bind,src=$RUNNER_TEMP/docker-test-binaries/test-service,dst=/tmp/test-service,readonly" \
+            tutabridge:test service::lifecycle_tests --nocapture
+      - name: Check atomic persistence with real pass, GPG and Git
+        run: |
+          docker run --rm --network none --entrypoint bash \
+            --mount "type=bind,src=$RUNNER_TEMP/docker-test-binaries/test-core,dst=/tmp/test-core,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/docker/tests/run-real-pass.sh,dst=/tmp/run-real-pass.sh,readonly" \
+            tutabridge:test /tmp/run-real-pass.sh
       - name: Exercise pass, GPG and container lifecycle
         env:
           TUTABRIDGE_DOCKER_IMAGE: tutabridge:test
+          TUTABRIDGE_HEALTH_TEST_BINARY: ${{ runner.temp }}/docker-test-binaries/test-service
         run: python3 -m unittest discover -s scripts/tests -p 'test_docker_smoke.py' -v

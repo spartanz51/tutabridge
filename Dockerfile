@@ -24,6 +24,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --locked --release --jobs "${CARGO_BUILD_JOBS}" -p tutabridge \
     && cp target/release/tutabridge /build/tutabridge
 
+# Test-only stage, never included in the runtime image.
+FROM builder AS test-builder
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,id=tutabridge-target-${TARGETARCH},target=/build/target,sharing=locked \
+    cargo test --locked --release --no-run --jobs "${CARGO_BUILD_JOBS}" -p tutabridge-core --lib --message-format=json > /tmp/core.json \
+    && cp "$(sed -n 's/.*"executable":"\([^" ]*\)".*/\1/p' /tmp/core.json)" /build/test-core \
+    && cargo test --locked --release --no-run --jobs "${CARGO_BUILD_JOBS}" -p tutabridge --bin tutabridge --message-format=json > /tmp/service.json \
+    && cp "$(sed -n 's/.*"executable":"\([^" ]*\)".*/\1/p' /tmp/service.json)" /build/test-service
+FROM scratch AS test-binaries
+COPY --from=test-builder /build/test-core /test-core
+COPY --from=test-builder /build/test-service /test-service
+
 FROM debian:bookworm-slim AS runtime
 # libdbus is still linked by the Linux keyring backend, although this image
 # explicitly selects pass. No desktop session or Secret Service is needed.
