@@ -537,7 +537,16 @@ class PublicationRecovery(unittest.TestCase):
         with patch.object(assets, 'verify_signature'):
             self.data = assets.manifest(self.directory, self.args.version, 'public-key')
         (self.directory / 'latest.json').write_text(json.dumps(self.data))
-        (self.directory / 'SHA256SUMS').write_text('fixture checksums')
+        self.checksums()
+
+    def checksums(self):
+        (self.directory / 'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in sorted(self.directory.iterdir()) if p.name not in ('SHA256SUMS','docker-release.json')))
+
+    def test_changed_signed_bytes_are_rejected_before_any_api(self):
+        (self.directory / 'tutabridge-linux-x86_64').write_bytes(b'changed')
+        with patch.object(assets, 'api') as api:
+            with self.assertRaisesRegex(ValueError, 'checksum'): assets.publish(self.args)
+            api.assert_not_called()
 
     def test_published_release_is_immutable(self):
         with patch.object(assets, 'verify_signature'), patch.object(assets, 'release_state', return_value=({'draft':False}, True)), patch.object(assets, 'run') as run, patch.object(assets, 'api') as api:
@@ -601,11 +610,14 @@ class PublicationRecovery(unittest.TestCase):
         (self.directory/'docker-release.json').write_text(json.dumps(record))
         docker=Mock()
         docker.validate_record.return_value=record
-        docker.durable_record.return_value=record
+        docker.RECORD='docker-release.json'
+        docker.durable_bytes.return_value=(self.directory/'docker-release.json').read_bytes()
         docker.registries.return_value=[object(),object()]
         calls=[]
         def run(*args,**kwargs):
             if args[:3]==('gh','api','--paginate'): return '[[]]'
+            if args[:3]==('gh','release','upload'):
+                self.assertNotIn(str(self.directory/'docker-release.json'),args)
             if args[:3]==('gh','release','download'):
                 destination=Path(args[args.index('--dir')+1])
                 for item in self.directory.iterdir(): shutil.copy2(item,destination/item.name)
@@ -615,6 +627,7 @@ class PublicationRecovery(unittest.TestCase):
             return {'id':42,'assets':[dict(name=p.name,size=p.stat().st_size) for p in self.directory.iterdir()]}
         for outcomes in ([False],[True,True,False]):
             with self.subTest(outcomes=outcomes), patch.object(assets,'load_docker',return_value=docker), patch.object(assets,'verify_signature'), patch.object(assets,'release_state',return_value=({'draft':True,'id':42},True)), patch.object(assets,'run',side_effect=run), patch.object(assets,'api',side_effect=api):
+                self.checksums()
                 docker.inspect_record.side_effect=outcomes
                 with self.assertRaisesRegex(ValueError,'Docker'): assets.publish(self.args)
                 self.assertNotIn('PATCH',calls)

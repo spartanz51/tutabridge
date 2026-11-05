@@ -151,7 +151,7 @@ class Publisher(unittest.TestCase):
 
     def test_missing_original_artifacts_never_trigger_a_rebuild(self):
         self.readers[0].version = self.readers[1].version = False
-        self.args.layout = str(self.root/'missing')
+        self.args.archives = str(self.root/'missing')
         with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=RuntimeError('artifact expired')) as call:
             with self.assertRaises(RuntimeError): d.transport(self.args)
         self.assertEqual(call.call_args.args[0][:4], ['gh', 'run', 'download', '12'])
@@ -177,7 +177,7 @@ class Publisher(unittest.TestCase):
         assets.api.return_value = {'tag_name': 'v'+VERSION}
         def copy(args, **kwargs):
             self.readers[0 if args[-1].startswith(d.REGISTRIES[0]) else 1].latest = True
-        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d, 'durable_record', return_value=self.record), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=copy):
+        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d, 'durable_record', return_value=self.record), patch.object(d, 'durable_bytes', return_value=Path(self.args.record).read_bytes()), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=copy):
             self.assertTrue(d.promotion_pending({'tag_name':'v'+VERSION}, assets))
             d.latest(self.args)
             self.assertFalse(d.promotion_pending({'tag_name':'v'+VERSION}, assets))
@@ -185,7 +185,7 @@ class Publisher(unittest.TestCase):
     def test_existing_durable_record_cannot_be_replaced(self):
         assets = Mock()
         assets.release_state.return_value = ({'draft':True}, True)
-        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d, 'durable_record', return_value=dict(self.record, source='c'*40)):
+        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d, 'durable_bytes', return_value=d.encoded(dict(self.record, source='c'*40))):
             with self.assertRaisesRegex(ValueError, 'canonical record'): d.attach_record(self.args)
             assets.ensure_draft.assert_not_called()
 
@@ -198,9 +198,8 @@ class Publisher(unittest.TestCase):
 
     def test_recovery_revalidates_config_blob_before_any_copy(self):
         self.readers[0].version = self.readers[1].version = False
-        layout = Path(self.args.layout)
-        manifest = d.json_blob(layout, self.record['images'][0])
-        d.blob(layout, manifest['config']).write_bytes(b'corrupted')
+        with (self.root/'amd64/image.tar').open('ab') as stream:
+            stream.write(b'corrupted transport')
         with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run') as run:
             with self.assertRaises(ValueError): d.transport(self.args)
             run.assert_not_called()
@@ -209,20 +208,20 @@ class Publisher(unittest.TestCase):
         assets=Mock()
         self.args.publish=True
         output=self.root/'output'
-        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)), patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets):
+        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)), patch.object(d, 'require_enabled'), patch.object(d, 'enabled', return_value=True), patch.object(d, 'load_script', return_value=assets):
             for release,record,mode in [(None,None,'build'),({'draft':True},self.record,'resume'),({'draft':False},self.record,'repair')]:
-                assets.release_state.return_value=(release,True)
-                with patch.object(d,'durable_record',return_value=record): d.preflight(self.args)
+                assets.release_state.return_value=(release,release is not None)
+                with patch.object(d,'durable_bytes',return_value=d.encoded(record)+b'\n' if record else None): d.preflight(self.args)
                 self.assertTrue(output.read_text().endswith('mode='+mode+'\n'))
             assets.release_state.return_value=({'draft':False},True)
-            with patch.object(d,'durable_record',return_value=None):
+            with patch.object(d,'durable_bytes',return_value=None):
                 with self.assertRaisesRegex(ValueError,'predates Docker'): d.preflight(self.args)
 
     def test_only_404_means_missing(self):
         reader = d.Registry(d.REGISTRIES[0])
         for status in (401, 403, 429, 500, 404):
             error = urllib.error.HTTPError('https://ghcr.io', status, 'fixture', {}, None)
-            with patch.object(d.urllib.request, 'urlopen', side_effect=error):
+            with patch.object(d.urllib.request, 'urlopen', side_effect=error), patch.object(d.time, 'sleep'):
                 if status == 404:
                     self.assertIsNone(reader.manifest(VERSION))
                 else:
@@ -234,6 +233,90 @@ class Publisher(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'authentication endpoint'):
                 d.Registry(d.REGISTRIES[0], ('fixture','not-a-real-token')).manifest(VERSION)
         self.assertEqual(request.call_count, 1)
+
+
+    def test_assembly_discards_unreferenced_blobs(self):
+        raw=b'unreferenced blob'
+        path='blobs/sha256/'+d.digest(raw)[7:]
+        with tarfile.open(self.root/'amd64/image.tar','a') as stream:
+            item=tarfile.TarInfo(path);item.size=len(raw);stream.addfile(item,io.BytesIO(raw))
+        self.args.layout=self.root/'clean-layout'
+        d.assemble(self.args)
+        self.assertFalse((self.args.layout/path).exists())
+
+    def test_record_artifact_cannot_install_scripts_or_shadow_imports(self):
+        root = self.root/'download'; root.mkdir()
+        record = root/d.RECORD; record.write_bytes(Path(self.args.record).read_bytes())
+        expected = d.sha256_file(record)
+        d.single_file(record, expected)
+        for name in ('scripts/docker-release.py', 'scripts/json.py'):
+            evil = root/name; evil.parent.mkdir(exist_ok=True); evil.write_text('raise SystemExit("attacker")')
+            with self.assertRaisesRegex(ValueError, 'exactly one'): d.single_file(record, expected)
+            evil.unlink()
+        (root/'scripts').rmdir()
+        record.write_bytes(record.read_bytes()+b' ')
+        with self.assertRaisesRegex(ValueError, 'trusted job output'): d.single_file(record, expected)
+
+    def test_tested_archive_digest_is_required_before_assembly(self):
+        self.args.sha_amd64 = '0'*64
+        self.args.layout = self.root/'new-layout'
+        with self.assertRaisesRegex(ValueError, 'trusted job output'): d.assemble(self.args)
+
+    def test_layout_selector_is_validated_and_transport_uses_digest(self):
+        layout = Path(self.args.layout)
+        (layout/'index.json').write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError, 'Layout index'): d.validate_layout(layout, self.record)
+        self.readers[0].version = self.readers[1].version = False
+        sources=[]
+        def copy(argv, **kwargs):
+            sources.append(argv[3])
+            self.readers[0 if argv[-1].startswith(d.REGISTRIES[0]) else 1].version=True
+        with patch.object(d,'require_enabled'), patch.object(d,'registries',return_value=self.readers), patch.object(d.subprocess,'run',side_effect=copy):
+            d.transport(self.args) # discards that layout and rebuilds from archived bytes
+        self.assertTrue(all(src.endswith('@'+self.record['index']['digest']) for src in sources))
+
+    def test_new_record_is_not_reserved_before_revalidating_archives(self):
+        assets=Mock(); assets.release_state.return_value=(None,False)
+        for reader in self.readers: reader.version=False
+        (self.root/'amd64/image.tar').write_bytes(b'changed')
+        with patch.dict(os.environ,GITHUB_RUN_ID='12',GITHUB_RUN_ATTEMPT='1'), patch.object(d,'require_enabled'), patch.object(d,'load_script',return_value=assets), patch.object(d,'registries',return_value=self.readers):
+            with self.assertRaisesRegex(ValueError,'trusted job output'): d.attach_record(self.args)
+        assets.ensure_draft.assert_not_called(); assets.run.assert_not_called()
+
+    def test_durable_comparison_preserves_exact_bytes(self):
+        assets=Mock(); assets.release_state.return_value=({'draft':True},True)
+        alternate=json.dumps(self.record, indent=2).encode()
+        with patch.object(d,'require_enabled'), patch.object(d,'load_script',return_value=assets), patch.object(d,'durable_bytes',return_value=alternate):
+            with self.assertRaisesRegex(ValueError,'canonical record'): d.attach_record(self.args)
+        assets.run.assert_not_called()
+
+    def test_tag_without_visible_release_fails_closed(self):
+        assets=Mock(); assets.release_state.return_value=(None,True)
+        with patch.object(d,'load_script',return_value=assets):
+            with self.assertRaisesRegex(ValueError,'visible release'): d.preflight(self.args)
+
+    def test_disabled_switch_keeps_desktop_planning_without_registries(self):
+        assets=Mock(); assets.release_state.return_value=(None,False)
+        output=self.root/'output'
+        with patch.dict(os.environ,GITHUB_OUTPUT=str(output)), patch.object(d,'enabled',return_value=False), patch.object(d,'load_script',return_value=assets), patch.object(d,'registries') as registries:
+            d.preflight(self.args)
+        self.assertEqual(output.read_text(),'mode=desktop\n'); registries.assert_not_called()
+
+    def test_missing_published_mirror_routes_to_repair(self):
+        self.readers[1].version=False
+        with patch.object(d,'durable_record',return_value=self.record), patch.object(d,'registries',return_value=self.readers):
+            self.assertTrue(d.promotion_pending({'tag_name':'v'+VERSION},Mock()))
+
+    def test_transient_reads_retry_with_retry_after_but_auth_does_not(self):
+        error=urllib.error.HTTPError('fixture',429,'fixture',{'Retry-After':'3'},None)
+        response=Mock(); response.__enter__=Mock(return_value=response); response.__exit__=Mock(); response.read.return_value=b'{}'
+        with patch.object(d.urllib.request,'urlopen',side_effect=[error,TimeoutError(),response]) as request, patch.object(d.time,'sleep') as sleep:
+            self.assertEqual(d.request_bytes('fixture'),b'{}')
+        self.assertEqual(request.call_count,3); self.assertEqual([c.args[0] for c in sleep.call_args_list],[3,2])
+        for code in (401,403):
+            with patch.object(d.urllib.request,'urlopen',side_effect=urllib.error.HTTPError('fixture',code,'fixture',{},None)) as request, patch.object(d.time,'sleep') as sleep:
+                with self.assertRaises(urllib.error.HTTPError): d.request_bytes('fixture')
+                self.assertEqual(request.call_count,1); sleep.assert_not_called()
 
 
 @unittest.skipUnless(os.environ.get('TUTABRIDGE_TEST_REGISTRY') == '1', 'opt-in disposable local registry test')
@@ -265,7 +348,7 @@ class LocalTransport(Publisher):
                 d.transport(self.args)
         finally:
             for name in names:
-                subprocess.run(['docker','rm','-f',name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['docker','rm','-f','-v',name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == '__main__':

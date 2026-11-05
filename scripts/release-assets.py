@@ -198,10 +198,31 @@ def load_docker():
     return module
 
 
+def verify_checksums(directory):
+    checksums = directory / 'SHA256SUMS'
+    if checksums.is_symlink() or not checksums.is_file():
+        raise ValueError('Invalid signed checksums file')
+    expected = {p.name for p in directory.iterdir()} - {'SHA256SUMS', 'docker-release.json'}
+    seen = set()
+    for line in (directory / 'SHA256SUMS').read_text().splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  ([^/\\]+)', line)
+        if not match or match[2] in seen or match[2] not in expected:
+            raise ValueError('Invalid signed checksums')
+        name = match[2]
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != match[1]:
+            raise ValueError('Signed asset checksum mismatch')
+        seen.add(name)
+    if seen != expected:
+        raise ValueError('Incomplete signed checksums')
+
+
 def publish(args):
     directory = Path(args.directory)
-    if getattr(args, 'require_docker', False):
-        docker = load_docker()
+    docker = load_docker()
+    require_docker = docker.enabled() or getattr(args, 'require_docker', False)
+    verify_checksums(directory)
+    if require_docker:
         docker.require_enabled()
         record = docker.validate_record(json.loads((directory / 'docker-release.json').read_bytes()), args.version, args.source)
         for reader in docker.registries():
@@ -220,14 +241,14 @@ def publish(args):
     # Publishing from an old main commit supports a new-version rollback.
     check_source(args)
     existing, tagged = release_state(args.version, args.source)
-    if getattr(args, 'require_docker', False) and (not existing or docker.durable_record(existing, SimpleNamespace(run=run, REPO=REPO)) != record):
+    if require_docker and (not existing or docker.durable_bytes(existing, SimpleNamespace(run=run, REPO=REPO)) != (directory / docker.RECORD).read_bytes()):
         raise ValueError('Durable Docker record differs from verified release artifact')
     if existing and not existing['draft']:
         print('Release already published; leaving it unchanged')
         return
     existing = ensure_draft(args.version, args.source)
     tag = 'v' + args.version
-    run('gh', 'release', 'upload', tag, *[str(p) for p in sorted(directory.iterdir())], '--clobber', '--repo', REPO)
+    run('gh', 'release', 'upload', tag, *[str(p) for p in sorted(directory.iterdir()) if p.name != docker.RECORD], '--clobber', '--repo', REPO)
     uploaded = api(f"releases/{existing['id']}")
     names = {p.name: p.stat().st_size for p in directory.iterdir()}
     remote = {asset['name']: asset['size'] for asset in uploaded['assets']}
@@ -241,7 +262,7 @@ def publish(args):
                 raise ValueError('Uploaded asset differs from signed output')
     # Upload/read-back can take minutes. Recheck source/tag and both image
     # references immediately before making the GitHub release public.
-    if getattr(args, 'require_docker', False):
+    if require_docker:
         check_source(args)
         release_state(args.version, args.source)
         for reader in docker.registries():
@@ -259,7 +280,7 @@ if __name__ == '__main__':
     parser.add_argument('--platform')
     parser.add_argument('--pubkey')
     parser.add_argument('--source')
-    parser.add_argument('--require-docker', action='store_true', default=True)
+    parser.add_argument('--require-docker', action='store_true')
     args = parser.parse_args()
     app_version(args.version)
     globals()[args.command.replace('-', '_')](args)
