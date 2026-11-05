@@ -2,6 +2,8 @@
 import contextlib
 import importlib.util
 import io
+import http.client
+import ssl
 import json
 import os
 from pathlib import Path
@@ -112,8 +114,7 @@ class Publisher(unittest.TestCase):
         with self.assertRaises(ValueError): d.blob(Path(self.args.layout), child)
 
     def test_disabled_switch_prevents_any_network_or_write(self):
-        self.assertFalse(d.enabled())
-        with patch.object(d, 'registries') as readers, patch.object(d.subprocess, 'run') as call:
+        with patch.object(d, 'enabled', return_value=False), patch.object(d, 'registries') as readers, patch.object(d.subprocess, 'run') as call:
             for operation in (d.attach_record, d.transport, d.latest):
                 with self.assertRaisesRegex(ValueError, 'disabled'): operation(self.args)
             readers.assert_not_called()
@@ -198,10 +199,21 @@ class Publisher(unittest.TestCase):
 
     def test_recovery_revalidates_config_blob_before_any_copy(self):
         self.readers[0].version = self.readers[1].version = False
-        with (self.root/'amd64/image.tar').open('ab') as stream:
-            stream.write(b'corrupted transport')
+        path = self.root/'amd64/image.tar'
+        with tarfile.open(path) as stream:
+            entries = {item.name: stream.extractfile(item).read() for item in stream if item.isfile()}
+        child = json.loads(entries['index.json'])['manifests'][0]
+        config = json.loads(entries['blobs/sha256/'+child['digest'][7:]])['config']
+        name = 'blobs/sha256/'+config['digest'][7:]
+        entries[name] = entries[name].replace(b'linux', b'linuz')  # same size, wrong config hash
+        with tarfile.open(path, 'w') as stream:
+            for name, raw in entries.items():
+                item=tarfile.TarInfo(name); item.size=len(raw); stream.addfile(item,io.BytesIO(raw))
+        # Bind the altered archive, so this test reaches the inner blob check.
+        self.record['archives']['amd64'] = d.sha256_file(path)
+        Path(self.args.record).write_bytes(d.encoded(self.record)+b'\n')
         with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run') as run:
-            with self.assertRaises(ValueError): d.transport(self.args)
+            with self.assertRaisesRegex(ValueError, 'OCI blob digest mismatch'): d.transport(self.args)
             run.assert_not_called()
 
     def test_preflight_selects_build_resume_and_repair_from_durable_record(self):
@@ -290,17 +302,41 @@ class Publisher(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'canonical record'): d.attach_record(self.args)
         assets.run.assert_not_called()
 
-    def test_tag_without_visible_release_fails_closed(self):
-        assets=Mock(); assets.release_state.return_value=(None,True)
-        with patch.object(d,'load_script',return_value=assets):
-            with self.assertRaisesRegex(ValueError,'visible release'): d.preflight(self.args)
-
-    def test_disabled_switch_keeps_desktop_planning_without_registries(self):
-        assets=Mock(); assets.release_state.return_value=(None,False)
+    def test_desktop_planning_accepts_unreserved_versions_and_rejects_reserved_drafts(self):
+        assets=Mock()
         output=self.root/'output'
-        with patch.dict(os.environ,GITHUB_OUTPUT=str(output)), patch.object(d,'enabled',return_value=False), patch.object(d,'load_script',return_value=assets), patch.object(d,'registries') as registries:
+        for release, tagged, reserved in (
+            (None, False, False), (None, True, False),
+            ({'draft':True,'assets':[]}, True, False),
+            ({'draft':True,'assets':[{'name':d.RECORD}]}, True, True),
+            ({'draft':False,'assets':[{'name':d.RECORD}]}, True, False),
+        ):
+            assets.release_state.return_value=(release,tagged)
+            output.unlink(missing_ok=True)
+            with self.subTest(release=release,tagged=tagged), patch.dict(os.environ,GITHUB_OUTPUT=str(output)), patch.object(d,'enabled',return_value=False), patch.object(d,'load_script',return_value=assets), patch.object(d,'registries') as registries, patch.object(d,'durable_bytes') as read:
+                if reserved:
+                    with self.assertRaisesRegex(ValueError,'Draft reserved for Docker'): d.preflight(self.args)
+                    self.assertFalse(output.exists())
+                else:
+                    d.preflight(self.args)
+                    self.assertEqual(output.read_text(),'mode=desktop\n')
+                registries.assert_not_called(); read.assert_not_called()
+                assets.check_source.assert_called_with(self.args)
+                assets.release_state.assert_called_with(VERSION,SOURCE)
+
+    def test_docker_planning_recovers_a_tag_without_a_release(self):
+        assets=Mock(); assets.release_state.return_value=(None,True)
+        output=self.root/'output'
+        with patch.dict(os.environ,GITHUB_OUTPUT=str(output)), patch.object(d,'enabled',return_value=True), patch.object(d,'require_enabled'), patch.object(d,'load_script',return_value=assets):
             d.preflight(self.args)
-        self.assertEqual(output.read_text(),'mode=desktop\n'); registries.assert_not_called()
+        self.assertEqual(output.read_text(),'mode=build\n')
+
+    def test_switch_is_strict_and_independent_of_repository_configuration(self):
+        (self.root/'docker').mkdir()
+        with patch.object(d,'ROOT',self.root):
+            for value in ({'enabled':True},{'enabled':False},{'enabled':1},{'enabled':'true'}, {'enabled':True,'extra':1},[],None):
+                (self.root/'docker/publication.json').write_text(json.dumps(value))
+                self.assertEqual(d.enabled(), value == {'enabled':True} and type(value.get('enabled')) is bool if isinstance(value,dict) else False)
 
     def test_missing_published_mirror_routes_to_repair(self):
         self.readers[1].version=False
@@ -309,7 +345,7 @@ class Publisher(unittest.TestCase):
 
     def test_transient_reads_retry_with_retry_after_but_auth_does_not(self):
         error=urllib.error.HTTPError('fixture',429,'fixture',{'Retry-After':'3'},None)
-        response=Mock(); response.__enter__=Mock(return_value=response); response.__exit__=Mock(); response.read.return_value=b'{}'
+        response=Mock(); response.__enter__=Mock(return_value=response); response.__exit__=Mock(); response.read.return_value=b'{}'; response.headers={}
         with patch.object(d.urllib.request,'urlopen',side_effect=[error,TimeoutError(),response]) as request, patch.object(d.time,'sleep') as sleep:
             self.assertEqual(d.request_bytes('fixture'),b'{}')
         self.assertEqual(request.call_count,3); self.assertEqual([c.args[0] for c in sleep.call_args_list],[3,2])
@@ -317,6 +353,26 @@ class Publisher(unittest.TestCase):
             with patch.object(d.urllib.request,'urlopen',side_effect=urllib.error.HTTPError('fixture',code,'fixture',{},None)) as request, patch.object(d.time,'sleep') as sleep:
                 with self.assertRaises(urllib.error.HTTPError): d.request_bytes('fixture')
                 self.assertEqual(request.call_count,1); sleep.assert_not_called()
+
+    def test_transport_errors_during_headers_or_body_are_retried_and_bounded(self):
+        errors = [ConnectionResetError(), http.client.RemoteDisconnected(), ssl.SSLError(), http.client.IncompleteRead(b'{', 4)]
+        for error in errors:
+            for stage in ('open', 'read'):
+                with self.subTest(error=type(error).__name__,stage=stage):
+                    response=Mock(); response.__enter__=Mock(return_value=response); response.__exit__=Mock(); response.headers={}
+                    if stage == 'read': response.read.side_effect=[error,b'{}']
+                    else: response.read.return_value=b'{}'
+                    with patch.object(d.urllib.request,'urlopen',side_effect=[error,response] if stage == 'open' else [response,response]) as request, patch.object(d.time,'sleep'):
+                        self.assertEqual(d.request_bytes('fixture'),b'{}'); self.assertEqual(request.call_count,2)
+            with patch.object(d.urllib.request,'urlopen',side_effect=error) as request, patch.object(d.time,'sleep'):
+                with self.assertRaises(type(error)): d.request_bytes('fixture')
+                self.assertEqual(request.call_count,4)
+
+    def test_truncated_content_length_is_retried_before_json_decode(self):
+        response=Mock(); response.__enter__=Mock(return_value=response); response.__exit__=Mock(); response.headers={'Content-Length':'2'}
+        response.read.side_effect=[b'{',b'{}']
+        with patch.object(d.urllib.request,'urlopen',return_value=response) as request, patch.object(d.time,'sleep'):
+            self.assertEqual(d.request_bytes('fixture'),b'{}'); self.assertEqual(request.call_count,2)
 
 
 @unittest.skipUnless(os.environ.get('TUTABRIDGE_TEST_REGISTRY') == '1', 'opt-in disposable local registry test')

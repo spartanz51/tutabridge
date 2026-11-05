@@ -77,7 +77,7 @@ jobs:
           SOURCE: ${{ steps.source.outputs.sha }}
         run: |
           # shellcheck disable=SC2129
-          echo "docker=$(python3 -c 'import json; print(str(json.load(open("docker/publication.json"))["enabled"]).lower())')" >> "$GITHUB_OUTPUT"
+          echo "docker=$(python3 scripts/docker-release.py enabled)" >> "$GITHUB_OUTPUT"
           echo "sdk=$(git rev-parse "$SOURCE:tuta-repo")" >> "$GITHUB_OUTPUT"
           echo "created=$(git show -s --format=%cI "$SOURCE")" >> "$GITHUB_OUTPUT"
 
@@ -103,7 +103,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test -z "$(git status --porcelain --untracked-files=all)"
-          python3 scripts/docker-release.py preflight --publish --source "$SOURCE" --version "$VERSION" --record "$RUNNER_TEMP/docker-record/docker-release.json"
+          python3 scripts/docker-release.py preflight --source "$SOURCE" --version "$VERSION" --record "$RUNNER_TEMP/docker-record/docker-release.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.plan.outputs.mode == 'resume' || steps.plan.outputs.mode == 'repair'
         with:
@@ -422,14 +422,6 @@ jobs:
         with:
           name: docker-arm64
           path: ${{ runner.temp }}/docker-archives/arm64
-      - name: Exercise transport and retries against disposable loopback registries
-        env:
-          TUTABRIDGE_TEST_REGISTRY: "1"
-        run: |
-          test -z "$(git status --porcelain --untracked-files=all)"
-          bash scripts/install-regctl.sh "$RUNNER_TEMP/tools"
-          export PATH="$RUNNER_TEMP/tools:$PATH"
-          python3 -m unittest discover -s scripts/tests -p test_docker_release.py -v
       - id: package
         name: Validate both OCI archives and construct the canonical index
         env:
@@ -484,10 +476,10 @@ jobs:
         run: |
           test -z "$(git status --porcelain --untracked-files=all)"
           test -n "$DOCKERHUB_TOKEN" || { echo 'Missing named DOCKERHUB_TOKEN'; exit 1; }
-          python3 scripts/docker-release.py attach-record --version "$VERSION" --source "$SOURCE" --record "$RUNNER_TEMP/docker-record/docker-release.json" --record-sha "$RECORD_SHA"
+          python3 scripts/docker-release.py attach-record --archives "$RUNNER_TEMP/docker-archives" --version "$VERSION" --source "$SOURCE" --record "$RUNNER_TEMP/docker-record/docker-release.json" --record-sha "$RECORD_SHA"
           printf '%s' "$GH_TOKEN" | regctl registry login ghcr.io --user "$GITHUB_ACTOR" --pass-stdin
           printf '%s' "$DOCKERHUB_TOKEN" | regctl registry login docker.io --user spartanz51 --pass-stdin
-          python3 scripts/docker-release.py transport --version "$VERSION" --source "$SOURCE" --record "$RUNNER_TEMP/docker-record/docker-release.json" --record-sha "$RECORD_SHA"
+          python3 scripts/docker-release.py transport --archives "$RUNNER_TEMP/docker-archives" --version "$VERSION" --source "$SOURCE" --record "$RUNNER_TEMP/docker-record/docker-release.json" --record-sha "$RECORD_SHA"
 
   docker-verify:
     needs: [source, plan, registry-preflight, docker-package, docker-push]

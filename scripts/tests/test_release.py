@@ -525,6 +525,11 @@ class Assets(unittest.TestCase):
 class PublicationRecovery(unittest.TestCase):
     def setUp(self):
         Assets.setUp(self)
+        docker = assets.load_docker()
+        switch = patch.object(docker, 'enabled', return_value=False)
+        switch.start(); self.addCleanup(switch.stop)
+        loader = patch.object(assets, 'load_docker', return_value=docker)
+        loader.start(); self.addCleanup(loader.stop)
         check = patch.object(assets, 'check_source')
         self.source_check = check.start()
         self.addCleanup(check.stop)
@@ -558,16 +563,18 @@ class PublicationRecovery(unittest.TestCase):
     def test_wrong_manifest_version_refused_before_api(self):
         self.data['version'] = '0.1.0-99'
         (self.directory / 'latest.json').write_text(json.dumps(self.data))
+        self.checksums()
         with patch.object(assets, 'verify_signature'), patch.object(assets, 'api') as api:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, 'Updater manifest'):
                 assets.publish(self.args)
             api.assert_not_called()
 
     def test_wrong_manifest_url_refused_before_api(self):
         self.data['platforms']['linux-x86_64']['url'] = 'https://other.test/file'
         (self.directory / 'latest.json').write_text(json.dumps(self.data))
+        self.checksums()
         with patch.object(assets, 'verify_signature'), patch.object(assets, 'api') as api:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, 'Updater manifest'):
                 assets.publish(self.args)
             api.assert_not_called()
 

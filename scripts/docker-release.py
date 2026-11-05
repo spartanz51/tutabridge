@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import time
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -42,7 +43,8 @@ def load_script(name):
 
 
 def enabled():
-    return json.loads((ROOT / 'docker/publication.json').read_text()) == {'enabled': True}
+    value = json.loads((ROOT / 'docker/publication.json').read_text())
+    return isinstance(value, dict) and set(value) == {'enabled'} and value['enabled'] is True
 
 
 def require_enabled():
@@ -222,8 +224,11 @@ def request_bytes(request):
                 raw = response.read(MAX_JSON + 1)
                 if len(raw) > MAX_JSON:
                     raise ValueError('Oversized registry metadata')
+                length = response.headers.get('Content-Length')
+                if length is not None and len(raw) < int(length):
+                    raise http.client.IncompleteRead(raw, int(length) - len(raw))
                 return raw
-        except (urllib.error.URLError, TimeoutError) as error:
+        except (OSError, http.client.HTTPException) as error:
             transient = not isinstance(error, urllib.error.HTTPError) or error.code == 429 or 500 <= error.code < 600
             if not transient or attempt == 3:
                 raise
@@ -356,11 +361,15 @@ def preflight(args):
     # deliberately hides drafts from contents:read installation tokens.
     assets = load_script('release-assets')
     assets.check_source(args)
-    release, tagged = assets.release_state(args.version, args.source)
-    if tagged and not release:
-        raise ValueError('Tag exists without a visible release; refusing to rebuild')
+    release, _tagged = assets.release_state(args.version, args.source)
+    # release_state already pins a pre-existing tag to source. A failed release
+    # POST after tag creation must remain recoverable, including desktop-only.
+    docker = enabled()
+    if not docker and release and release['draft'] and any(
+            asset['name'] == RECORD for asset in release.get('assets', [])):
+        raise ValueError('Draft reserved for Docker: finish it with Docker enabled or have Anthony explicitly abandon this version')
     mode = 'desktop'
-    if enabled():
+    if docker:
         require_enabled()
         raw = durable_bytes(release, assets) if release else None
         if raw is not None:
@@ -517,20 +526,24 @@ def latest(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['check-record', 'assemble', 'preflight', 'registry-preflight', 'attach-record', 'transport', 'verify', 'latest'])
-    parser.add_argument('--version', required=True)
-    parser.add_argument('--source', required=True)
+    parser.add_argument('command', choices=['enabled', 'check-record', 'assemble', 'preflight', 'registry-preflight', 'attach-record', 'transport', 'verify', 'latest'])
+    parser.add_argument('--version')
+    parser.add_argument('--source')
     parser.add_argument('--record', default=RECORD)
     parser.add_argument('--archives', default='docker-archives')
     parser.add_argument('--layout', default='docker-layout')
     parser.add_argument('--sdk')
     parser.add_argument('--run')
     parser.add_argument('--output')
-    parser.add_argument('--publish', action='store_true')
     parser.add_argument('--record-sha')
     parser.add_argument('--sha-amd64')
     parser.add_argument('--sha-arm64')
     args = parser.parse_args()
+    if args.command == 'enabled':
+        print(str(enabled()).lower())
+        return
+    if not args.version or not args.source:
+        parser.error('--version and --source are required for this command')
     globals()[args.command.replace('-', '_')](args)
 
 
