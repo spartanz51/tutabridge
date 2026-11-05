@@ -3,6 +3,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::config::{self, Config};
 use crate::event_handler;
+use crate::session_store::SessionStore;
 use crate::store::LocalStore;
 use crate::sync::{self, MailStore};
 use crate::tuta::{self, MailBackend, TwoFactorCallback};
@@ -81,6 +82,7 @@ pub struct BridgeStats {
 }
 
 pub struct BridgeHandle {
+    session_store: Option<SessionStore>,
     status: Arc<RwLock<BridgeStatus>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     log_tx: broadcast::Sender<String>,
@@ -104,6 +106,7 @@ impl BridgeHandle {
         let (log_tx, _) = broadcast::channel(256);
         let (stats_dirty_tx, _) = broadcast::channel(16);
         Self {
+            session_store: None,
             status: Arc::new(RwLock::new(BridgeStatus::Stopped)),
             shutdown_tx: None,
             log_tx,
@@ -169,6 +172,23 @@ impl BridgeHandle {
         }
     }
 
+    /// Reuse a session cache only while its account and backend still match.
+    /// Callers may clone the handle before awaiting I/O so the GUI state lock
+    /// need not be held through keyring or pinentry prompts.
+    pub fn session_store(&mut self, config: &Config) -> SessionStore {
+        if self
+            .session_store
+            .as_ref()
+            .is_none_or(|store| !store.matches_config(config))
+        {
+            self.session_store = Some(SessionStore::new(config));
+        }
+        self.session_store
+            .as_ref()
+            .expect("session store initialized")
+            .clone()
+    }
+
     pub async fn start(
         &mut self,
         config: Config,
@@ -221,11 +241,14 @@ impl BridgeHandle {
         self.emit_log(&format!("SMTP listening on 127.0.0.1:{}", config.smtp_port));
 
         self.emit_log(&format!("Authenticating as {}...", config.email));
-        let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await
-        {
-            Ok(s) => s,
-            Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
-        };
+        let session_store = self.session_store(&config);
+        let session =
+            match tuta::login_with_2fa(&config, &session_store, password.as_deref(), totp_callback)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
+            };
         self.emit_log(&format!("Logged in as {}", config.email));
 
         // Every failure from here on must go through `start_failed` too: an

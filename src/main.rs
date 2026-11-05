@@ -293,22 +293,36 @@ fn make_totp_cb() -> tuta::TwoFactorCallback {
 /// Resume the saved keychain session if possible, otherwise prompt for the
 /// Tuta password (and TOTP). Shared by the bridge-run path and `backup`.
 async fn login_session(cfg: &config::Config) -> anyhow::Result<tuta::TutaSession> {
-    match tuta::login_with_2fa(cfg, None, Some(make_totp_cb())).await {
-        Ok(s) => Ok(s),
+    let store = tutabridge_core::session_store::SessionStore::new(cfg);
+    match tuta::login_with_2fa(cfg, &store, None, Some(make_totp_cb())).await {
+        Ok(s) => return Ok(s),
+        Err(e)
+            if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
+                .is_some_and(|error| error.allows_reauthentication()) =>
+        {
+            warn!("{e}");
+        }
+        Err(e)
+            if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()
+                .is_some_and(|error| error.allows_volatile_login()) =>
+        {
+            warn!("{e}. Sign in to continue for this run without saving the session.");
+        }
         // Do not retry the store here or fall back to a Tuta password when
         // GPG/pinentry failed. Report the original diagnostic to the user.
-        Err(e) if e.is::<tuta::SessionStoreError>() => Err(anyhow::anyhow!("{e}")),
+        Err(e) if e.is::<tutabridge_core::session_store::SessionStoreError>() => {
+            return Err(anyhow::anyhow!("{e}"));
+        }
         // The saved session is still there, so it was kept on purpose: Tuta
         // refused the client or could not be reached, and a password would
         // change nothing. Only ask for one when there is no session to resume.
-        Err(e) if tuta::has_saved_session(cfg)? => Err(anyhow::anyhow!("{e}")),
-        Err(_) => {
-            let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email))?;
-            tuta::login_with_2fa(cfg, Some(&password), Some(make_totp_cb()))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
+        Err(e) if store.load().await?.is_some() => return Err(anyhow::anyhow!("{e}")),
+        Err(_) => {}
     }
+    let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email))?;
+    tuta::login_with_2fa(cfg, &store, Some(&password), Some(make_totp_cb()))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// `tutabridge backup <dir>` — export every mail of every folder to a tree of
