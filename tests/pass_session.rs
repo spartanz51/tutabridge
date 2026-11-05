@@ -224,8 +224,15 @@ fn cli_moves_a_bridge_password_from_the_config_file_into_pass() {
     // First run: the password is found in the file, moved to pass, and the
     // file is rewritten without it.
     let output = run();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "AbCdE-FgHjK-mNpQr-StUvW\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "AbCdE-FgHjK-mNpQr-StUvW\n"
+    );
     let entry = fixture
         .0
         .join("store/Tuta/Bridge/nobody@example.invalid.bridge-password.gpg");
@@ -235,13 +242,23 @@ fn cli_moves_a_bridge_password_from_the_config_file_into_pass() {
     );
     let rewritten = std::fs::read_to_string(&config_file).unwrap();
     assert!(!rewritten.contains("bridge_password"), "{rewritten}");
-    assert!(rewritten.contains("pass_path = \"Tuta/Bridge\""), "{rewritten}");
+    assert!(
+        rewritten.contains("pass_path = \"Tuta/Bridge\""),
+        "{rewritten}"
+    );
     assert_eq!(calls(&fixture.0), 1, "one `pass insert`");
 
     // Second run: read back from pass, nothing written.
     let output = run();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "AbCdE-FgHjK-mNpQr-StUvW\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "AbCdE-FgHjK-mNpQr-StUvW\n"
+    );
     assert_eq!(calls(&fixture.0), 2, "one `pass show`");
     assert!(!std::fs::read_to_string(&config_file)
         .unwrap()

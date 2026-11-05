@@ -1830,7 +1830,10 @@ mod resume_failure_tests {
 
 #[cfg(test)]
 mod forget_session_tests {
-    use super::{delete_credentials, has_saved_session, SessionStore, CREDENTIALS_CACHE};
+    use super::{
+        bridge_password_store, delete_credentials, has_saved_session, SessionStore,
+        CREDENTIALS_CACHE,
+    };
     use crate::config::Config;
 
     fn fake_credentials(email: &str) -> tutasdk::login::Credentials {
