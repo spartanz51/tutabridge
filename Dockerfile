@@ -33,16 +33,22 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin tutabridge \
     && install -d -m 0700 -o 10001 -g 10001 /data
 COPY --from=builder /build/tutabridge /usr/local/bin/tutabridge
-COPY --chmod=755 docker/entrypoint.sh /usr/local/lib/tutabridge/entrypoint.sh
+COPY --chmod=755 docker/entrypoint.sh docker/bootstrap.sh /usr/local/lib/tutabridge/
 COPY docker/config.toml docker/gpg-key-parameters /usr/local/lib/tutabridge/
 COPY LICENSE /usr/share/doc/tutabridge/LICENSE
-ENV XDG_CONFIG_HOME=/data/config \
+ENV HOME=/data \
+    TUTABRIDGE_CONTAINER=1 \
+    TUTABRIDGE_DATA_DIR=/data \
+    TUTABRIDGE_RUNTIME_DIR=/tmp/tutabridge \
+    PASSWORD_STORE_GPG_OPTS="--batch --pinentry-mode error" \
+    XDG_CONFIG_HOME=/data/config \
     XDG_CACHE_HOME=/data/cache \
     GNUPGHOME=/data/gnupg \
     PASSWORD_STORE_DIR=/data/pass
 USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 1143 1025
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["tutabridge", "health"]
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/lib/tutabridge/entrypoint.sh"]
 CMD ["run"]

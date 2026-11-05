@@ -194,6 +194,16 @@ impl SessionStore {
         self.run(move |state| state.save(credentials)).await
     }
 
+    /// Container reauthentication commits encrypted pass bytes atomically.
+    pub async fn save_preserving(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<(), SessionStoreError> {
+        let credentials = credentials.clone();
+        self.run(move |state| state.save_with_policy(credentials, true))
+            .await
+    }
+
     /// Tombstone the in-memory session even if deletion fails. A token rejected
     /// by Tuta must not be read back and retried in this process.
     pub async fn delete(&self) -> Result<(), SessionStoreError> {
@@ -368,6 +378,14 @@ impl State {
     }
 
     fn save(&mut self, credentials: Credentials) -> Result<(), SessionStoreError> {
+        self.save_with_policy(credentials, false)
+    }
+
+    fn save_with_policy(
+        &mut self,
+        credentials: Credentials,
+        preserve: bool,
+    ) -> Result<(), SessionStoreError> {
         if self.persistence == Persistence::Unreadable {
             return Err(SessionStoreError::UnreadableStore);
         }
@@ -377,13 +395,18 @@ impl State {
             return Err(SessionStoreError::VolatileSession);
         }
         self.persistence = Persistence::Writable;
-        let result = self
-            .backend
-            .write(&encoded)
-            .map_err(|message| SessionStoreError::Write {
-                backend: self.backend.name(),
-                message,
-            });
+        let write = if preserve {
+            match &mut self.backend {
+                Backend::Pass(store) => store.write_preserving(&encoded),
+                other => other.write(&encoded),
+            }
+        } else {
+            self.backend.write(&encoded)
+        };
+        let result = write.map_err(|message| SessionStoreError::Write {
+            backend: self.backend.name(),
+            message,
+        });
         self.warning = result.as_ref().err().map(|error| format!(
             "{error}. The new session is only available for this run; you may need to sign in again after restarting."
         ));

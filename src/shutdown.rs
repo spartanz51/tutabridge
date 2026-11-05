@@ -15,6 +15,24 @@ where
     F: FnOnce(watch::Receiver<bool>) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
+    controlled(operation, true).await
+}
+
+/// The subprocess supervisor performs its own bounded kill/reap sequence. Do
+/// not drop it at the same deadline: that would release the lock before reaping.
+pub async fn supervised<F, Fut>(operation: F) -> anyhow::Result<()>
+where
+    F: FnOnce(watch::Receiver<bool>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    controlled(operation, false).await
+}
+
+async fn controlled<F, Fut>(operation: F, cancel: bool) -> anyhow::Result<()>
+where
+    F: FnOnce(watch::Receiver<bool>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     // Unix registration is immediate, before polling any network operation.
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -39,6 +57,7 @@ where
             result?;
             log::info!("Shutting down...");
             let _ = sender.send(true);
+            if !cancel { return work.await; }
             match tokio::time::timeout(GRACE_PERIOD, &mut work).await {
                 Ok(result) => result,
                 Err(_) => {

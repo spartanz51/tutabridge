@@ -14,6 +14,26 @@ use log::{debug, error};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
+/// Peer protocol failures are expected on public TLS ports. Keep internal
+/// TLS/provider errors visible rather than lowering every handshake failure.
+pub(crate) fn expected_tls_disconnect(error: &std::io::Error) -> bool {
+    if is_benign_disconnect(error) {
+        return true;
+    }
+    if error.kind() != std::io::ErrorKind::InvalidData {
+        return false;
+    }
+    !error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<tokio_rustls::rustls::Error>())
+        .is_some_and(|inner| {
+            matches!(
+                inner,
+                tokio_rustls::rustls::Error::General(_) | tokio_rustls::rustls::Error::Other(_)
+            )
+        })
+}
+
 /// Max concurrent client connections per server. Bounds file descriptors and
 /// memory if a client (or a port scanner) opens connections faster than they
 /// close.

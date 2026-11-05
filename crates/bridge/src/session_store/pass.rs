@@ -104,6 +104,60 @@ impl PassStore {
         }
     }
 
+    pub(super) fn write_preserving(&self, secret: &str) -> Result<(), String> {
+        self.write_preserving_with(secret, Self::write)
+    }
+
+    fn write_preserving_with(
+        &self,
+        secret: &str,
+        write: impl FnOnce(&Self, &str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        // pass insert writes directly to its target. Encrypt into a private
+        // sibling first; a cancelled/failed GPG cannot truncate the old entry.
+        if !Path::new(&self.entry)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err("Invalid password-store entry path".into());
+        }
+        let directory = self.directory()?;
+        let relative = Path::new(&self.entry).parent().unwrap();
+        std::fs::create_dir_all(directory.join(relative)).map_err(|e| e.to_string())?;
+        let name = relative.join(format!(
+            ".tutabridge-pending-{:016x}",
+            rand::random::<u64>()
+        ));
+        let temporary = directory.join(&name).with_extension("gpg");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&temporary).map_err(|e| e.to_string())?;
+        let pending = Self {
+            entry: name.to_str().ok_or("Invalid entry encoding")?.to_owned(),
+            directory: Some(directory.to_path_buf()),
+        };
+        let result = (|| {
+            write(&pending, secret)?;
+            let file = std::fs::File::open(&temporary).map_err(|e| e.to_string())?;
+            if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+                return Err("Invalid encrypted output".into());
+            }
+            file.sync_all().map_err(|e| e.to_string())?;
+            std::fs::rename(&temporary, directory.join(format!("{}.gpg", self.entry)))
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        // SIGKILL may leave an encrypted pending file. It is never interpreted
+        // as the saved session, and contains no plaintext.
+        let _ = std::fs::remove_file(&temporary);
+        result
+    }
+
     pub(super) fn delete(&self) -> Result<(), String> {
         if !self.entry_exists()? {
             return Ok(());
@@ -168,5 +222,42 @@ mod tests {
                 Some(std::ffi::OsStr::new("captured directory"))
             )]
         );
+    }
+}
+
+#[cfg(test)]
+mod preservation_tests {
+    use super::*;
+    #[test]
+    fn partial_encryption_failure_preserves_old_bytes_and_success_replaces_them() {
+        let root = std::env::temp_dir().join(format!("pass-atomic-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let store = PassStore {
+            entry: "session".into(),
+            directory: Some(root.clone()),
+        };
+        let target = root.join("session.gpg");
+        std::fs::write(&target, b"original ciphertext").unwrap();
+        let fail = store.write_preserving_with("new secret", |pending, _| {
+            let path = root.join(format!("{}.gpg", pending.entry));
+            std::fs::write(path, b"partial ciphertext").unwrap();
+            Err("encryption failed".into())
+        });
+        assert!(fail.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original ciphertext");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        store
+            .write_preserving_with("new secret", |pending, _| {
+                std::fs::write(
+                    root.join(format!("{}.gpg", pending.entry)),
+                    b"complete ciphertext",
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete ciphertext");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
