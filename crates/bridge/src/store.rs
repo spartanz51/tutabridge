@@ -65,12 +65,18 @@ impl LocalStore {
         mails_dir: &Path,
         storage_key: GenericAesKey,
     ) -> Result<Self, StoreError> {
-        std::fs::create_dir_all(mails_dir)?;
+        // Bodies and metadata are encrypted at rest, but file names, sizes
+        // and mtimes still say how much mail there is and when it arrived,
+        // so keep the cache private to the owner. The directory is tightened
+        // on every open to heal installs created before this hardening.
+        crate::fs_private::create_dir_all_private(mails_dir)?;
+        crate::fs_private::tighten_dir(mails_dir);
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::fs_private::create_dir_all_private(parent)?;
         }
 
         let conn = Connection::open(db_path)?;
+        crate::fs_private::tighten(db_path);
 
         let hex_key = hex::encode(storage_key.as_bytes());
         conn.pragma_update(None, "key", format!("x'{hex_key}'"))?;
@@ -391,7 +397,7 @@ impl LocalStore {
 
         let final_path = self.mails_dir.join(format!("{element_id}.eml.enc"));
         let tmp_path = self.mails_dir.join(format!("{element_id}.eml.enc.tmp"));
-        std::fs::write(&tmp_path, &encrypted)?;
+        crate::fs_private::write_private(&tmp_path, &encrypted)?;
         std::fs::rename(&tmp_path, &final_path)?;
         Ok(())
     }
