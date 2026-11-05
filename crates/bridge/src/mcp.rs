@@ -464,16 +464,45 @@ fn pretty(v: &Value) -> String {
 
 /// Only localhost origins are accepted; a missing Origin (a non-browser client
 /// like Claude) is fine.
+///
+/// The host is compared whole, not by prefix: `http://localhost.example.com`
+/// is a public host that a DNS-rebinding page could be served from, and a
+/// prefix test would have waved it through.
 fn origin_ok(origin: Option<&str>) -> bool {
     match origin {
         None => true,
-        Some(o) => {
-            o.starts_with("http://127.0.0.1")
-                || o.starts_with("http://localhost")
-                || o.starts_with("https://127.0.0.1")
-                || o.starts_with("https://localhost")
-        }
+        Some(o) => origin_host(o).is_some_and(is_loopback_host),
     }
+}
+
+/// The host part of an `Origin` header value (`scheme://host[:port]`), or
+/// `None` when the value is not of that shape (`null`, a bare word, a path).
+fn origin_host(origin: &str) -> Option<&str> {
+    let rest = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))?;
+    // An Origin carries no path, but stop at one anyway rather than accept
+    // `http://localhost/@evil` style confusion.
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        // IPv6 literal: `[::1]` or `[::1]:1944`.
+        let end = bracketed.find(']')?;
+        let after = &bracketed[end + 1..];
+        if !(after.is_empty() || after.starts_with(':')) {
+            return None;
+        }
+        &authority[..end + 2]
+    } else {
+        authority.split(':').next()?
+    };
+    Some(host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
 }
 
 /// Constant-time-ish bearer check. `None` token means auth is disabled (tests).
@@ -520,7 +549,31 @@ mod tests {
         assert!(origin_ok(None));
         assert!(origin_ok(Some("http://127.0.0.1:1944")));
         assert!(origin_ok(Some("http://localhost:3000")));
+        assert!(origin_ok(Some("https://localhost")));
+        assert!(origin_ok(Some("http://LOCALHOST:3000")));
+        assert!(origin_ok(Some("http://[::1]:3000")));
         assert!(!origin_ok(Some("https://evil.example.com")));
+    }
+
+    #[test]
+    fn origin_guard_compares_the_whole_host() {
+        // A public host that merely starts with a loopback name is exactly
+        // what a DNS-rebinding page would be served from.
+        assert!(!origin_ok(Some("http://localhost.example.com")));
+        assert!(!origin_ok(Some("http://localhost.example.com:1944")));
+        assert!(!origin_ok(Some("http://127.0.0.1.example.com")));
+        assert!(!origin_ok(Some("http://127.0.0.10")));
+        assert!(!origin_ok(Some("http://localhostx")));
+        assert!(!origin_ok(Some("http://localhost@evil.example.com")));
+        assert!(!origin_ok(Some("http://[::1].example.com")));
+    }
+
+    #[test]
+    fn origin_guard_rejects_values_that_are_not_an_origin() {
+        assert!(!origin_ok(Some("null")));
+        assert!(!origin_ok(Some("localhost")));
+        assert!(!origin_ok(Some("file://localhost")));
+        assert!(!origin_ok(Some("http://")));
     }
 
     #[test]
