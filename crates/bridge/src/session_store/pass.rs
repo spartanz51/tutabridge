@@ -146,14 +146,15 @@ impl PassStore {
                 let hex = suffix.strip_suffix(".gpg").unwrap_or(suffix);
                 if hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
                     let kind = item.file_type().map_err(|e| e.to_string())?;
-                    if kind.is_file() {
-                        if std::fs::remove_file(item.path()).is_err() {
-                            log::warn!("Cannot remove an interrupted encrypted session; continuing with a new staging directory");
-                        }
+                    let removed = if kind.is_file() {
+                        std::fs::remove_file(item.path())
                     } else if kind.is_dir() {
-                        if std::fs::remove_dir_all(item.path()).is_err() {
-                            log::warn!("Cannot remove an interrupted encrypted session; continuing with a new staging directory");
-                        }
+                        std::fs::remove_dir_all(item.path())
+                    } else {
+                        Ok(())
+                    };
+                    if removed.is_err() {
+                        log::warn!("Cannot remove an interrupted encrypted session; continuing with a new staging directory");
                     }
                 }
             }
