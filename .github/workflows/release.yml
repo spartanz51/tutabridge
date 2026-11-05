@@ -30,6 +30,8 @@ on:
         type: boolean
         default: false
     secrets:
+      DOCKERHUB_TOKEN:
+        required: false
       TAURI_SIGNING_PRIVATE_KEY:
         required: false
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
@@ -48,8 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      sdk: ${{ steps.docker-preflight.outputs.sdk }}
+      created: ${{ steps.docker-preflight.outputs.created }}
+      mode: ${{ steps.docker-preflight.outputs.mode }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -58,23 +63,70 @@ jobs:
         env:
           SOURCE_REF: ${{ inputs.ref || github.sha }}
           PUBLISH: ${{ inputs.publish }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           sha=$(git rev-parse --verify --end-of-options "$SOURCE_REF^{commit}")
           if [ "$PUBLISH" = true ]; then
             python3 scripts/release-assets.py check-source --source "$sha"
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check Docker activation, identity and recovery state
+        id: docker-preflight
+        env:
+          SOURCE: ${{ steps.source.outputs.sha }}
+          VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$(git ls-tree "$SOURCE" -- Dockerfile)" || { echo 'This source predates Docker support'; exit 1; }
+          args=()
+          [ "$PUBLISH" != true ] || args+=(--publish)
+          python3 scripts/docker-release.py preflight --source "$SOURCE" --version "$VERSION" "${args[@]}"
+          echo "sdk=$(git rev-parse "$SOURCE:tuta-repo")" >> "$GITHUB_OUTPUT"
+          echo "created=$(git show -s --format=%cI "$SOURCE")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.docker-preflight.outputs.mode != 'build'
+        with:
+          overwrite: true
+          name: docker-record
+          path: docker-release.json
+          if-no-files-found: error
+
+  registry-preflight:
+    needs: source
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    environment: docker-hub
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.source.outputs.mode != 'build'
+        with:
+          name: docker-record
+      - name: Read registry state before any build or signature
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ needs.source.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 scripts/docker-release.py registry-preflight --version "$VERSION" --source "$SOURCE"
 
   manual-ci:
-    needs: source
-    if: inputs.publish && github.workflow == 'Release'
+    needs: [source, registry-preflight]
+    if: inputs.publish && github.workflow == 'Release' && needs.source.outputs.mode != 'repair'
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.source.outputs.sha }}
 
   build:
-    needs: [source, manual-ci]
-    if: always() && !cancelled() && needs.source.result == 'success' && (needs.manual-ci.result == 'success' || needs.manual-ci.result == 'skipped')
+    needs: [source, registry-preflight, manual-ci]
+    if: always() && !cancelled() && needs.source.result == 'success' && needs.source.outputs.mode != 'repair' && (needs.registry-preflight.result == 'success' || !inputs.publish) && (needs.manual-ci.result == 'success' || (!inputs.publish || github.workflow != 'Release') && needs.manual-ci.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -96,12 +148,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: automation
           persist-credentials: false
       - name: Checkout exact build source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: source
           ref: ${{ needs.source.outputs.sha }}
@@ -189,21 +241,22 @@ jobs:
           BUNDLE_PATH: ${{ matrix.bundle_path }}
           PLATFORM: ${{ runner.os }}
         run: python ../automation/scripts/release-assets.py collect --bundle "$BUNDLE_PATH" --platform "$PLATFORM"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          overwrite: true
           name: unsigned-${{ runner.os }}
           path: source/release-assets/*
           if-no-files-found: error
 
   sign:
     needs: [source, build]
-    if: always() && !cancelled() && needs.source.result == 'success' && needs.build.result == 'success'
+    if: always() && !cancelled() && !inputs.publish && needs.source.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       # A new runner: no SDK checkout, compilation, or restored build cache.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -214,7 +267,7 @@ jobs:
         run: |
           npm install --global @tauri-apps/cli@2.11.2
           sudo apt-get update && sudo apt-get install -y minisign
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: unsigned-*
           path: release-assets
@@ -226,11 +279,54 @@ jobs:
           cp "$RUNNER_TEMP/preview.key.pub" "$RUNNER_TEMP/updater.pub"
       - name: Preserve preview public key for independent verification
         if: ${{ !inputs.publish }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          overwrite: true
           name: preview-public-key
           path: ${{ runner.temp }}/updater.pub
           if-no-files-found: error
+      - name: Sign preview and validate manifest
+        if: ${{ !inputs.publish }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          TAURI_SIGNING_PRIVATE_KEY=$(cat "$RUNNER_TEMP/preview.key")
+          export TAURI_SIGNING_PRIVATE_KEY
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=''
+          python3 scripts/release-assets.py sign --version "$RELEASE_VERSION" --pubkey "$RUNNER_TEMP/updater.pub"
+      - name: Preserve complete signed release for inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          overwrite: true
+          name: signed-release
+          path: release-assets/*
+          if-no-files-found: error
+
+  sign-production:
+    environment: docker-hub
+    needs: [source, build]
+    if: always() && !cancelled() && inputs.publish && needs.source.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # A new runner: no SDK checkout, compilation, or restored build cache.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned signer and signature verifier
+        run: |
+          npm install --global @tauri-apps/cli@2.11.2
+          sudo apt-get update && sudo apt-get install -y minisign
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: unsigned-*
+          path: release-assets
+          merge-multiple: true
       - name: Read application public key
         if: inputs.publish
         env:
@@ -244,15 +340,6 @@ jobs:
           key = json.loads((root / 'app-config.json').read_text())['plugins']['updater']['pubkey']
           (root / 'updater.pub').write_text(key)
           PY
-      - name: Sign preview and validate manifest
-        if: ${{ !inputs.publish }}
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          TAURI_SIGNING_PRIVATE_KEY=$(cat "$RUNNER_TEMP/preview.key")
-          export TAURI_SIGNING_PRIVATE_KEY
-          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=''
-          python3 scripts/release-assets.py sign --version "$RELEASE_VERSION" --pubkey "$RUNNER_TEMP/updater.pub"
       - name: Sign production and validate against the app key
         if: inputs.publish
         env:
@@ -261,15 +348,240 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: python3 scripts/release-assets.py sign --version "$RELEASE_VERSION" --pubkey "$RUNNER_TEMP/updater.pub"
       - name: Preserve complete signed release for inspection
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          overwrite: true
           name: signed-release
           path: release-assets/*
           if-no-files-found: error
-      - name: Publish only after all assets and signatures pass
-        if: inputs.publish
+
+  docker-build:
+    needs: [source, registry-preflight, manual-ci]
+    if: always() && !cancelled() && needs.source.result == 'success' && needs.source.outputs.mode == 'build' && (needs.registry-preflight.result == 'success' || !inputs.publish) && (needs.manual-ci.result == 'success' || (!inputs.publish || github.workflow != 'Release') && needs.manual-ci.result == 'skipped')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: automation
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: source
+          ref: ${{ needs.source.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build and test the exact exported image without credentials
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ needs.source.outputs.sha }}
+          CREATED: ${{ needs.source.outputs.created }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          bash automation/scripts/install-regctl.sh "$RUNNER_TEMP/tools"
+          export PATH="$RUNNER_TEMP/tools:$PATH"
+          cd source
+          python3 scripts/sdk-prepare.py
+          docker buildx build --platform "linux/$ARCH" --provenance=false --sbom=false --no-cache \
+            --build-arg "TUTABRIDGE_VERSION=$VERSION" --build-arg "TUTABRIDGE_REVISION=$SOURCE" \
+            --build-arg "TUTABRIDGE_CREATED=$CREATED" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.revision=$SOURCE" \
+            --label "org.opencontainers.image.created=$CREATED" \
+            --label org.opencontainers.image.source=https://github.com/spartanz51/tutabridge \
+            --label org.opencontainers.image.licenses=GPL-3.0-or-later \
+            --output type=oci,dest=image.tar .
+          regctl image import ocidir://smoke:release image.tar
+          regctl image export ocidir://smoke:release --name tutabridge:test | docker load
+          test "$(docker run --rm tutabridge:test --version)" = "tutabridge $VERSION"
+          TUTABRIDGE_DOCKER_IMAGE=tutabridge:test python3 -m unittest discover -s scripts/tests -p test_docker_smoke.py -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          overwrite: true
+          name: docker-${{ matrix.arch }}
+          path: source/image.tar
+          compression-level: 0
+          if-no-files-found: error
+
+  docker-package:
+    needs: [source, docker-build]
+    if: always() && !cancelled() && needs.source.result == 'success' && needs.docker-build.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-amd64
+          path: docker-archives/amd64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-arm64
+          path: docker-archives/arm64
+      - name: Exercise transport and retries against disposable loopback registries
+        env:
+          TUTABRIDGE_TEST_REGISTRY: "1"
+        run: |
+          bash scripts/install-regctl.sh "$RUNNER_TEMP/tools"
+          export PATH="$RUNNER_TEMP/tools:$PATH"
+          python3 -m unittest discover -s scripts/tests -p test_docker_release.py -v
+      - name: Validate both OCI archives and construct the canonical index
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ needs.source.outputs.sha }}
+          SDK: ${{ needs.source.outputs.sdk }}
+        run: python3 scripts/docker-release.py assemble --version "$VERSION" --source "$SOURCE" --sdk "$SDK" --run "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          overwrite: true
+          name: docker-record
+          path: docker-release.json
+          if-no-files-found: error
+
+  docker-push:
+    needs: [source, build, docker-package, sign-production]
+    if: always() && !cancelled() && inputs.publish && needs.source.result == 'success' && needs.build.result == 'success' && needs.sign-production.result == 'success' && (needs.docker-package.result == 'success' || needs.source.outputs.mode == 'resume')
+    runs-on: ubuntu-24.04
+    environment: docker-hub
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-record
+      - name: Install reviewed registry client
+        run: |
+          bash scripts/install-regctl.sh "$RUNNER_TEMP/tools"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+      - name: Reserve and transport canonical image bytes (no image execution)
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ needs.source.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          test -n "$DOCKERHUB_TOKEN" || { echo 'Missing named DOCKERHUB_TOKEN'; exit 1; }
+          python3 scripts/docker-release.py attach-record --version "$VERSION" --source "$SOURCE"
+          printf '%s' "$GH_TOKEN" | regctl registry login ghcr.io --user "$GITHUB_ACTOR" --pass-stdin
+          printf '%s' "$DOCKERHUB_TOKEN" | regctl registry login docker.io --user spartanz51 --pass-stdin
+          python3 scripts/docker-release.py transport --version "$VERSION" --source "$SOURCE"
+
+  docker-verify:
+    needs: [source, docker-push]
+    if: always() && !cancelled() && inputs.publish && needs.source.result == 'success' && (needs.docker-push.result == 'success' || needs.source.outputs.mode == 'repair')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-record
+      - name: Anonymous native verification of both registries
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ needs.source.outputs.sha }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/docker-release.py verify --version "$VERSION" --source "$SOURCE"
+          digest=$(python3 -c 'import json; print(json.load(open("docker-release.json"))["index"]["digest"])')
+          export DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker"
+          mkdir -p "$DOCKER_CONFIG"
+          for registry in ghcr.io/spartanz51/tutabridge docker.io/spartanz51/tutabridge; do
+            image="$registry@$digest"
+            docker pull --platform "linux/$ARCH" "$image"
+            test "$(docker run --rm --network none "$image" --version)" = "tutabridge $VERSION"
+          done
+          python3 scripts/docker-release.py verify --version "$VERSION" --source "$SOURCE"
+
+  publish:
+    needs: [source, sign-production, docker-verify]
+    if: always() && !cancelled() && inputs.publish && needs.source.result == 'success' && needs.sign-production.result == 'success' && needs.docker-verify.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: docker-hub
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-record
+          path: release-assets
+      - name: Validate signed assets and publish only after Docker verification
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version }}
           SOURCE: ${{ needs.source.outputs.sha }}
-        run: python3 scripts/release-assets.py publish --version "$RELEASE_VERSION" --source "$SOURCE" --pubkey "$RUNNER_TEMP/updater.pub"
+        run: |
+          sudo apt-get update && sudo apt-get install -y minisign
+          git show "$SOURCE:src-tauri/tauri.conf.json" > "$RUNNER_TEMP/app-config.json"
+          python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"]); (p/"updater.pub").write_text(json.loads((p/"app-config.json").read_text())["plugins"]["updater"]["pubkey"])'
+          python3 scripts/release-assets.py publish --require-docker --version "$VERSION" --source "$SOURCE" --pubkey "$RUNNER_TEMP/updater.pub"
+
+  docker-latest:
+    needs: [source, publish, docker-verify]
+    if: always() && !cancelled() && inputs.publish && needs.source.result == 'success' && needs.docker-verify.result == 'success' && (needs.publish.result == 'success' || needs.source.outputs.mode == 'repair')
+    runs-on: ubuntu-24.04
+    environment: docker-hub
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-record
+      - name: Install reviewed registry client
+        run: |
+          bash scripts/install-regctl.sh "$RUNNER_TEMP/tools"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+      - name: Promote current public release and verify both latest tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ needs.source.outputs.sha }}
+        run: |
+          test -n "$DOCKERHUB_TOKEN" || { echo 'Missing named DOCKERHUB_TOKEN'; exit 1; }
+          printf '%s' "$GH_TOKEN" | regctl registry login ghcr.io --user "$GITHUB_ACTOR" --pass-stdin
+          printf '%s' "$DOCKERHUB_TOKEN" | regctl registry login docker.io --user spartanz51 --pass-stdin
+          python3 scripts/docker-release.py latest --version "$VERSION" --source "$SOURCE"

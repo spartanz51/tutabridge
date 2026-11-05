@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from types import SimpleNamespace
 
 REPO = 'spartanz51/tutabridge'
 PAYLOADS = {
@@ -87,7 +88,7 @@ def require_assets(directory, signed=False):
         p = directory / name
         if p.is_symlink() or not p.is_file() or p.stat().st_size == 0:
             raise ValueError(f'Missing or invalid asset: {name}')
-    allowed = expected | ({'latest.json', 'SHA256SUMS'} if signed else set())
+    allowed = expected | ({'latest.json', 'SHA256SUMS', 'docker-release.json'} if signed else set())
     if set(p.name for p in directory.iterdir()) - allowed:
         raise ValueError('Unexpected release asset')
 
@@ -170,8 +171,47 @@ def check_source(args):
     run('git', 'merge-base', '--is-ancestor', args.source, remote[0])
 
 
+def ensure_draft(version, source):
+    existing, tagged = release_state(version, source)
+    if existing and not existing['draft']:
+        return existing
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp', f'repos/{REPO}/releases?per_page=100'))
+    current = VERSION.fullmatch(version)
+    for release in (r for page in pages for r in page if not r['draft']):
+        other = VERSION.fullmatch(release['tag_name'].removeprefix('v'))
+        if other and (tuple(map(int, other[1].split('.'))), int(other[2])) >= (tuple(map(int, current[1].split('.'))), int(current[2])):
+            raise ValueError('Refusing to publish below an existing release version')
+    tag = 'v' + version
+    if not tagged:
+        api('git/refs', 'POST', {'ref': f'refs/tags/{tag}', 'sha': source})
+    if not existing:
+        existing = api('releases', 'POST', dict(tag_name=tag, target_commitish=source,
+            name=f'TutaBridge {version}', body=f'Built and tested from `{source}`. Includes the patched official Tuta SDK pinned in this commit.', draft=True, prerelease=False, generate_release_notes=True))
+    return existing
+
+
+def load_docker():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('docker_release', Path(__file__).with_name('docker-release.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def publish(args):
     directory = Path(args.directory)
+    if getattr(args, 'require_docker', False):
+        docker = load_docker()
+        docker.require_enabled()
+        record = docker.validate_record(json.loads((directory / 'docker-release.json').read_bytes()), args.version, args.source)
+        for reader in docker.registries():
+            if not docker.inspect_record(reader, record, args.version):
+                raise ValueError('Docker verification missing before GitHub publication')
+        checksums = []
+        for item in sorted(directory.iterdir()):
+            if item.name != 'SHA256SUMS':
+                checksums.append(f'{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}')
+        (directory / 'SHA256SUMS').write_text('\n'.join(checksums) + '\n')
     pubkey = Path(args.pubkey).read_text().strip()
     expected = manifest(directory, args.version, pubkey)
     actual = json.loads((directory / 'latest.json').read_text())
@@ -180,22 +220,13 @@ def publish(args):
     # Publishing from an old main commit supports a new-version rollback.
     check_source(args)
     existing, tagged = release_state(args.version, args.source)
+    if getattr(args, 'require_docker', False) and (not existing or docker.durable_record(existing, SimpleNamespace(run=run, REPO=REPO)) != record):
+        raise ValueError('Durable Docker record differs from verified release artifact')
     if existing and not existing['draft']:
         print('Release already published; leaving it unchanged')
         return
-    # Never move the updater latest pointer backwards to an older rc.
-    pages = json.loads(run('gh', 'api', '--paginate', '--slurp', f'repos/{REPO}/releases?per_page=100'))
-    current = VERSION.fullmatch(args.version)
-    for release in (r for page in pages for r in page if not r['draft']):
-        other = VERSION.fullmatch(release['tag_name'].removeprefix('v'))
-        if other and (tuple(map(int, other[1].split('.'))), int(other[2])) >= (tuple(map(int, current[1].split('.'))), int(current[2])):
-            raise ValueError('Refusing to publish below an existing release version')
+    existing = ensure_draft(args.version, args.source)
     tag = 'v' + args.version
-    if not tagged:
-        api('git/refs', 'POST', {'ref': f'refs/tags/{tag}', 'sha': args.source})
-    if not existing:
-        existing = api('releases', 'POST', dict(tag_name=tag, target_commitish=args.source,
-            name=f'TutaBridge {args.version}', body=f'Built and tested from `{args.source}`. Includes the patched official Tuta SDK pinned in this commit.', draft=True, prerelease=False, generate_release_notes=True))
     run('gh', 'release', 'upload', tag, *[str(p) for p in sorted(directory.iterdir())], '--clobber', '--repo', REPO)
     uploaded = api(f"releases/{existing['id']}")
     names = {p.name: p.stat().st_size for p in directory.iterdir()}
@@ -208,6 +239,14 @@ def publish(args):
         for name in names:
             if hashlib.sha256((directory / name).read_bytes()).digest() != hashlib.sha256((Path(downloaded) / name).read_bytes()).digest():
                 raise ValueError('Uploaded asset differs from signed output')
+    # Upload/read-back can take minutes. Recheck source/tag and both image
+    # references immediately before making the GitHub release public.
+    if getattr(args, 'require_docker', False):
+        check_source(args)
+        release_state(args.version, args.source)
+        for reader in docker.registries():
+            if not docker.inspect_record(reader, record, args.version):
+                raise ValueError('Docker image unavailable at publication boundary')
     api(f"releases/{existing['id']}", 'PATCH', dict(draft=False, prerelease=False, make_latest='true'))
 
 
@@ -220,6 +259,7 @@ if __name__ == '__main__':
     parser.add_argument('--platform')
     parser.add_argument('--pubkey')
     parser.add_argument('--source')
+    parser.add_argument('--require-docker', action='store_true', default=True)
     args = parser.parse_args()
     app_version(args.version)
     globals()[args.command.replace('-', '_')](args)

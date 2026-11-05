@@ -330,6 +330,20 @@ class GitCandidate(unittest.TestCase):
         self.assertEqual(out.call_args.kwargs['source'], self.source)
         self.assertEqual(out.call_args.kwargs['mode'], 'resume')
 
+    def test_incomplete_docker_promotion_is_repaired_before_calendar_skip(self):
+        from unittest.mock import Mock
+        sdk.git('tag','v0.1.0-rc.14',self.source)
+        docker=Mock()
+        docker.enabled.return_value=True
+        docker.promotion_pending.return_value=True
+        args=type('Args',(),dict(scheduled=True,dry_run=False,tag=''))()
+        releases=[dict(tag_name='v0.1.0-rc.14',draft=False)]
+        with patch.object(sdk,'docker_tooling',return_value=docker), patch.object(sdk,'release_list',return_value=releases), patch.object(sdk,'scheduled_today',return_value=False) as calendar, patch.object(sdk,'outputs') as out:
+            sdk.detect(args)
+            self.assertEqual(out.call_args.kwargs['mode'],'repair')
+            self.assertEqual(out.call_args.kwargs['source'],self.source)
+            calendar.assert_not_called()
+
     def test_off_week_does_not_select_a_new_sdk(self):
         args = type('Args', (), dict(scheduled=True, dry_run=False, tag=''))()
         sdk.git('checkout', '--detach', self.base)
@@ -579,6 +593,31 @@ class PublicationRecovery(unittest.TestCase):
             assets.publish(self.args)
         self.assertEqual(calls[-1], ('releases/42','PATCH',dict(draft=False,prerelease=False,make_latest='true')))
         self.assertFalse(any(method == 'POST' for _,method,_ in calls))
+
+    def test_docker_failure_at_either_publication_boundary_keeps_draft(self):
+        from unittest.mock import Mock
+        self.args.require_docker=True
+        record={'fixture':'record'}
+        (self.directory/'docker-release.json').write_text(json.dumps(record))
+        docker=Mock()
+        docker.validate_record.return_value=record
+        docker.durable_record.return_value=record
+        docker.registries.return_value=[object(),object()]
+        calls=[]
+        def run(*args,**kwargs):
+            if args[:3]==('gh','api','--paginate'): return '[[]]'
+            if args[:3]==('gh','release','download'):
+                destination=Path(args[args.index('--dir')+1])
+                for item in self.directory.iterdir(): shutil.copy2(item,destination/item.name)
+            return ''
+        def api(path,method='GET',data=None):
+            calls.append(method)
+            return {'id':42,'assets':[dict(name=p.name,size=p.stat().st_size) for p in self.directory.iterdir()]}
+        for outcomes in ([False],[True,True,False]):
+            with self.subTest(outcomes=outcomes), patch.object(assets,'load_docker',return_value=docker), patch.object(assets,'verify_signature'), patch.object(assets,'release_state',return_value=({'draft':True,'id':42},True)), patch.object(assets,'run',side_effect=run), patch.object(assets,'api',side_effect=api):
+                docker.inspect_record.side_effect=outcomes
+                with self.assertRaisesRegex(ValueError,'Docker'): assets.publish(self.args)
+                self.assertNotIn('PATCH',calls)
 
 
 @unittest.skipUnless(shutil.which('tauri') and shutil.which('minisign'), 'real signing tools required')

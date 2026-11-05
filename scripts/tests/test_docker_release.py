@@ -1,0 +1,272 @@
+"""Offline failure/recovery tests for the actual OCI publisher. No real credentials."""
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch, Mock
+import urllib.error
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('docker_release', SCRIPTS / 'docker-release.py')
+d = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(d)
+VERSION = '0.1.0-rc.99'
+SOURCE = 'a' * 40
+
+
+def archive(path, arch, source=SOURCE, version=VERSION):
+    values = {}
+    def add(value, media):
+        raw = d.encoded(value)
+        desc = d.descriptor(raw, media)
+        values['blobs/sha256/' + desc['digest'][7:]] = raw
+        return desc
+    config = add(dict(architecture=arch, os='linux', rootfs=dict(type='layers', diff_ids=[]),
+                      config=dict(Labels={'org.opencontainers.image.revision': source,
+                          'org.opencontainers.image.version': version,
+                          'org.opencontainers.image.source': 'https://github.com/spartanz51/tutabridge'})), d.CONFIG)
+    manifest = add(dict(schemaVersion=2, mediaType=d.MANIFEST, config=config, layers=[]), d.MANIFEST)
+    values['index.json'] = d.encoded(dict(schemaVersion=2, manifests=[manifest]))
+    values['oci-layout'] = d.encoded({'imageLayoutVersion': '1.0.0'})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(path, 'w') as stream:
+        for name, raw in values.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(raw)
+            stream.addfile(member, io.BytesIO(raw))
+
+
+class FakeRegistry:
+    def __init__(self, record, version=True, latest=False):
+        self.record = record
+        self.version = version
+        self.latest = latest
+        self.wrong = False
+    def manifest(self, reference):
+        if reference in (VERSION, 'latest'):
+            if not (self.version if reference == VERSION else self.latest):
+                return None
+            raw = d.encoded(dict(schemaVersion=2, mediaType=d.INDEX, manifests=self.record['images']))
+            return ('sha256:' + 'f'*64 if self.wrong else d.digest(raw), json.loads(raw), raw)
+        for child in self.record['images']:
+            if reference == child['digest']:
+                # The metadata body is immaterial to inspect_record, but sizes and
+                # content digests come from the real fixture layout below.
+                raw = self.layout.joinpath('blobs/sha256', reference[7:]).read_bytes()
+                return d.digest(raw), json.loads(raw), raw
+        return None
+
+
+class Publisher(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for arch in d.PLATFORMS:
+            archive(self.root / arch / 'image.tar', arch)
+        self.args = SimpleNamespace(version=VERSION, source=SOURCE, sdk='b'*40, run='12/1',
+            archives=str(self.root), layout=str(self.root/'layout'), record=str(self.root/d.RECORD), output=None, publish=False)
+        d.assemble(self.args)
+        self.record = json.loads(Path(self.args.record).read_bytes())
+        self.readers = [FakeRegistry(self.record), FakeRegistry(self.record)]
+        for reader in self.readers:
+            reader.layout = Path(self.args.layout)
+
+    def test_exact_platforms_and_index_are_bound(self):
+        self.assertEqual(d.validate_record(self.record, VERSION, SOURCE), self.record)
+        self.record['images'][0]['platform']['architecture'] = 'arm64'
+        with self.assertRaises(ValueError): d.validate_record(self.record)
+
+    def test_record_rejects_extra_destination_or_new_digest(self):
+        for field, value in [('registry', 'evil.invalid/repo'), ('source', 'c'*40)]:
+            item = dict(self.record, **{field: value})
+            with self.assertRaises(ValueError): d.validate_record(item, VERSION, SOURCE)
+        self.record['index']['digest'] = 'sha256:'+'0'*64
+        with self.assertRaises(ValueError): d.validate_record(self.record)
+
+    def test_wrong_label_and_wrong_architecture_are_rejected(self):
+        for arch, source in [('arm64', SOURCE), ('amd64', 'c'*40)]:
+            target = self.root / ('test-' + arch + source[0])
+            archive(self.root/'bad.tar', arch, source)
+            d.extract(self.root/'bad.tar', target)
+            with self.assertRaises(ValueError): d.image(target, 'amd64', VERSION, SOURCE)
+
+    def test_paths_symlinks_duplicates_and_corrupt_blobs_rejected(self):
+        for index, name in enumerate(('../escape', '/escape', 'index.json')):
+            path = self.root / 'unsafe.tar'
+            with tarfile.open(path, 'w') as stream:
+                member = tarfile.TarInfo(name)
+                member.type = tarfile.SYMTYPE
+                member.linkname = '/tmp/escape'
+                stream.addfile(member)
+            with self.assertRaises(ValueError): d.extract(path, self.root / f'unsafe-{index}')
+        child = self.record['images'][0]
+        (Path(self.args.layout)/'blobs/sha256'/child['digest'][7:]).write_bytes(b'tampered')
+        with self.assertRaises(ValueError): d.blob(Path(self.args.layout), child)
+
+    def test_disabled_switch_prevents_any_network_or_write(self):
+        self.assertFalse(d.enabled())
+        with patch.object(d, 'registries') as readers, patch.object(d.subprocess, 'run') as call:
+            for operation in (d.attach_record, d.transport, d.latest):
+                with self.assertRaisesRegex(ValueError, 'disabled'): operation(self.args)
+            readers.assert_not_called()
+            call.assert_not_called()
+
+    def test_different_digest_same_source_stops_before_either_write(self):
+        self.readers[1].wrong = True
+        with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run') as copy:
+            with self.assertRaisesRegex(ValueError, 'different canonical digest'): d.transport(self.args)
+            copy.assert_not_called()
+
+    def test_partial_push_reuses_original_digest_not_local_rebuild(self):
+        self.readers[1].version = False
+        calls = []
+        def copy(args, **kwargs):
+            calls.append(args)
+            self.readers[1].version = True
+        with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=copy):
+            self.args.layout = str(self.root/'does-not-exist')
+            d.transport(self.args)
+            d.transport(self.args)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][3], d.REGISTRIES[0]+'@'+self.record['index']['digest'])
+        self.assertEqual(calls[0][4], d.REGISTRIES[1]+':'+VERSION)
+
+    def test_new_push_failure_leaves_original_available_for_retry(self):
+        self.readers[0].version = self.readers[1].version = False
+        def copy(args, **kwargs):
+            if args[-1].startswith(d.REGISTRIES[1]): raise RuntimeError('mirror offline')
+            self.readers[0].version = True
+        with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=copy):
+            with self.assertRaises(RuntimeError): d.transport(self.args)
+        self.assertTrue(self.readers[0].version)
+        self.assertFalse(self.readers[1].version)
+
+    def test_missing_original_artifacts_never_trigger_a_rebuild(self):
+        self.readers[0].version = self.readers[1].version = False
+        self.args.layout = str(self.root/'missing')
+        with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=RuntimeError('artifact expired')) as call:
+            with self.assertRaises(RuntimeError): d.transport(self.args)
+        self.assertEqual(call.call_args.args[0][:4], ['gh', 'run', 'download', '12'])
+
+    def test_verify_uses_anonymous_readers_and_checks_both(self):
+        with patch.object(d, 'registries', return_value=self.readers) as readers:
+            d.verify(self.args)
+            readers.assert_called_once_with()
+            self.readers[1].version = False
+            with self.assertRaises(ValueError): d.verify(self.args)
+
+    def test_latest_old_rerun_cannot_regress(self):
+        assets = Mock()
+        assets.release_state.return_value = ({'draft':False}, True)
+        assets.api.return_value = {'tag_name': 'v0.1.0-rc.100'}
+        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d.subprocess, 'run') as copy:
+            with self.assertRaisesRegex(ValueError, 'current public'): d.latest(self.args)
+            copy.assert_not_called()
+
+    def test_latest_partial_failure_is_detected_and_retry_repairs(self):
+        assets = Mock()
+        assets.release_state.return_value = ({'draft':False}, True)
+        assets.api.return_value = {'tag_name': 'v'+VERSION}
+        def copy(args, **kwargs):
+            self.readers[0 if args[-1].startswith(d.REGISTRIES[0]) else 1].latest = True
+        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d, 'durable_record', return_value=self.record), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run', side_effect=copy):
+            self.assertTrue(d.promotion_pending({'tag_name':'v'+VERSION}, assets))
+            d.latest(self.args)
+            self.assertFalse(d.promotion_pending({'tag_name':'v'+VERSION}, assets))
+
+    def test_existing_durable_record_cannot_be_replaced(self):
+        assets = Mock()
+        assets.release_state.return_value = ({'draft':True}, True)
+        with patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets), patch.object(d, 'durable_record', return_value=dict(self.record, source='c'*40)):
+            with self.assertRaisesRegex(ValueError, 'canonical record'): d.attach_record(self.args)
+            assets.ensure_draft.assert_not_called()
+
+    def test_registry_preflight_checks_both_without_mutation(self):
+        with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run') as run:
+            d.registry_preflight(self.args)
+            self.readers[1].wrong = True
+            with self.assertRaises(ValueError): d.registry_preflight(self.args)
+            run.assert_not_called()
+
+    def test_recovery_revalidates_config_blob_before_any_copy(self):
+        self.readers[0].version = self.readers[1].version = False
+        layout = Path(self.args.layout)
+        manifest = d.json_blob(layout, self.record['images'][0])
+        d.blob(layout, manifest['config']).write_bytes(b'corrupted')
+        with patch.object(d, 'require_enabled'), patch.object(d, 'registries', return_value=self.readers), patch.object(d.subprocess, 'run') as run:
+            with self.assertRaises(ValueError): d.transport(self.args)
+            run.assert_not_called()
+
+    def test_preflight_selects_build_resume_and_repair_from_durable_record(self):
+        assets=Mock()
+        self.args.publish=True
+        output=self.root/'output'
+        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)), patch.object(d, 'require_enabled'), patch.object(d, 'load_script', return_value=assets):
+            for release,record,mode in [(None,None,'build'),({'draft':True},self.record,'resume'),({'draft':False},self.record,'repair')]:
+                assets.release_state.return_value=(release,True)
+                with patch.object(d,'durable_record',return_value=record): d.preflight(self.args)
+                self.assertTrue(output.read_text().endswith('mode='+mode+'\n'))
+            assets.release_state.return_value=({'draft':False},True)
+            with patch.object(d,'durable_record',return_value=None):
+                with self.assertRaisesRegex(ValueError,'predates Docker'): d.preflight(self.args)
+
+    def test_only_404_means_missing(self):
+        reader = d.Registry(d.REGISTRIES[0])
+        for status in (401, 403, 429, 500, 404):
+            error = urllib.error.HTTPError('https://ghcr.io', status, 'fixture', {}, None)
+            with patch.object(d.urllib.request, 'urlopen', side_effect=error):
+                if status == 404:
+                    self.assertIsNone(reader.manifest(VERSION))
+                else:
+                    with self.assertRaises(ValueError): reader.manifest(VERSION)
+
+    def test_registry_rejects_untrusted_token_endpoint(self):
+        error = urllib.error.HTTPError('https://ghcr.io', 401, 'fixture', {'WWW-Authenticate': 'Bearer realm="https://evil.invalid/token"'}, None)
+        with patch.object(d.urllib.request, 'urlopen', side_effect=error) as request:
+            with self.assertRaisesRegex(ValueError, 'authentication endpoint'):
+                d.Registry(d.REGISTRIES[0], ('fixture','not-a-real-token')).manifest(VERSION)
+        self.assertEqual(request.call_count, 1)
+
+
+@unittest.skipUnless(os.environ.get('TUTABRIDGE_TEST_REGISTRY') == '1', 'opt-in disposable local registry test')
+class LocalTransport(Publisher):
+    # Inherit the offline checks and add a real regctl roundtrip with no secrets.
+    def test_real_copy_between_disposable_local_registries(self):
+        names = []
+        env = dict(os.environ, REGCTL_CONFIG=str(self.root/'regctl.json'))
+        def command(*args):
+            return subprocess.check_output(args, env=env, text=True).strip()
+        try:
+            references = []
+            readers = []
+            for i in range(2):
+                name = 'tutabridge-oci-test-' + self.root.name + str(i)
+                names.append(name)
+                command('docker', 'run', '-d', '--name', name, '-p', '127.0.0.1::5000', 'registry:2')
+                host = command('docker', 'port', name, '5000/tcp').strip()
+                command('regctl', 'registry', 'set', host, '--tls', 'disabled')
+                references.append(host+'/test')
+                reader = object.__new__(d.Registry)
+                reader.base, reader.repo, reader.realm, reader.token, reader.credentials = 'http://'+host, 'test', '', None, None
+                readers.append(reader)
+            # Production destinations are not configurable by artifacts. Only
+            # this test substitutes loopback endpoints at the module boundary.
+            with patch.object(d, 'require_enabled'), patch.object(d, 'REGISTRIES', tuple(references)), patch.object(d, 'registries', return_value=readers), patch.dict(os.environ, env):
+                d.transport(self.args)
+                d.verify(self.args)
+                d.transport(self.args)
+        finally:
+            for name in names:
+                subprocess.run(['docker','rm','-f',name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+if __name__ == '__main__':
+    unittest.main()
