@@ -25,4 +25,6 @@ GNUPGHOME="$TUTABRIDGE_REAL_PASS_ROOT/public-key-source" gpg --batch --generate-
 GNUPGHOME="$TUTABRIDGE_REAL_PASS_ROOT/public-key-source" gpg --batch --with-colons --list-secret-keys 2>/dev/null | awk -F: '$1=="fpr"{ print $10; exit }' > "$TUTABRIDGE_REAL_PASS_ROOT/public-only-recipient"
 GNUPGHOME="$TUTABRIDGE_REAL_PASS_ROOT/public-key-source" gpg --batch --export > "$TUTABRIDGE_REAL_PASS_ROOT/public-key"
 gpg --batch --import "$TUTABRIDGE_REAL_PASS_ROOT/public-key" >/dev/null 2>&1
+# Trust this synthetic public key so encryption succeeds; decryption must fail.
+printf '%s:6:\n' "$(cat "$TUTABRIDGE_REAL_PASS_ROOT/public-only-recipient")" | gpg --batch --import-ownertrust >/dev/null 2>&1
 /tmp/test-core --exact session_store::pass::preservation_tests::real_pass_atomic_roundtrip_and_git_history --ignored --nocapture
