@@ -28,6 +28,9 @@ axum = "0.7"
 crypto-primitives = { path = "../../sdk/generated/tuta-sdk/rust/crypto-primitives" }
 
 rand = "0.8"
+# Wipes the saved session and other secrets from memory once they are
+# dropped, so they do not linger in freed heap pages.
+zeroize = "1"
 
 thiserror = "2.0"
 base64 = "0.22"
@@ -52,6 +55,8 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# `prctl(PR_SET_DUMPABLE)`: see `util::harden_process`.
+libc = "0.2"
 
 [dev-dependencies]
 tutabridge-tuta = { path = "../tuta", features = ["testing"] }

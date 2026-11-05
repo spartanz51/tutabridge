@@ -12,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Failed to install TLS crypto provider"))?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    tutabridge_core::util::harden_process();
 
     // Subcommand dispatch. With no subcommand we run the bridge (the default
     // and overwhelmingly common case); `backup <dir>` does a one-shot export
@@ -303,7 +304,10 @@ async fn login_session(cfg: &config::Config) -> anyhow::Result<tuta::TutaSession
         // change nothing. Only ask for one when there is no session to resume.
         Err(e) if tuta::has_saved_session(cfg)? => Err(anyhow::anyhow!("{e}")),
         Err(_) => {
-            let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email))?;
+            let password = zeroize::Zeroizing::new(rpassword::prompt_password(format!(
+                "Password for {}: ",
+                cfg.email
+            ))?);
             tuta::login_with_2fa(cfg, Some(&password), Some(make_totp_cb()))
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))

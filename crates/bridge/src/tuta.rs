@@ -1284,6 +1284,7 @@ pub async fn login_with_2fa(
 const KEYRING_SERVICE: &str = "tutabridge";
 
 use std::sync::Mutex;
+use zeroize::Zeroizing;
 static CREDENTIALS_CACHE: Mutex<Option<Option<tutasdk::login::Credentials>>> = Mutex::new(None);
 
 /// What a failed resume of a saved session says about that session.
@@ -1374,13 +1375,15 @@ impl SessionStore {
         }
     }
 
-    fn read(&self) -> Result<Option<String>, SessionStoreError> {
+    /// The saved session, wiped from memory when the caller drops it.
+    fn read(&self) -> Result<Option<Zeroizing<String>>, SessionStoreError> {
         match self {
             // Retain the existing keyring fallback for installations without
             // a Secret Service provider. pass is an explicitly selected store.
             Self::Keyring { email } => Ok(keyring::Entry::new(KEYRING_SERVICE, email)
                 .and_then(|entry| entry.get_password())
-                .ok()),
+                .ok()
+                .map(Zeroizing::new)),
             Self::Pass { entry } => pass_show(entry),
         }
     }
@@ -1452,7 +1455,7 @@ fn pass_insert(entry: &str, secret: &str) -> Result<(), String> {
     }
 }
 
-fn pass_show(entry: &str) -> Result<Option<String>, SessionStoreError> {
+fn pass_show(entry: &str) -> Result<Option<Zeroizing<String>>, SessionStoreError> {
     // pass uses the same nonzero status for missing entries and GPG failures.
     // Only a confirmed missing file means that there is no saved session.
     let file = pass_entry_file(entry)
@@ -1476,9 +1479,12 @@ fn pass_show(entry: &str) -> Result<Option<String>, SessionStoreError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    String::from_utf8(out.stdout)
-        .map(Some)
-        .map_err(|_| SessionStoreError("pass returned a session that is not UTF-8".into()))
+    // Take the bytes out of the `Output` so the only copy is the one wiped
+    // on drop.
+    let stdout = Zeroizing::new(out.stdout);
+    let text = std::str::from_utf8(&stdout)
+        .map_err(|_| SessionStoreError("pass returned a session that is not UTF-8".into()))?;
+    Ok(Some(Zeroizing::new(text.to_string())))
 }
 
 fn save_credentials(cfg: &Config, creds: &tutasdk::login::Credentials) {
@@ -1496,8 +1502,9 @@ fn save_credentials(cfg: &Config, creds: &tutasdk::login::Credentials) {
         },
     });
 
+    let data = Zeroizing::new(data.to_string());
     let store = SessionStore::for_config(cfg);
-    match store.write(&data.to_string()) {
+    match store.write(&data) {
         Ok(()) => log::info!("Session saved to {}", store.describe()),
         Err(e) => log::warn!("Failed to save session to {}: {e}", store.describe()),
     }
