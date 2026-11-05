@@ -21,10 +21,29 @@ pub fn rwlock_write_recover<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     l.write().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Compare a secret a client presented against the expected one without
+/// leaking, through timing, how many leading bytes matched. `==` on strings
+/// stops at the first differing byte; `subtle` always looks at every byte
+/// (a length mismatch is a plain `false`, since the length of the bridge
+/// password is not secret).
+pub fn secret_eq(presented: &str, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    presented.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn secret_eq_matches_only_identical_secrets() {
+        assert!(secret_eq("abcde-fghjk", "abcde-fghjk"));
+        assert!(!secret_eq("abcde-fghjk", "abcde-fghjX"));
+        assert!(!secret_eq("abcde", "abcde-fghjk"), "a prefix is not a match");
+        assert!(!secret_eq("", "abcde"));
+        assert!(secret_eq("", ""));
+    }
 
     #[test]
     fn recovers_from_a_poisoned_mutex() {

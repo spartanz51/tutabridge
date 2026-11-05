@@ -130,7 +130,7 @@ impl ImapSession {
         };
 
         if let Some(ref expected) = self.password_hash {
-            if password != *expected {
+            if !crate::util::secret_eq(&password, expected) {
                 return vec![format!(
                     "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
                     tag
@@ -288,7 +288,7 @@ impl ImapSession {
     fn cmd_login(&mut self, tag: &str, args: &str) -> Vec<String> {
         if let Some(ref expected) = self.password_hash {
             let (_, password) = parse_login_args(args);
-            if password != *expected {
+            if !crate::util::secret_eq(&password, expected) {
                 return vec![format!(
                     "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
                     tag
