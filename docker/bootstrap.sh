@@ -15,6 +15,16 @@ config="$XDG_CONFIG_HOME/tutabridge/config.toml"
 
 fail() { printf 'tutabridge: %s\n' "$*" >&2; exit 12; }
 
+# Run a tool silently, replaying its output only when it fails.
+quietly() {
+    local output status=0
+    output=$("$@" 2>&1) || status=$?
+    if ((status != 0)); then
+        printf '%s\n' "$output" >&2
+        return "$status"
+    fi
+}
+
 # Only primary fingerprints; encryption subkeys must not count as extra keys.
 secret_keys() {
     gpg --batch --with-colons --list-secret-keys |
@@ -47,12 +57,14 @@ prepare_store() {
         local keys
         keys=$(secret_keys)
         if [[ -z "$keys" ]]; then
-            gpg --batch --generate-key "$assets/gpg-key-parameters"
+            # Quiet on success; show GnuPG's own output only if it fails.
+            quietly gpg --batch --quiet --generate-key "$assets/gpg-key-parameters"
             keys=$(secret_keys)
+            printf 'tutabridge: created a GPG key for this data volume\n' >&2
         fi
         [[ "$keys" =~ ^[A-F0-9]{40}$ ]] ||
             fail 'Expected exactly one private GPG key; select the intended key with pass init before retrying.'
-        pass init "$keys"
+        quietly pass init "$keys"
     fi
     verify_store
     if [[ ! -e "$config" ]]; then
