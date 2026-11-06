@@ -478,26 +478,31 @@ fn origin_ok(origin: Option<&str>) -> bool {
 /// The host part of an `Origin` header value (`scheme://host[:port]`), or
 /// `None` when the value is not of that shape (`null`, a bare word, a path).
 fn origin_host(origin: &str) -> Option<&str> {
-    let rest = origin
+    let authority = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))?;
-    // An Origin carries no path, but stop at one anyway rather than accept
-    // `http://localhost/@evil` style confusion.
-    let authority = rest.split(['/', '?', '#']).next()?;
-    if authority.is_empty() || authority.contains('@') {
+    // An Origin is only a scheme and authority, never a URL with a path,
+    // query, fragment or user information. Validate the entire value.
+    if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
         return None;
     }
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+    let (host, suffix) = if let Some(bracketed) = authority.strip_prefix('[') {
         // IPv6 literal: `[::1]` or `[::1]:1944`.
         let end = bracketed.find(']')?;
-        let after = &bracketed[end + 1..];
-        if !(after.is_empty() || after.starts_with(':')) {
+        authority.split_at(end + 2)
+    } else {
+        authority.split_at(authority.find(':').unwrap_or(authority.len()))
+    };
+    if host.is_empty() {
+        return None;
+    }
+    if !suffix.is_empty() {
+        let port = suffix.strip_prefix(':')?;
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        &authority[..end + 2]
-    } else {
-        authority.split(':').next()?
-    };
+        port.parse::<u16>().ok()?;
+    }
     Some(host)
 }
 
@@ -552,6 +557,9 @@ mod tests {
         assert!(origin_ok(Some("https://localhost")));
         assert!(origin_ok(Some("http://LOCALHOST:3000")));
         assert!(origin_ok(Some("http://[::1]:3000")));
+        assert!(origin_ok(Some("http://localhost")));
+        assert!(origin_ok(Some("http://127.0.0.1")));
+        assert!(origin_ok(Some("https://[::1]")));
         assert!(!origin_ok(Some("https://evil.example.com")));
     }
 
@@ -574,6 +582,46 @@ mod tests {
         assert!(!origin_ok(Some("localhost")));
         assert!(!origin_ok(Some("file://localhost")));
         assert!(!origin_ok(Some("http://")));
+    }
+
+    #[test]
+    fn origin_guard_rejects_url_components() {
+        for host in ["localhost", "127.0.0.1", "[::1]"] {
+            for suffix in ["/", "/chemin", "/@evil", "?x=1", "#fragment"] {
+                for port in ["", ":1944"] {
+                    let origin = format!("http://{host}{port}{suffix}");
+                    assert!(!origin_ok(Some(&origin)), "accepted {origin}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn origin_guard_validates_the_entire_port() {
+        for host in ["localhost", "127.0.0.1", "[::1]"] {
+            for port in ["0", "80", "1944", "65535"] {
+                let origin = format!("https://{host}:{port}");
+                assert!(origin_ok(Some(&origin)), "rejected {origin}");
+            }
+            for port in ["", "abc", "65536", "+80", "-1", " 80", "80 ", "80:90"] {
+                let origin = format!("http://{host}:{port}");
+                assert!(!origin_ok(Some(&origin)), "accepted {origin}");
+            }
+        }
+    }
+
+    #[test]
+    fn origin_guard_rejects_malformed_ipv6_authorities() {
+        for origin in [
+            "http://[::1",
+            "http://[::1]extra",
+            "http://[::1]]",
+            "http://[::1]1944",
+            "http://::1",
+            "http://:1944",
+        ] {
+            assert!(!origin_ok(Some(origin)), "accepted {origin}");
+        }
     }
 
     #[test]
