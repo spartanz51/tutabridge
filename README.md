@@ -17,7 +17,7 @@ encryption transparently, so your favourite desktop client just works.
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download)
 [![Built with Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-dea584?logo=rust)](#build-from-source)
 
-[**Download**](#download) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
+[**Download**](#download) · [**Docker**](#docker) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
 
 <br/>
 
@@ -90,6 +90,25 @@ The build is not code-signed, so the first launch needs one click to allow it:
 [`tutabridge-git`](https://aur.archlinux.org/packages/tutabridge-git),
 e.g. `yay -S tutabridge-desktop-bin`.
 
+### Docker
+
+For a home server or a NAS, a headless image runs the bridge as a service,
+for `linux/amd64` and `linux/arm64`, from
+[`ghcr.io/spartanz51/tutabridge`](https://github.com/spartanz51/tutabridge/pkgs/container/tutabridge)
+or [`spartanz51/tutabridge`](https://hub.docker.com/r/spartanz51/tutabridge)
+on Docker Hub:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/spartanz51/tutabridge/main/compose.yaml
+docker compose up -d
+docker compose exec tutabridge tutabridge init      # Tuta login, once
+docker compose exec tutabridge tutabridge password  # mail client password
+```
+
+The session stays encrypted on the container's volume and later starts never
+ask for credentials. The [Docker guide](docs/DOCKER.md) covers client
+settings, health, updates, backups and recovery.
+
 ---
 
 ## Updates
@@ -115,9 +134,7 @@ releases.
 
 ## Getting started
 
-For an unattended CLI deployment, see the experimental [Docker guide](docs/DOCKER.md).
-It uses the existing `pass` backend, an interactive initialization command, and
-a persistent volume; normal container starts never prompt for credentials.
+For a server or a NAS, use the [Docker image](#docker) instead.
 
 The desktop app has a tray icon (the menu bar on macOS). Closing its window
 keeps the bridge running; use **Open TutaBridge** to bring it back or
