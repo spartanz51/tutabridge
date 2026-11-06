@@ -21,6 +21,10 @@ impl LoginMode {
 pub enum Command {
     Run(LoginMode),
     Init,
+    Wait,
+    Health,
+    ServiceAttempt,
+    ContainerInit,
     Backup(String),
     Password,
     Version,
@@ -32,6 +36,10 @@ pub fn parse(args: &[String]) -> Result<Command, &'static str> {
     match args.as_slice() {
         [] | ["run"] => Ok(Command::Run(LoginMode::Interactive)),
         ["run", "--non-interactive"] => Ok(Command::Run(LoginMode::Service)),
+        ["run", "--wait"] => Ok(Command::Wait),
+        ["health"] => Ok(Command::Health),
+        ["__service-attempt"] => Ok(Command::ServiceAttempt),
+        ["__container-init"] => Ok(Command::ContainerInit),
         ["init"] => Ok(Command::Init),
         ["backup", output] if !output.is_empty() => Ok(Command::Backup((*output).to_owned())),
         ["password"] => Ok(Command::Password),

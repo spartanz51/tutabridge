@@ -24,7 +24,11 @@
 !sdk/generated/**
 !docker/
 !docker/entrypoint.sh
+!docker/bootstrap.sh
 !docker/config.toml
 !docker/gpg-key-parameters
+!docker/bin/
+!docker/bin/init
+!docker/bin/password
 !LICENSE
 !Dockerfile

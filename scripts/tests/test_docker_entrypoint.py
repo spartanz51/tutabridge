@@ -11,7 +11,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-ENTRYPOINT = ROOT / "docker/entrypoint.sh"
+ENTRYPOINT = ROOT / "docker/bootstrap.sh"
 FINGERPRINT = "A" * 40
 
 STUB = r'''
@@ -27,12 +27,7 @@ if name == "flock":
     except BlockingIOError:
         sys.exit(1)
 elif name in ("gpg", "gpgconf", "pass"):
-    try:
-        os.fstat(9)
-    except OSError:
-        pass
-    else:
-        sys.exit("GPG setup inherited the volume lock")
+    # Descriptor inheritance is exercised through the real supervisor in test_docker_smoke.py.
     if name == "gpg":
         if "--list-secret-keys" in args:
             if (root / "keys").exists():
@@ -127,7 +122,7 @@ class DockerEntrypointTests(unittest.TestCase):
         self.assertEqual(secret.read_text(), "existing encrypted session")
         self.assertEqual(len([a for a in self.calls("gpg") if "--generate-key" in a]), 1)
         self.assertEqual(self.calls("pass"), [["init", FINGERPRINT]])
-        self.assertEqual(self.calls("tutabridge"), [["init"], ["init"]])
+        self.assertEqual(self.calls("tutabridge"), [])
 
     def test_interrupted_generation_reuses_existing_key(self):
         (self.root / "keys").write_text(FINGERPRINT + "\n")
@@ -172,19 +167,13 @@ class DockerEntrypointTests(unittest.TestCase):
         self.assertEqual(recipient.read_text(), "unexpected\n")
 
     def test_run_on_empty_volume_does_not_initialize(self):
-        result = self.run_entrypoint("run")
+        result = self.run_entrypoint("check")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("run --rm tutabridge init", result.stderr)
+        self.assertEqual(result.returncode, 10)
         self.assertFalse(self.config.exists())
         self.assertFalse((self.data / "gnupg").exists())
         self.assertEqual(self.calls("pass"), [])
         self.assertEqual(self.calls("tutabridge"), [])
-
-    def test_bridge_exit_status_is_preserved(self):
-        self.initialized()
-        result = self.run_entrypoint("run", DOCKER_TEST_EXIT="23")
-        self.assertEqual(result.returncode, 23)
-        self.assertEqual(self.calls("tutabridge")[-1], ["run", "--non-interactive"])
 
     def test_missing_pass_fails_before_authentication(self):
         (self.bin / "pass").unlink()
@@ -193,38 +182,15 @@ class DockerEntrypointTests(unittest.TestCase):
         self.assertIn("pass is unavailable", result.stderr)
         self.assertEqual(self.calls("tutabridge"), [])
 
-    def test_help_and_unknown_commands_do_not_touch_volume(self):
-        self.assert_ok(self.run_entrypoint("--version"))
+    def test_launcher_defaults_to_wait_and_never_touches_volume(self):
+        for args, expected in [((), ["run", "--wait"]), (("run",), ["run", "--wait"]),
+                               (("init",), ["init"]), (("health",), ["health"]),
+                               (("run", "--non-interactive"), ["run", "--non-interactive"])]:
+            result = subprocess.run(["bash", str(ROOT / "docker/entrypoint.sh"), *args],
+                                    env=self.env, capture_output=True, text=True, timeout=5)
+            self.assert_ok(result)
+            self.assertEqual(self.calls("tutabridge")[-1], expected)
         self.assertFalse(self.data.exists())
-        result = self.run_entrypoint("typo")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(self.data.exists())
-
-    def test_lock_excludes_init_and_run_and_sigterm_releases_it(self):
-        self.initialized()
-        process = subprocess.Popen(["bash", str(ENTRYPOINT), "run"],
-                                   env=dict(self.env, DOCKER_TEST_WAIT="1"),
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        try:
-            deadline = time.monotonic() + 5
-            while not (self.root / "started").exists() and time.monotonic() < deadline:
-                if process.poll() is not None:
-                    self.fail(process.stderr.read())
-                time.sleep(0.01)
-            self.assertTrue((self.root / "started").exists())
-            for command in ("init", "run"):
-                result = self.run_entrypoint(command)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("already in use", result.stderr)
-            process.send_signal(signal.SIGTERM)
-            self.assertEqual(process.wait(timeout=5), 0)
-            self.assertEqual((self.root / "stopped").read_text(), str(signal.SIGTERM))
-            self.assert_ok(self.run_entrypoint("init"))
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
-            process.stderr.close()
 
 
 if __name__ == "__main__":
