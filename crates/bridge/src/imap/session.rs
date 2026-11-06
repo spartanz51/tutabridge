@@ -270,29 +270,35 @@ impl ImapSession {
             .unwrap_or(false)
     }
 
-    /// UID of Tuta's own Sent copy of a mail this bridge just sent, so an
-    /// APPEND to Sent can answer with `APPENDUID` (UIDPLUS) and the client can
-    /// find its copy, for example to run its after-send filters. Waits up to
-    /// `wait` for the copy to arrive through the event bus. `None` when the
-    /// message was not sent through this bridge recently, or arrives too late.
-    pub(crate) async fn sent_copy_uid(
+    /// Find Tuta's own Sent copy of a mail this bridge just sent, so an APPEND
+    /// to Sent can answer with `APPENDUID` (UIDPLUS) and the client can find
+    /// its copy, for example to run its after-send filters. Waits up to `wait`
+    /// for the copy to arrive through the event bus.
+    pub(crate) async fn sent_copy(
         &self,
         mailbox: &str,
-        message_id: &str,
+        message_id: Option<&str>,
         wait: std::time::Duration,
-    ) -> Option<u32> {
-        let element_id = self.backend.sent_mail_element_id(message_id).await?;
+    ) -> SentCopy {
+        let Some(id) = message_id else {
+            return SentCopy::Unknown;
+        };
+        let Some(element_id) = self.backend.sent_mail_element_id(id).await else {
+            return SentCopy::Unknown;
+        };
         let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
-        let sent = self.store.folder_by_imap_path(&name).await?;
+        let Some(sent) = self.store.folder_by_imap_path(&name).await else {
+            return SentCopy::Pending;
+        };
         let mut changes = self.store.subscribe();
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             if let Some(copy) = self.store.mail_in_folder(&sent.id, &element_id).await {
-                return Some(copy.uid);
+                return SentCopy::Found(copy.uid);
             }
             match tokio::time::timeout_at(deadline, changes.changed()).await {
                 Ok(Ok(())) => continue,
-                _ => return None,
+                _ => return SentCopy::Pending,
             }
         }
     }
@@ -1298,6 +1304,17 @@ fn parse_command(line: &str) -> (String, String, String) {
     let cmd = parts.get(1).unwrap_or(&"").to_string();
     let args = parts.get(2).unwrap_or(&"").to_string();
     (tag, cmd, args)
+}
+
+/// Where an APPEND to Sent stands relative to the mails this bridge sent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SentCopy {
+    /// Tuta's copy is in Sent under this UID.
+    Found(u32),
+    /// Sent through this bridge, but Tuta's copy has not arrived yet.
+    Pending,
+    /// Not sent through this bridge recently: nothing would keep it.
+    Unknown,
 }
 
 /// A parsed `APPEND` command: the tag, the target mailbox, and the size of the
@@ -2401,7 +2418,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn sent_copy_uid_waits_for_tuta_copy_of_a_mail_sent_here() {
+    async fn sent_copy_waits_for_tuta_copy_of_a_mail_sent_here() {
         let backend = Arc::new(MockBackend::new());
         backend
             .sent_ids
@@ -2429,14 +2446,18 @@ pub(crate) mod tests {
                 )
                 .await;
         });
-        let uid = session
-            .sent_copy_uid("Sent", "abc@client", std::time::Duration::from_secs(5))
+        let copy = session
+            .sent_copy(
+                "Sent",
+                Some("abc@client"),
+                std::time::Duration::from_secs(5),
+            )
             .await;
-        assert_eq!(uid, Some(7));
+        assert_eq!(copy, SentCopy::Found(7));
     }
 
     #[tokio::test]
-    async fn sent_copy_uid_is_none_for_unknown_or_late_mail() {
+    async fn sent_copy_tells_unknown_mail_from_a_late_copy() {
         let backend = Arc::new(MockBackend::new());
         backend
             .sent_ids
@@ -2450,12 +2471,16 @@ pub(crate) mod tests {
         let session = ImapSession::new(store, backend, None, None);
         let short = std::time::Duration::from_millis(50);
         assert_eq!(
-            session.sent_copy_uid("Sent", "other@client", short).await,
-            None
+            session.sent_copy("Sent", Some("other@client"), short).await,
+            SentCopy::Unknown
         );
         assert_eq!(
-            session.sent_copy_uid("Sent", "abc@client", short).await,
-            None
+            session.sent_copy("Sent", None, short).await,
+            SentCopy::Unknown
+        );
+        assert_eq!(
+            session.sent_copy("Sent", Some("abc@client"), short).await,
+            SentCopy::Pending
         );
     }
 
