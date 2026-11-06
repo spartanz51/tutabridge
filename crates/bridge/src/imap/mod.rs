@@ -261,12 +261,18 @@ where
 /// Largest APPEND message literal we will read into memory.
 const MAX_APPEND_BYTES: usize = 26_214_400;
 
+/// How long an APPEND to Sent waits for Tuta's own copy of a mail just sent
+/// through the bridge, to report its UID.
+const SENT_COPY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Handle an `APPEND`. Tuta saves sent mail server-side, so an APPEND to the
-/// Sent folder is accepted as a no-op: read and discard the literal, reply OK.
-/// That lets a mail client's "save a copy to Sent" succeed without creating a
-/// duplicate (the real copy arrives via the syncer). Other folders are not
-/// supported yet and are rejected before the literal is sent, so the client
-/// aborts the synchronizing literal and the stream stays in sync.
+/// Sent folder is accepted without storing anything: the real copy arrives via
+/// the syncer, and duplicating it would show the mail twice. When the message
+/// was sent through this bridge, the reply carries that copy's UID
+/// (`APPENDUID`, as UIDPLUS promises) so the client can find it; otherwise a
+/// plain OK. Other folders are not supported yet and are rejected before the
+/// literal is sent, so the client aborts the synchronizing literal and the
+/// stream stays in sync.
 async fn handle_append<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -293,8 +299,8 @@ where
         return Ok(());
     }
 
-    // Synchronizing literal: tell the client to send the message, then read and
-    // discard it plus the trailing CRLF (the real Sent copy comes from sync).
+    // Synchronizing literal: tell the client to send the message, then read it
+    // plus the trailing CRLF. Only its Message-ID is used.
     writer.write_all(b"+ OK\r\n").await?;
     writer.flush().await?;
     let mut buf = vec![0u8; req.literal_size];
@@ -302,7 +308,20 @@ where
     let mut tail = String::new();
     reader.read_line(&mut tail).await?;
 
-    let resp = format!("{} OK APPEND completed\r\n", req.tag);
+    let message_id = crate::mail::parser::parse_rfc2822(&String::from_utf8_lossy(&buf)).message_id;
+    let uid = match message_id {
+        Some(id) => {
+            session
+                .sent_copy_uid(&req.mailbox, &id, SENT_COPY_WAIT)
+                .await
+        }
+        None => None,
+    };
+    // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
+    let resp = match uid {
+        Some(uid) => format!("{} OK [APPENDUID 1 {uid}] APPEND completed\r\n", req.tag),
+        None => format!("{} OK APPEND completed\r\n", req.tag),
+    };
     writer.write_all(resp.as_bytes()).await?;
     writer.flush().await?;
     Ok(())

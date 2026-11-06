@@ -137,6 +137,22 @@ impl MailStore {
             .unwrap_or_default()
     }
 
+    /// The current version of one mail in one folder, without cloning the
+    /// folder. `None` when it is no longer there (moved, sent or deleted).
+    pub async fn mail_in_folder(&self, folder_id: &str, element_id: &str) -> Option<StoredMail> {
+        self.folders.read().await.get(folder_id).and_then(|mails| {
+            mails
+                .iter()
+                .find(|m| {
+                    m.mail
+                        ._id
+                        .as_ref()
+                        .is_some_and(|id| id.element_id.to_string() == element_id)
+                })
+                .cloned()
+        })
+    }
+
     /// A mail's rendered body (LRU hit, or re-read from the encrypted disk
     /// cache). `None` when the body was never fetched.
     pub async fn get_body(
@@ -875,8 +891,23 @@ pub(crate) async fn prefetch_details(
             continue;
         }
         tokio::time::sleep(INTER_REQUEST_DELAY).await;
-        let details = match retry(|| backend.load_mail_details(mail)).await {
-            Ok(details) => details,
+        // Re-read the mail before each attempt: the window is a snapshot, and
+        // a draft sent meanwhile has moved to Sent with its details replaced,
+        // so its stale draft reference would only answer Not Found.
+        let loaded = retry(|| async {
+            match store.mail_in_folder(&folder.id, &eid).await {
+                Some(current) => backend
+                    .load_mail_details(&current.mail)
+                    .await
+                    .map(|details| Some((current.mail, details))),
+                None => Ok(None),
+            }
+        })
+        .await;
+        let (mail, details) = match loaded {
+            Ok(Some(loaded)) => loaded,
+            // It left this folder; its new folder's pass renders it.
+            Ok(None) => continue,
             Err(_) => {
                 warn!("Failed to prefetch message details");
                 let retry = AttachmentRetry::after_failure(
@@ -888,6 +919,7 @@ pub(crate) async fn prefetch_details(
                 continue;
             }
         };
+        let mail = &mail;
         let attachments = match backend.load_attachments(mail).await {
             Ok(attachments) => attachments,
             Err(error) => {
