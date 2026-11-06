@@ -2,7 +2,7 @@ name: Docker
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', '.github/workflows/docker.yml']
   pull_request:
     paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', '.github/workflows/docker.yml']
