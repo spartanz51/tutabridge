@@ -20,7 +20,7 @@ when to upgrade.
 docker run -d --name tutabridge --restart unless-stopped \
   -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
   -v tutabridge:/data ghcr.io/spartanz51/tutabridge
-docker exec -it tutabridge tutabridge init
+docker exec -it tutabridge init
 ```
 
 The container starts and waits for an account; its log shows the command to
@@ -33,14 +33,14 @@ starts resume the saved session and never ask for credentials.
 On a NAS without a shell (Synology Container Manager, QNAP Container Station,
 Unraid, Portainer), search for `spartanz51/tutabridge`, map the two ports and
 a volume or folder to `/data`, start the container, then open its terminal or
-console and run `tutabridge init`.
+console and run `init`.
 
 With Compose, the repository's [`compose.yaml`](../compose.yaml) adds a few
 hardening options (all capabilities dropped, no privilege escalation):
 
 ```sh
 docker compose up -d
-docker compose exec tutabridge tutabridge init
+docker compose exec tutabridge init
 ```
 
 The commands below use Compose; with `docker run`, replace
@@ -53,7 +53,7 @@ The commands below use Compose; with `docker run`, replace
 | IMAP | `127.0.0.1:1143`, SSL/TLS |
 | SMTP | `127.0.0.1:1025`, SSL/TLS |
 | Username | Your Tuta email address |
-| Password | Output of `tutabridge password` in the container |
+| Password | Output of `password` in the container |
 
 The certificate is self-signed: accept it once in your client. The supplied
 ports are published on the host's loopback interface only. Inside the

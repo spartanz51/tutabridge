@@ -22,8 +22,8 @@ pub enum State {
 impl State {
     pub fn reason(self) -> &'static str {
         match self {
-            Self::Configuration => "Waiting for configuration; run tutabridge init (Docker: docker exec -it <container> tutabridge init)",
-            Self::Session => "Waiting for a saved session; run tutabridge init (Docker: docker exec -it <container> tutabridge init)",
+            Self::Configuration => "Waiting for configuration; run tutabridge init (Docker: docker exec -it <container> init)",
+            Self::Session => "Waiting for a saved session; run tutabridge init (Docker: docker exec -it <container> init)",
             Self::Storage => "Session storage unavailable; check volume permissions, GPG key and pass store",
             Self::Rejected => "Saved session rejected; run tutabridge init (existing entry preserved)",
             Self::Version => "Tuta rejects this version; update the image: docker compose pull && docker compose up -d",

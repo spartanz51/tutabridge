@@ -47,6 +47,8 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && install -d -m 0700 -o 10001 -g 10001 /data
 COPY --from=builder /build/tutabridge /usr/local/bin/tutabridge
 COPY --chmod=755 docker/entrypoint.sh docker/bootstrap.sh /usr/local/lib/tutabridge/
+# Shortcuts for docker exec: `init` and `password` run the same CLI commands.
+COPY --chmod=755 docker/bin/init docker/bin/password /usr/local/bin/
 COPY docker/config.toml docker/gpg-key-parameters /usr/local/lib/tutabridge/
 COPY LICENSE /usr/share/doc/tutabridge/LICENSE
 ENV HOME=/data \

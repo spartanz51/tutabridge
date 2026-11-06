@@ -100,8 +100,8 @@ docker run -d --name tutabridge --restart unless-stopped \
   -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
   -v tutabridge:/data ghcr.io/spartanz51/tutabridge
 
-docker exec -it tutabridge tutabridge init   # Tuta login, once
-docker exec tutabridge tutabridge password   # password for your mail client
+docker exec -it tutabridge init   # Tuta login, once
+docker exec tutabridge password   # password for your mail client
 ```
 
 The image is also on Docker Hub as `spartanz51/tutabridge`. The session stays

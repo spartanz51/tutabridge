@@ -88,6 +88,16 @@ class DockerSmokeTests(unittest.TestCase):
     def checksum(self):
         return self.run_image('/data/pass/'+ENTRY+'.gpg', entrypoint='sha256sum').stdout
 
+    def test_exec_shortcuts_run_the_same_cli_commands(self):
+        name = self.start()
+        self.wait_for(name, 'Waiting for configuration')
+        result = self.docker('exec', '-i', name, 'init', input='\n', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Email address is required', result.stderr)
+        short = self.docker('exec', name, 'password', check=False)
+        full = self.docker('exec', name, 'tutabridge', 'password', check=False)
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (full.returncode, full.stdout, full.stderr))
+
     def test_exec_init_on_empty_volume_and_real_gpg_roundtrip(self):
         name = self.start()
         self.wait_for(name, 'Waiting for configuration')

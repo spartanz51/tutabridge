@@ -1,0 +1,3 @@
+#!/bin/sh
+# Shortcut for "docker exec <container> init": runs "tutabridge init".
+exec tutabridge init "$@"
