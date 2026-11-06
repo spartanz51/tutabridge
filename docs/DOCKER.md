@@ -2,8 +2,7 @@
 
 TutaBridge runs as a headless service in a container, for a home server or a
 NAS. The image contains the CLI only, with `pass` and GnuPG to keep the Tuta
-session encrypted on its data volume. It is an independent project, not
-affiliated with or endorsed by Tuta.
+session encrypted on its data volume.
 
 | Registry | Image |
 |---|---|
@@ -18,29 +17,34 @@ when to upgrade.
 ## Quick start
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/spartanz51/tutabridge/main/compose.yaml
+docker run -d --name tutabridge --restart unless-stopped \
+  -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
+  -v tutabridge:/data ghcr.io/spartanz51/tutabridge
+docker exec -it tutabridge tutabridge init
+```
+
+The container starts and waits for an account; its log shows the command to
+run. `init` asks for your Tuta address, password and TOTP code if your account
+uses one. It creates a dedicated GPG key on the volume, saves the session, the
+local bridge password and a TLS certificate, then exits. The waiting service
+picks up the session within about ten seconds and starts IMAP and SMTP. Later
+starts resume the saved session and never ask for credentials.
+
+On a NAS without a shell (Synology Container Manager, QNAP Container Station,
+Unraid, Portainer), search for `spartanz51/tutabridge`, map the two ports and
+a volume or folder to `/data`, start the container, then open its terminal or
+console and run `tutabridge init`.
+
+With Compose, the repository's [`compose.yaml`](../compose.yaml) adds a few
+hardening options (all capabilities dropped, no privilege escalation):
+
+```sh
 docker compose up -d
 docker compose exec tutabridge tutabridge init
 ```
 
-The service starts and waits for an account. `init` asks for your Tuta
-address, password and TOTP code if your account uses one. It creates a
-dedicated GPG key on the volume, saves the session, the local bridge password
-and a TLS certificate, then exits. The waiting service picks up the session
-within about ten seconds and starts IMAP and SMTP. Later starts resume the
-saved session and never ask for credentials.
-
-Without Compose:
-
-```sh
-docker volume create tutabridge-data
-docker run -d --name tutabridge --restart unless-stopped \
-  -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
-  -v tutabridge-data:/data \
-  --cap-drop ALL --security-opt no-new-privileges:true \
-  ghcr.io/spartanz51/tutabridge:latest
-docker exec -it tutabridge tutabridge init
-```
+The commands below use Compose; with `docker run`, replace
+`docker compose exec tutabridge` with `docker exec tutabridge`.
 
 ## Mail client settings
 
@@ -49,7 +53,7 @@ docker exec -it tutabridge tutabridge init
 | IMAP | `127.0.0.1:1143`, SSL/TLS |
 | SMTP | `127.0.0.1:1025`, SSL/TLS |
 | Username | Your Tuta email address |
-| Password | Output of `docker compose exec tutabridge tutabridge password` |
+| Password | Output of `tutabridge password` in the container |
 
 The certificate is self-signed: accept it once in your client. The supplied
 ports are published on the host's loopback interface only. Inside the

@@ -92,22 +92,21 @@ e.g. `yay -S tutabridge-desktop-bin`.
 
 ### Docker
 
-For a home server or a NAS, a headless image runs the bridge as a service,
-for `linux/amd64` and `linux/arm64`, from
-[`ghcr.io/spartanz51/tutabridge`](https://github.com/spartanz51/tutabridge/pkgs/container/tutabridge)
-or [`spartanz51/tutabridge`](https://hub.docker.com/r/spartanz51/tutabridge)
-on Docker Hub:
+For a home server or a NAS, a headless image runs the bridge as a service
+(`linux/amd64`, `linux/arm64`):
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/spartanz51/tutabridge/main/compose.yaml
-docker compose up -d
-docker compose exec tutabridge tutabridge init      # Tuta login, once
-docker compose exec tutabridge tutabridge password  # mail client password
+docker run -d --name tutabridge --restart unless-stopped \
+  -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
+  -v tutabridge:/data ghcr.io/spartanz51/tutabridge
+
+docker exec -it tutabridge tutabridge init   # Tuta login, once
+docker exec tutabridge tutabridge password   # password for your mail client
 ```
 
-The session stays encrypted on the container's volume and later starts never
-ask for credentials. The [Docker guide](docs/DOCKER.md) covers client
-settings, health, updates, backups and recovery.
+The image is also on Docker Hub as `spartanz51/tutabridge`. The session stays
+encrypted on the volume, and later starts never ask for credentials. See the
+[Docker guide](docs/DOCKER.md) for Compose, NAS, updates and backups.
 
 ---
 
