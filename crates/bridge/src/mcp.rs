@@ -476,13 +476,13 @@ fn origin_ok(origin: Option<&str>) -> bool {
     }
 }
 
-/// Constant-time-ish bearer check. `None` token means auth is disabled (tests).
+/// Constant-time bearer check. `None` token means auth is disabled (tests).
 fn authorized(auth_header: Option<&str>, token: Option<&str>) -> bool {
     let Some(token) = token else {
         return true;
     };
     match auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(presented) => presented == token,
+        Some(presented) => crate::util::secret_eq(presented, token),
         None => false,
     }
 }

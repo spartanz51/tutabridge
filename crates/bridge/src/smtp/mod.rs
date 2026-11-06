@@ -466,7 +466,7 @@ fn verify_smtp_plain_data(data: &str, expected: &Option<String>) -> String {
 
 fn verify_smtp_password(password: &str, expected: &Option<String>) -> String {
     match expected {
-        Some(expected_pw) if password == expected_pw => {
+        Some(expected_pw) if crate::util::secret_eq(password, expected_pw) => {
             "235 2.7.0 Authentication successful\r\n".to_string()
         }
         Some(_) => "535 5.7.8 Authentication failed\r\n".to_string(),
