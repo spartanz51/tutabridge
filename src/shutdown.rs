@@ -15,16 +15,64 @@ where
     F: FnOnce(watch::Receiver<bool>) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
+    controlled(operation, true).await
+}
+
+/// The subprocess supervisor performs its own bounded kill/reap sequence. Do
+/// not drop it at the same deadline: that would release the lock before reaping.
+pub async fn supervised<F, Fut>(operation: F) -> anyhow::Result<()>
+where
+    F: FnOnce(watch::Receiver<bool>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    controlled(operation, false).await
+}
+
+#[cfg(unix)]
+fn optional_signal(
+    kind: tokio::signal::unix::SignalKind,
+) -> std::io::Result<Option<tokio::signal::unix::Signal>> {
+    // nohup and callers may deliberately ignore HUP/QUIT. Preserve that
+    // inherited disposition rather than silently restoring termination.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(kind.as_raw_value(), std::ptr::null(), &mut action) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if action.sa_sigaction == libc::SIG_IGN {
+        return Ok(None);
+    }
+    tokio::signal::unix::signal(kind).map(Some)
+}
+
+async fn controlled<F, Fut>(operation: F, cancel: bool) -> anyhow::Result<()>
+where
+    F: FnOnce(watch::Receiver<bool>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     // Unix registration is immediate, before polling any network operation.
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let mut hangup = if !cancel {
+        optional_signal(tokio::signal::unix::SignalKind::hangup())?
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let mut quit = if !cancel {
+        optional_signal(tokio::signal::unix::SignalKind::quit())?
+    } else {
+        None
+    };
     let signal = async {
         #[cfg(unix)]
         tokio::select! {
             _ = terminate.recv() => {},
             _ = interrupt.recv() => {},
+            _ = async { match &mut hangup { Some(s) => {s.recv().await;}, None => std::future::pending().await } } => {},
+            _ = async { match &mut quit { Some(s) => {s.recv().await;}, None => std::future::pending().await } } => {},
         }
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await?;
@@ -39,6 +87,7 @@ where
             result?;
             log::info!("Shutting down...");
             let _ = sender.send(true);
+            if !cancel { return work.await; }
             match tokio::time::timeout(GRACE_PERIOD, &mut work).await {
                 Ok(result) => result,
                 Err(_) => {

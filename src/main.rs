@@ -1,6 +1,8 @@
 use anyhow::Context;
 use log::{info, warn};
 mod cli;
+#[cfg(unix)]
+mod service;
 mod shutdown;
 use cli::{Command, LoginMode};
 use std::sync::Arc;
@@ -10,14 +12,18 @@ use tutabridge_core::{
 };
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if service::container() {
+        unsafe {
+            libc::umask(0o077);
+        }
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(run());
-    // Dropping an async startup future cannot stop a synchronous keyring/pass
-    // worker. Bound runtime teardown as well so SIGTERM can finish. A child
-    // process already launched by that worker may remain until the container
-    // namespace exits; the Docker entrypoint disables interactive GPG prompts.
+    // Bound desktop runtime teardown. The Unix service supervisor has already
+    // terminated and reaped its worker group before returning here.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     result
 }
@@ -31,7 +37,56 @@ async fn run() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse(&args).map_err(anyhow::Error::msg)?;
+    #[cfg(unix)]
+    if service::container() {
+        match command {
+            Command::Init => return shutdown::supervised(|stop| service::supervise(true,false,stop)).await,
+            Command::Run(_) => return shutdown::supervised(|stop| service::supervise(false,false,stop)).await,
+            Command::Password => {println!("{}",service::password().await?);return Ok(());},
+            Command::Backup(_) => anyhow::bail!("Backup is not supported in the container service; stop it and use the desktop backup"),
+            _ => {},
+        }
+    }
     match command {
+        Command::Health => {
+            #[cfg(unix)]
+            {
+                service::health().await?;
+                println!("IMAP and SMTP ready");
+                Ok(())
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("Service health requires Unix")
+            }
+        }
+        Command::Wait => {
+            #[cfg(unix)]
+            {
+                shutdown::supervised(|stop| service::supervise(false, true, stop)).await
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("Service wait requires Unix")
+            }
+        }
+        Command::ServiceAttempt | Command::ContainerInit => {
+            #[cfg(unix)]
+            {
+                let _lock = service::Lock::inherited()?;
+                service::prepare_report();
+                let init = matches!(command, Command::ContainerInit);
+                let result = container_worker(init).await;
+                if let Err(state) = result {
+                    std::process::exit(state as i32);
+                }
+                Ok(())
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("Internal service worker requires Unix")
+            }
+        }
         Command::Version => {
             println!("tutabridge {VERSION}");
             Ok(())
@@ -69,6 +124,11 @@ async fn run() -> anyhow::Result<()> {
                     "tutabridge password",
                     "print the local bridge password (mail client setup)",
                 ),
+                (
+                    "tutabridge run --wait",
+                    "wait for initialization and serve without prompts (Unix)",
+                ),
+                ("tutabridge health", "check local IMAP and SMTP readiness"),
                 ("tutabridge --version", "print the version"),
             ] {
                 println!("{command:<34}{description}");
@@ -86,6 +146,59 @@ async fn run() -> anyhow::Result<()> {
         }
         Command::Run(mode) => shutdown::run(|stop| run_bridge(mode, stop)).await,
     }
+}
+
+#[cfg(unix)]
+async fn container_worker(init: bool) -> Result<(), service::State> {
+    use service::State;
+    service::bootstrap(init)?;
+    if init {
+        return initialize().await.map_err(|error| {
+            log::error!("Initialization failed: {error}");
+            State::Initialization
+        });
+    }
+    let cfg = config::load_config()
+        .map_err(|_| State::Configuration)?
+        .ok_or(State::Configuration)?;
+    if cfg.email.trim().is_empty() || cfg.validate_ports().is_err() {
+        return Err(State::Configuration);
+    }
+    let store = tutabridge_core::session_store::SessionStore::new(&cfg);
+    if store
+        .load_persisted(false)
+        .await
+        .map_err(|_| State::Storage)?
+        .is_none()
+    {
+        return Err(State::Session);
+    }
+    let session = tuta::login_with_persistence(
+        &cfg,
+        &store,
+        None,
+        None,
+        tuta::PersistencePolicy::PreserveExistingRequired,
+    )
+    .await
+    .map_err(|error| match error.downcast_ref::<tuta::ResumeError>() {
+        Some(tuta::ResumeError::SessionInvalid) => State::Rejected,
+        Some(tuta::ResumeError::ClientRejected) => State::Version,
+        Some(tuta::ResumeError::Transient) => State::Network,
+        None => {
+            if error.is::<tutabridge_core::session_store::SessionStoreError>() {
+                State::Storage
+            } else {
+                State::Network
+            }
+        }
+    })?;
+    shutdown::run(|stop| serve_bridge(cfg, session, stop))
+        .await
+        .map_err(|error| {
+            log::error!("Service startup failed: {error}");
+            State::Failed
+        })
 }
 
 fn load_account(mode: LoginMode) -> anyhow::Result<config::Config> {
@@ -118,6 +231,10 @@ async fn initialize() -> anyhow::Result<()> {
     login_session(&cfg, LoginMode::Initialize).await?;
     config::ensure_bridge_password(&mut cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
     tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("{e}"))?;
+    #[cfg(unix)]
+    if service::container() {
+        config::save_config(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
     info!("Session saved. Start the service with `tutabridge run --non-interactive`.");
     info!("Use `tutabridge password` to display the local mail-client password.");
     Ok(())
@@ -355,7 +472,10 @@ fn make_totp_cb() -> tuta::TwoFactorCallback {
 /// Tuta password (and TOTP). Shared by the bridge-run path and `backup`.
 async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<tuta::TutaSession> {
     let store = tutabridge_core::session_store::SessionStore::new(cfg);
-    let policy = if mode.allows_volatile_login() {
+    let preserve = cfg!(unix) && std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1");
+    let policy = if preserve {
+        tuta::PersistencePolicy::PreserveExistingRequired
+    } else if mode.allows_volatile_login() {
         tuta::PersistencePolicy::AllowVolatile
     } else {
         tuta::PersistencePolicy::Required
@@ -369,6 +489,13 @@ async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<
             return Err(anyhow::anyhow!(
                 "{e}. If the session has expired, run `tutabridge init` interactively."
             ));
+        }
+        Err(e)
+            if preserve
+                && e.downcast_ref::<tuta::ResumeError>()
+                    == Some(&tuta::ResumeError::SessionInvalid) =>
+        {
+            warn!("Saved session was rejected; it will only be replaced after successful authentication.");
         }
         Err(e)
             if e.downcast_ref::<tutabridge_core::session_store::SessionStoreError>()

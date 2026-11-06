@@ -61,7 +61,10 @@ pub async fn serve_listener(
                 match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
                 {
                     Ok(Ok(tls_stream)) => {
-                        info!("IMAP session {session_id}: opened ({addr})");
+                        log::log!(
+                            connection_level(),
+                            "IMAP session {session_id}: opened ({addr})"
+                        );
                         if let Err(e) = handle_connection(
                             tls_stream,
                             session_id,
@@ -72,11 +75,20 @@ pub async fn serve_listener(
                         )
                         .await
                         {
-                            error!("IMAP session {session_id}: connection error: {e}");
+                            if e.downcast_ref::<std::io::Error>()
+                                .is_some_and(crate::net::is_benign_disconnect)
+                            {
+                                debug!("IMAP session {session_id}: peer disconnected");
+                            } else {
+                                error!("IMAP session {session_id}: connection error: {e}");
+                            }
                         }
                     }
                     Ok(Err(e)) => {
-                        error!("IMAP session {session_id}: TLS handshake failed ({addr}): {e}")
+                        log::log!(
+                            crate::net::tls_failure_level(&e),
+                            "IMAP session {session_id}: TLS failure ({addr}): {e}"
+                        );
                     }
                     Err(_) => debug!("IMAP session {session_id}: TLS handshake timed out ({addr})"),
                 }
@@ -235,7 +247,10 @@ where
         writer.flush().await?;
 
         if session.is_logout() {
-            info!("IMAP session {session_id}: ended, client sent LOGOUT");
+            log::log!(
+                connection_level(),
+                "IMAP session {session_id}: ended, client sent LOGOUT"
+            );
             break;
         }
     }
@@ -291,6 +306,15 @@ where
     writer.write_all(resp.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+// Container health probes open unauthenticated sessions every thirty seconds.
+fn connection_level() -> log::Level {
+    if std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1") {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    }
 }
 
 #[cfg(test)]

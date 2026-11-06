@@ -177,10 +177,18 @@ pub async fn serve_listener(
                             handle_connection(tls_stream, tuta, pw_hash, SmtpLimits::default())
                                 .await
                         {
-                            error!("SMTP connection error: {}", e);
+                            if e.downcast_ref::<std::io::Error>()
+                                .is_some_and(crate::net::is_benign_disconnect)
+                            {
+                                debug!("SMTP peer disconnected");
+                            } else {
+                                error!("SMTP connection error: {}", e);
+                            }
                         }
                     }
-                    Ok(Err(e)) => error!("SMTP TLS handshake failed: {}", e),
+                    Ok(Err(e)) => {
+                        log::log!(crate::net::tls_failure_level(&e), "SMTP TLS failure: {e}");
+                    }
                     Err(_) => debug!("SMTP TLS handshake timed out"),
                 }
             }
