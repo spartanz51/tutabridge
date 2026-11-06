@@ -3,6 +3,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::config::{self, Config};
 use crate::event_handler;
+use crate::session_store::SessionStore;
 use crate::store::LocalStore;
 use crate::sync::{self, MailStore};
 use crate::tuta::{self, MailBackend, TwoFactorCallback};
@@ -81,6 +82,7 @@ pub struct BridgeStats {
 }
 
 pub struct BridgeHandle {
+    session_store: Option<SessionStore>,
     status: Arc<RwLock<BridgeStatus>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     log_tx: broadcast::Sender<String>,
@@ -104,6 +106,7 @@ impl BridgeHandle {
         let (log_tx, _) = broadcast::channel(256);
         let (stats_dirty_tx, _) = broadcast::channel(16);
         Self {
+            session_store: None,
             status: Arc::new(RwLock::new(BridgeStatus::Stopped)),
             shutdown_tx: None,
             log_tx,
@@ -169,6 +172,23 @@ impl BridgeHandle {
         }
     }
 
+    /// Reuse a session cache only while its account and backend still match.
+    /// Callers may clone the handle before awaiting I/O so the GUI state lock
+    /// need not be held through keyring or pinentry prompts.
+    pub fn session_store(&mut self, config: &Config) -> SessionStore {
+        if self
+            .session_store
+            .as_ref()
+            .is_none_or(|store| !store.matches_config(config))
+        {
+            self.session_store = Some(SessionStore::new(config));
+        }
+        self.session_store
+            .as_ref()
+            .expect("session store initialized")
+            .clone()
+    }
+
     pub async fn start(
         &mut self,
         config: Config,
@@ -199,11 +219,11 @@ impl BridgeHandle {
         // already holds then fails the start at once, with a message naming
         // it, instead of a full login (and a TOTP prompt) followed by a
         // teardown that logged nothing.
-        let imap_listener = match crate::net::bind_local("IMAP", config.imap_port).await {
+        let imap_listener = match crate::net::bind("IMAP", config.imap_addr()).await {
             Ok(listener) => listener,
             Err(msg) => return Err(self.start_failed(msg).await),
         };
-        let smtp_listener = match crate::net::bind_local("SMTP", config.smtp_port).await {
+        let smtp_listener = match crate::net::bind("SMTP", config.smtp_addr()).await {
             Ok(listener) => listener,
             Err(msg) => return Err(self.start_failed(msg).await),
         };
@@ -217,15 +237,18 @@ impl BridgeHandle {
         } else {
             None
         };
-        self.emit_log(&format!("IMAP listening on 127.0.0.1:{}", config.imap_port));
-        self.emit_log(&format!("SMTP listening on 127.0.0.1:{}", config.smtp_port));
+        self.emit_log(&format!("IMAP listening on {}", config.imap_addr()));
+        self.emit_log(&format!("SMTP listening on {}", config.smtp_addr()));
 
         self.emit_log(&format!("Authenticating as {}...", config.email));
-        let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await
-        {
-            Ok(s) => s,
-            Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
-        };
+        let session_store = self.session_store(&config);
+        let session =
+            match tuta::login_with_2fa(&config, &session_store, password.as_deref(), totp_callback)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
+            };
         self.emit_log(&format!("Logged in as {}", config.email));
 
         // Every failure from here on must go through `start_failed` too: an

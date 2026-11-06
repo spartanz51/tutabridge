@@ -254,6 +254,13 @@ def validate_candidate(sha, expected_base=None, expected_generated=None):
     return plan
 
 
+def docker_tooling():
+    spec = importlib.util.spec_from_file_location('docker_release', Path(__file__).with_name('docker-release.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def detect(args):
     base = git('rev-parse', 'HEAD')
     available = release_list()
@@ -267,6 +274,19 @@ def detect(args):
         if not existing or existing['draft']:
             outputs(mode='resume', source=source, version=plan['version'], base=base)
             return
+    # Repair promotion of the current release before considering a new SDK.
+    # Historical releases without a Docker record are deliberately ignored.
+    if not args.dry_run:
+        docker = docker_tooling()
+        if docker.enabled():
+            public = [r for r in available if not r['draft'] and VERSION.fullmatch(r['tag_name'].removeprefix('v'))]
+            if public:
+                newest = max(public, key=lambda r: int(VERSION.fullmatch(r['tag_name'].removeprefix('v'))[1]))
+                if docker.promotion_pending(newest, docker.load_script('release-assets')):
+                    version = newest['tag_name'].removeprefix('v')
+                    source = git('rev-parse', f'refs/tags/v{version}^{{commit}}')
+                    outputs(mode='repair', source=source, version=version, base=base)
+                    return
     if args.scheduled and not scheduled_today(datetime.now(timezone.utc).date()):
         outputs(mode='skip')
         return

@@ -6,13 +6,31 @@
 //! number of concurrent connections. This loop fixes both and is transport
 //! agnostic so it can be unit-tested without TLS.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use log::{debug, error};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+
+/// Peer protocol failures are expected on public TLS ports. Keep internal
+/// TLS/provider errors visible rather than lowering every handshake failure.
+pub(crate) fn tls_failure_level(error: &std::io::Error) -> log::Level {
+    use tokio_rustls::rustls::Error;
+    if is_benign_disconnect(error) {
+        return log::Level::Debug;
+    }
+    match error.get_ref().and_then(|e| e.downcast_ref::<Error>()) {
+        Some(
+            Error::InvalidMessage(_)
+            | Error::InappropriateMessage { .. }
+            | Error::InappropriateHandshakeMessage { .. },
+        ) => log::Level::Debug,
+        Some(Error::AlertReceived(_) | Error::PeerIncompatible(_)) => log::Level::Warn,
+        _ => log::Level::Error,
+    }
+}
 
 /// Max concurrent client connections per server. Bounds file descriptors and
 /// memory if a client (or a port scanner) opens connections faster than they
@@ -24,19 +42,24 @@ pub(crate) const MAX_CONNECTIONS: usize = 64;
 /// a file descriptor forever.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Bind `service`'s listener on 127.0.0.1:`port`. The error names the service
-/// and the port, and says what to do when another application holds it: the
+/// Bind `service`'s listener on the configured address. The error names the
+/// service and address, and says what to do when another application holds it: the
 /// GUI shows it as the bridge status, the CLI prints it on exit.
-pub(crate) async fn bind_local(service: &str, port: u16) -> Result<TcpListener, String> {
-    TcpListener::bind(("127.0.0.1", port))
+pub(crate) async fn bind(service: &str, address: SocketAddr) -> Result<TcpListener, String> {
+    TcpListener::bind(address)
         .await
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::AddrInUse => format!(
-                "{service} port {port} is already in use by another application; \
+                "{service} address {address} is already in use by another application; \
                  choose a different {service} port"
             ),
-            _ => format!("Cannot listen for {service} on 127.0.0.1:{port}: {e}"),
+            _ => format!("Cannot listen for {service} on {address}: {e}"),
         })
+}
+
+/// MCP is intentionally independent of the configurable IMAP/SMTP address.
+pub(crate) async fn bind_local(service: &str, port: u16) -> Result<TcpListener, String> {
+    bind(service, SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await
 }
 
 /// True for the read errors a peer produces by going away without a clean
@@ -161,6 +184,43 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     #[test]
+    fn tls_alerts_and_internal_errors_are_not_silenced() {
+        use std::io::{Error, ErrorKind};
+        use tokio_rustls::rustls::{self, AlertDescription, InvalidMessage};
+        for (error, expected) in [
+            (Error::from(ErrorKind::UnexpectedEof), log::Level::Debug),
+            (Error::from(ErrorKind::ConnectionReset), log::Level::Debug),
+            (
+                Error::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::InvalidMessage(InvalidMessage::MessageTooShort),
+                ),
+                log::Level::Debug,
+            ),
+            (
+                Error::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::AlertReceived(AlertDescription::UnknownCA),
+                ),
+                log::Level::Warn,
+            ),
+            (
+                Error::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::General("provider failure".into()),
+                ),
+                log::Level::Error,
+            ),
+            (
+                Error::new(ErrorKind::InvalidData, "unknown invalid data"),
+                log::Level::Error,
+            ),
+        ] {
+            assert_eq!(tls_failure_level(&error), expected);
+        }
+    }
+
+    #[test]
     fn captured_records_are_scoped_to_the_thread_that_logged_them() {
         // The whole point of the capture: what another thread logs is
         // invisible here, and what this thread logs is not visible there.
@@ -187,7 +247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binding_a_taken_port_names_the_service_and_the_port() {
+    async fn binding_a_taken_port_names_the_service_and_the_address() {
         // Hold a port the way a local mail catcher holds 1025.
         let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = squatter.local_addr().unwrap().port();
@@ -197,7 +257,7 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "SMTP port {port} is already in use by another application; \
+                "SMTP address 127.0.0.1:{port} is already in use by another application; \
                  choose a different SMTP port"
             )
         );
@@ -205,16 +265,33 @@ mod tests {
 
     #[tokio::test]
     async fn binding_a_free_port_succeeds_on_loopback() {
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        let listener = bind_local("MCP", 0).await.unwrap();
+        assert_eq!(listener.local_addr().unwrap().ip(), Ipv4Addr::LOCALHOST);
+        assert_ne!(listener.local_addr().unwrap().port(), 0);
+    }
 
-        let listener = bind_local("IMAP", port).await.unwrap();
+    #[tokio::test]
+    async fn mail_listener_uses_the_requested_address() {
+        for ip in [Ipv4Addr::LOCALHOST, Ipv4Addr::UNSPECIFIED] {
+            let requested = SocketAddr::from((ip, 0));
+            let listener = bind("IMAP", requested).await.unwrap();
+            assert_eq!(listener.local_addr().unwrap().ip(), ip);
+            assert_ne!(listener.local_addr().unwrap().port(), 0);
+        }
+    }
 
-        assert_eq!(
-            listener.local_addr().unwrap().to_string(),
-            format!("127.0.0.1:{port}")
-        );
+    #[tokio::test]
+    async fn mcp_loopback_binding_does_not_follow_mail_bind_address() {
+        let config = crate::config::Config {
+            bind_addr: Ipv4Addr::UNSPECIFIED.into(),
+            imap_port: 0,
+            mcp_port: 0,
+            ..crate::config::Config::default()
+        };
+        let mail = bind("IMAP", config.imap_addr()).await.unwrap();
+        let mcp = bind_local("MCP", config.mcp_port).await.unwrap();
+        assert_eq!(mail.local_addr().unwrap().ip(), Ipv4Addr::UNSPECIFIED);
+        assert_eq!(mcp.local_addr().unwrap().ip(), Ipv4Addr::LOCALHOST);
     }
 
     #[test]

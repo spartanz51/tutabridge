@@ -9,6 +9,7 @@ pub mod imap;
 pub mod mail;
 pub mod mcp;
 mod net;
+pub mod session_store;
 pub mod smtp;
 pub mod store;
 pub mod sync;

@@ -1,0 +1,20 @@
+services:
+  tutabridge:
+    # Published for linux/amd64 and linux/arm64, also as
+    # docker.io/spartanz51/tutabridge. Pin a version tag to control upgrades.
+    # To run a local build, see docs/DOCKER.md.
+    image: ${TUTABRIDGE_IMAGE:-ghcr.io/spartanz51/tutabridge:latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1143:1143"
+      - "127.0.0.1:1025:1025"
+    volumes:
+      - tutabridge-data:/data
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  tutabridge-data:

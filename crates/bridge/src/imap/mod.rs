@@ -3,6 +3,7 @@ mod session;
 mod utf7;
 
 use log::{debug, error, info};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -22,14 +23,14 @@ use session::ImapSession;
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub async fn serve(
-    port: u16,
+    address: SocketAddr,
     store: Arc<MailStore>,
     backend: Arc<dyn MailBackend>,
     local_store: Arc<LocalStore>,
     tls: TlsAcceptor,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = crate::net::bind_local("IMAP", port).await?;
+    let listener = crate::net::bind("IMAP", address).await?;
     serve_listener(listener, store, backend, local_store, tls, password_hash).await
 }
 
@@ -60,7 +61,10 @@ pub async fn serve_listener(
                 match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
                 {
                     Ok(Ok(tls_stream)) => {
-                        info!("IMAP session {session_id}: opened ({addr})");
+                        log::log!(
+                            connection_level(),
+                            "IMAP session {session_id}: opened ({addr})"
+                        );
                         if let Err(e) = handle_connection(
                             tls_stream,
                             session_id,
@@ -71,11 +75,20 @@ pub async fn serve_listener(
                         )
                         .await
                         {
-                            error!("IMAP session {session_id}: connection error: {e}");
+                            if e.downcast_ref::<std::io::Error>()
+                                .is_some_and(crate::net::is_benign_disconnect)
+                            {
+                                debug!("IMAP session {session_id}: peer disconnected");
+                            } else {
+                                error!("IMAP session {session_id}: connection error: {e}");
+                            }
                         }
                     }
                     Ok(Err(e)) => {
-                        error!("IMAP session {session_id}: TLS handshake failed ({addr}): {e}")
+                        log::log!(
+                            crate::net::tls_failure_level(&e),
+                            "IMAP session {session_id}: TLS failure ({addr}): {e}"
+                        );
                     }
                     Err(_) => debug!("IMAP session {session_id}: TLS handshake timed out ({addr})"),
                 }
@@ -234,7 +247,10 @@ where
         writer.flush().await?;
 
         if session.is_logout() {
-            info!("IMAP session {session_id}: ended, client sent LOGOUT");
+            log::log!(
+                connection_level(),
+                "IMAP session {session_id}: ended, client sent LOGOUT"
+            );
             break;
         }
     }
@@ -245,12 +261,18 @@ where
 /// Largest APPEND message literal we will read into memory.
 const MAX_APPEND_BYTES: usize = 26_214_400;
 
-/// Handle an `APPEND`. Tuta saves sent mail server-side, so an APPEND to the
-/// Sent folder is accepted as a no-op: read and discard the literal, reply OK.
-/// That lets a mail client's "save a copy to Sent" succeed without creating a
-/// duplicate (the real copy arrives via the syncer). Other folders are not
-/// supported yet and are rejected before the literal is sent, so the client
-/// aborts the synchronizing literal and the stream stays in sync.
+/// How long an APPEND to Sent waits for Tuta's own copy of a mail just sent
+/// through the bridge, to report its UID.
+const SENT_COPY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Handle an `APPEND`. Tuta saves mail sent through the bridge in Sent by
+/// itself, so an APPEND to Sent stores nothing: duplicating that copy would
+/// show the mail twice. The reply carries the copy's UID (`APPENDUID`, as
+/// UIDPLUS promises) so the client can find it, or a plain OK while the copy
+/// is still on its way. A message that was not sent through the bridge would
+/// be kept nowhere, so it is refused rather than acknowledged and lost. Other
+/// folders are not supported yet and are rejected before the literal is sent,
+/// so the client aborts the synchronizing literal and the stream stays in sync.
 async fn handle_append<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -277,8 +299,8 @@ where
         return Ok(());
     }
 
-    // Synchronizing literal: tell the client to send the message, then read and
-    // discard it plus the trailing CRLF (the real Sent copy comes from sync).
+    // Synchronizing literal: tell the client to send the message, then read it
+    // plus the trailing CRLF. Only its Message-ID is used.
     writer.write_all(b"+ OK\r\n").await?;
     writer.flush().await?;
     let mut buf = vec![0u8; req.literal_size];
@@ -286,10 +308,35 @@ where
     let mut tail = String::new();
     reader.read_line(&mut tail).await?;
 
-    let resp = format!("{} OK APPEND completed\r\n", req.tag);
+    let message_id = crate::mail::parser::parse_message_id(&String::from_utf8_lossy(&buf));
+    let copy = session
+        .sent_copy(&req.mailbox, message_id.as_deref(), SENT_COPY_WAIT)
+        .await;
+    let resp = append_sent_reply(&req.tag, &copy);
     writer.write_all(resp.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// The tagged reply to an APPEND to Sent, given where Tuta's copy stands.
+fn append_sent_reply(tag: &str, copy: &session::SentCopy) -> String {
+    match copy {
+        // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
+        session::SentCopy::Found(uid) => format!("{tag} OK [APPENDUID 1 {uid}] APPEND completed\r\n"),
+        session::SentCopy::Pending => format!("{tag} OK APPEND completed\r\n"),
+        session::SentCopy::Unknown => format!(
+            "{tag} NO [CANNOT] Only mail sent through the bridge can be saved to Sent; Tuta keeps it automatically\r\n"
+        ),
+    }
+}
+
+// Container health probes open unauthenticated sessions every thirty seconds.
+fn connection_level() -> log::Level {
+    if std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1") {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    }
 }
 
 #[cfg(test)]
@@ -348,7 +395,11 @@ mod tests {
         }
     }
 
-    struct NoopBackend;
+    /// Answers only what IMAP-level tests need: optionally one recent send.
+    #[derive(Default)]
+    struct NoopBackend {
+        sent: Option<(String, String)>,
+    }
     #[async_trait::async_trait]
     impl MailBackend for NoopBackend {
         async fn load_mail_ids_for_folder(
@@ -415,6 +466,12 @@ mod tests {
         async fn send_mail(&self, _m: &ParsedMessage) -> Result<(), String> {
             unimplemented!()
         }
+        async fn sent_mail_element_id(&self, submitted: &str) -> Option<String> {
+            self.sent
+                .as_ref()
+                .filter(|(id, _)| id == submitted)
+                .map(|(_, element)| element.clone())
+        }
     }
 
     #[test]
@@ -442,7 +499,7 @@ mod tests {
             special_use: Some("\\Sent".into()),
         };
         store.set_folder_list(vec![sent]).await;
-        ImapSession::new(store, Arc::new(NoopBackend), None, None)
+        ImapSession::new(store, Arc::new(NoopBackend::default()), None, None)
     }
 
     /// Replays a fixed script of reads: each entry is either a chunk of bytes
@@ -486,7 +543,7 @@ mod tests {
         let mut writer = tokio::io::sink();
         let store = MailStore::new();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(store, Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(store, Arc::new(NoopBackend::default()), None, None);
 
         let result =
             run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
@@ -511,7 +568,12 @@ mod tests {
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(
+            MailStore::new(),
+            Arc::new(NoopBackend::default()),
+            None,
+            None,
+        );
 
         let result =
             run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
@@ -536,7 +598,12 @@ mod tests {
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(
+            MailStore::new(),
+            Arc::new(NoopBackend::default()),
+            None,
+            None,
+        );
 
         let result =
             run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch).await;
@@ -614,7 +681,12 @@ mod tests {
         let mut reader = BufReader::new(ScriptedReader { script });
         let mut writer = tokio::io::sink();
         let (_watch_tx, mut store_watch) = watch::channel(0u64);
-        let mut session = ImapSession::new(MailStore::new(), Arc::new(NoopBackend), None, None);
+        let mut session = ImapSession::new(
+            MailStore::new(),
+            Arc::new(NoopBackend::default()),
+            None,
+            None,
+        );
 
         run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch)
             .await
@@ -671,7 +743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_to_sent_reads_literal_and_returns_ok() {
+    async fn append_of_a_mail_not_sent_here_is_read_then_refused() {
         let session = session_with_sent().await;
         let (mut client, server) = tokio::io::duplex(4096);
         let (sr, mut sw) = tokio::io::split(server);
@@ -697,7 +769,80 @@ mod tests {
         };
         let (res, resp) = tokio::join!(server_fut, client_fut);
         res.unwrap();
-        assert!(resp.contains("a1 OK APPEND completed"), "got {resp:?}");
+        // The literal was consumed (the stream stays in sync), then refused:
+        // acknowledging it would lose the message, since nothing keeps it.
+        assert!(resp.contains("a1 NO [CANNOT]"), "got {resp:?}");
+    }
+
+    #[test]
+    fn append_sent_reply_matches_where_the_copy_stands() {
+        use session::SentCopy;
+        assert_eq!(
+            append_sent_reply("a1", &SentCopy::Found(42)),
+            "a1 OK [APPENDUID 1 42] APPEND completed\r\n"
+        );
+        assert_eq!(
+            append_sent_reply("a2", &SentCopy::Pending),
+            "a2 OK APPEND completed\r\n"
+        );
+        assert!(append_sent_reply("a3", &SentCopy::Unknown).starts_with("a3 NO [CANNOT] "));
+    }
+
+    #[tokio::test]
+    async fn append_of_a_mail_sent_here_reports_the_uid_of_tuta_copy() {
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![FolderInfo {
+                id: "sent".into(),
+                list_id: "folders".into(),
+                entries_list_id: "se".into(),
+                kind: MailSetKind::Sent,
+                imap_path: "Sent".into(),
+                special_use: Some("\\Sent".into()),
+            }])
+            .await;
+        store
+            .upsert_mail_in_folder(
+                "sent",
+                crate::sync::StoredMail {
+                    mail: session::tests::make_mail("sent-1", "Hello", false),
+                    body_loaded: false,
+                    uid: 9,
+                    attachments_pending: false,
+                },
+            )
+            .await;
+        let backend = NoopBackend {
+            sent: Some(("abc@client".into(), "sent-1".into())),
+        };
+        let session = ImapSession::new(store, Arc::new(backend), None, None);
+        let message = b"Message-ID: <abc@client>\r\nSubject: Hello\r\n\r\nBody\r\n";
+        let (mut client, server) = tokio::io::duplex(4096);
+        let (sr, mut sw) = tokio::io::split(server);
+        let mut reader = BufReader::new(sr);
+        let req = session::AppendRequest {
+            tag: "a1".into(),
+            mailbox: "Sent".into(),
+            literal_size: message.len(),
+        };
+
+        let server_fut = handle_append(&mut reader, &mut sw, &session, req);
+        let client_fut = async {
+            let mut buf = [0u8; 32];
+            let n = client.read(&mut buf).await.unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).starts_with('+'));
+            client.write_all(message).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            let mut resp = vec![0u8; 128];
+            let n = client.read(&mut resp).await.unwrap();
+            String::from_utf8_lossy(&resp[..n]).into_owned()
+        };
+        let (res, resp) = tokio::join!(server_fut, client_fut);
+        res.unwrap();
+        assert!(
+            resp.contains("a1 OK [APPENDUID 1 9] APPEND completed"),
+            "got {resp:?}"
+        );
     }
 
     #[tokio::test]

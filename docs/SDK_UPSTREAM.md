@@ -42,6 +42,7 @@ Tuta, possibly revisited later).
 | 09 owner session key | Decrypt a parsed entity with a session key from its owner | maybe | TS passes an owner-encrypted key provider (`keyProviderFromInstance`) and leaves the child's own key fields alone; an upstream version would take that shape. |
 | 10 AEAD session reads | | internal | Tuta is reworking AEAD on `crypto/dev` with a different v2 protocol. |
 | 11 AEAD group reads | | internal | Same. |
+| 13 Android logger | Honor the logging feature on Android | internal | Prevents the SDK from installing a second global logger when embedded in the CLI. Android builds are checked in CI; execution on a device still needs validation. |
 
 ## History
 

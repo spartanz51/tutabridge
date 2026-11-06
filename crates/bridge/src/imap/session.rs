@@ -270,6 +270,39 @@ impl ImapSession {
             .unwrap_or(false)
     }
 
+    /// Find Tuta's own Sent copy of a mail this bridge just sent, so an APPEND
+    /// to Sent can answer with `APPENDUID` (UIDPLUS) and the client can find
+    /// its copy, for example to run its after-send filters. Waits up to `wait`
+    /// for the copy to arrive through the event bus.
+    pub(crate) async fn sent_copy(
+        &self,
+        mailbox: &str,
+        message_id: Option<&str>,
+        wait: std::time::Duration,
+    ) -> SentCopy {
+        let Some(id) = message_id else {
+            return SentCopy::Unknown;
+        };
+        let Some(element_id) = self.backend.sent_mail_element_id(id).await else {
+            return SentCopy::Unknown;
+        };
+        let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
+        let Some(sent) = self.store.folder_by_imap_path(&name).await else {
+            return SentCopy::Pending;
+        };
+        let mut changes = self.store.subscribe();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Some(copy) = self.store.mail_in_folder(&sent.id, &element_id).await {
+                return SentCopy::Found(copy.uid);
+            }
+            match tokio::time::timeout_at(deadline, changes.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => return SentCopy::Pending,
+            }
+        }
+    }
+
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
         vec![
             "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE\r\n".to_string(),
@@ -1273,6 +1306,17 @@ fn parse_command(line: &str) -> (String, String, String) {
     (tag, cmd, args)
 }
 
+/// Where an APPEND to Sent stands relative to the mails this bridge sent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SentCopy {
+    /// Tuta's copy is in Sent under this UID.
+    Found(u32),
+    /// Sent through this bridge, but Tuta's copy has not arrived yet.
+    Pending,
+    /// Not sent through this bridge recently: nothing would keep it.
+    Unknown,
+}
+
 /// A parsed `APPEND` command: the tag, the target mailbox, and the size of the
 /// trailing `{N}` message literal the client is about to send.
 pub(crate) struct AppendRequest {
@@ -1321,7 +1365,7 @@ fn append_literal_size(args: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::Engine;
     use tutasdk::date::DateTime;
@@ -1999,6 +2043,8 @@ mod tests {
         attachment_failure: Mutex<u8>,
         details_calls: Mutex<usize>,
         attachments: Mutex<Vec<(TutanotaFile, Vec<u8>)>>,
+        /// Submitted Message-ID -> element id of the mail sent with it.
+        sent_ids: Mutex<std::collections::HashMap<String, String>>,
     }
 
     impl MockBackend {
@@ -2016,6 +2062,7 @@ mod tests {
                 attachment_failure: Mutex::new(0),
                 details_calls: Mutex::new(0),
                 attachments: Mutex::new(Vec::new()),
+                sent_ids: Mutex::new(std::collections::HashMap::new()),
             }
         }
 
@@ -2359,6 +2406,84 @@ mod tests {
         assert!(!session.append_targets_sent("Nonexistent").await);
     }
 
+    fn sent_folder() -> FolderInfo {
+        FolderInfo {
+            id: "sent".into(),
+            list_id: "folders".into(),
+            entries_list_id: "sent_entries".into(),
+            kind: MailSetKind::Sent,
+            imap_path: "Sent".into(),
+            special_use: Some("\\Sent".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn sent_copy_waits_for_tuta_copy_of_a_mail_sent_here() {
+        let backend = Arc::new(MockBackend::new());
+        backend
+            .sent_ids
+            .lock()
+            .unwrap()
+            .insert("abc@client".into(), "sent-1".into());
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![inbox_folder(), sent_folder()])
+            .await;
+        let session = ImapSession::new(store.clone(), backend, None, None);
+        // The copy arrives through the event bus shortly after the APPEND.
+        let arriving = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            arriving
+                .upsert_mail_in_folder(
+                    "sent",
+                    StoredMail {
+                        mail: make_mail("sent-1", "Hello", false),
+                        body_loaded: false,
+                        uid: 7,
+                        attachments_pending: false,
+                    },
+                )
+                .await;
+        });
+        let copy = session
+            .sent_copy(
+                "Sent",
+                Some("abc@client"),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert_eq!(copy, SentCopy::Found(7));
+    }
+
+    #[tokio::test]
+    async fn sent_copy_tells_unknown_mail_from_a_late_copy() {
+        let backend = Arc::new(MockBackend::new());
+        backend
+            .sent_ids
+            .lock()
+            .unwrap()
+            .insert("abc@client".into(), "sent-1".into());
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![inbox_folder(), sent_folder()])
+            .await;
+        let session = ImapSession::new(store, backend, None, None);
+        let short = std::time::Duration::from_millis(50);
+        assert_eq!(
+            session.sent_copy("Sent", Some("other@client"), short).await,
+            SentCopy::Unknown
+        );
+        assert_eq!(
+            session.sent_copy("Sent", None, short).await,
+            SentCopy::Unknown
+        );
+        assert_eq!(
+            session.sent_copy("Sent", Some("abc@client"), short).await,
+            SentCopy::Pending
+        );
+    }
+
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
         store.set_folder_list(vec![inbox_folder()]).await;
         let stored: Vec<StoredMail> = mails
@@ -2510,9 +2635,16 @@ mod tests {
             self.sent.lock().unwrap().push(msg.clone());
             Ok(())
         }
+        async fn sent_mail_element_id(&self, submitted_message_id: &str) -> Option<String> {
+            self.sent_ids
+                .lock()
+                .unwrap()
+                .get(submitted_message_id)
+                .cloned()
+        }
     }
 
-    fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
+    pub(crate) fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
         Mail {
             _id: Some(IdTupleGenerated::new(test_id("list1"), test_id(element_id))),
             _permissions: test_id("perm1"),

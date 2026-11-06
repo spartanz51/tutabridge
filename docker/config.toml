@@ -1,0 +1,8 @@
+# Created once by the container's init command; later init runs preserve it.
+email = ""
+imap_port = 1143
+smtp_port = 1025
+bind_addr = "0.0.0.0"
+pass_path = "Tuta/Bridge"
+# MCP stays disabled, and its listener is always loopback-only.
+mcp_permission = "disabled"
