@@ -54,11 +54,16 @@ The commands below use Compose; with `docker run`, replace
 | SMTP | `127.0.0.1:1025`, SSL/TLS |
 | Username | Your Tuta email address |
 | Password | Output of `password` in the container |
+| Authentication | Normal password, for both servers |
 
-The certificate is self-signed: accept it once in your client. The supplied
-ports are published on the host's loopback interface only. Inside the
-container the servers listen on all interfaces so that Docker can forward to
-them; the MCP server stays disabled.
+The certificate is self-signed: accept it once in your client. Thunderbird
+often asks only for the IMAP port; if sending then fails, add the exception
+for SMTP by hand (Settings, Privacy & Security, Manage Certificates, Servers,
+Add Exception, `127.0.0.1:1025`). If you used the desktop app before, delete
+its saved passwords for `127.0.0.1`: the container has its own bridge
+password. The supplied ports are published on the host's loopback interface
+only. Inside the container the servers listen on all interfaces so that Docker
+can forward to them; the MCP server stays disabled.
 
 ## Status, health and logs
 
