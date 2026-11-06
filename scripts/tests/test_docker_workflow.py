@@ -61,3 +61,16 @@ class Guards(unittest.TestCase):
         self.assertIn('contents: write',plan)
         self.assertNotIn('download-artifact',plan)
         self.assertIn('git status --porcelain',plan)
+
+    def test_desktop_checksums_are_bound_to_the_signer_job_output(self):
+        sign = jobs()['sign-production']
+        publish = jobs()['publish']
+        self.assertIn('checksums_sha256: ${{ steps.signed.outputs.checksums_sha256 }}', sign)
+        self.assertIn('id: signed', sign)
+        signing = sign.split('      - name: Sign production', 1)[1].split('      - name:', 1)[0]
+        self.assertLess(signing.index('release-assets.py sign'), signing.index('echo "checksums_sha256='))
+        self.assertIn('sha256sum "$RUNNER_TEMP/release-assets/SHA256SUMS"', signing)
+        self.assertIn('>> "$GITHUB_OUTPUT"', signing)
+        self.assertIn('CHECKSUMS_SHA256: ${{ needs.sign-production.outputs.checksums_sha256 }}', publish)
+        self.assertIn('--checksums-sha256 "$CHECKSUMS_SHA256"', publish)
+        self.assertNotIn('sha256sum', publish)

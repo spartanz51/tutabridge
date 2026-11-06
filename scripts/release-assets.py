@@ -198,13 +198,19 @@ def load_docker():
     return module
 
 
-def verify_checksums(directory):
+def verify_checksums(directory, checksums_sha256):
+    # This digest must come from the signing job output, never the artifact.
+    if not isinstance(checksums_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", checksums_sha256):
+        raise ValueError("Missing or invalid signing-job checksums digest")
     checksums = directory / 'SHA256SUMS'
     if checksums.is_symlink() or not checksums.is_file():
         raise ValueError('Invalid signed checksums file')
-    expected = {p.name for p in directory.iterdir()} - {'SHA256SUMS', 'docker-release.json'}
+    contents = checksums.read_bytes()
+    if hashlib.sha256(contents).hexdigest() != checksums_sha256:
+        raise ValueError('Signed checksums differ from signing-job output')
+    expected = {p.name for p in directory.iterdir()} - {'SHA256SUMS'}
     seen = set()
-    for line in (directory / 'SHA256SUMS').read_text().splitlines():
+    for line in contents.decode('utf-8').splitlines():
         match = re.fullmatch(r'([0-9a-f]{64})  ([^/\\]+)', line)
         if not match or match[2] in seen or match[2] not in expected:
             raise ValueError('Invalid signed checksums')
@@ -219,15 +225,20 @@ def verify_checksums(directory):
 
 def publish(args):
     directory = Path(args.directory)
+    verify_checksums(directory, getattr(args, 'checksums_sha256', None))
     docker = load_docker()
     require_docker = docker.enabled() or getattr(args, 'require_docker', False)
-    verify_checksums(directory)
     if require_docker:
         docker.require_enabled()
-        record = docker.validate_record(json.loads((directory / 'docker-release.json').read_bytes()), args.version, args.source)
+        if not getattr(args, 'docker_record', None):
+            raise ValueError('Missing independently verified Docker record')
+        record_bytes = Path(args.docker_record).read_bytes()
+        record = docker.validate_record(json.loads(record_bytes), args.version, args.source)
         for reader in docker.registries():
             if not docker.inspect_record(reader, record, args.version):
                 raise ValueError('Docker verification missing before GitHub publication')
+        # Add the separately verified record only after binding desktop bytes.
+        (directory / docker.RECORD).write_bytes(record_bytes)
         checksums = []
         for item in sorted(directory.iterdir()):
             if item.name != 'SHA256SUMS':
@@ -281,6 +292,8 @@ if __name__ == '__main__':
     parser.add_argument('--pubkey')
     parser.add_argument('--source')
     parser.add_argument('--require-docker', action='store_true')
+    parser.add_argument('--docker-record', help='Path to the independently verified Docker record')
+    parser.add_argument('--checksums-sha256', help='SHA256SUMS digest from the trusted signing job (required for publish)')
     args = parser.parse_args()
     app_version(args.version)
     globals()[args.command.replace('-', '_')](args)

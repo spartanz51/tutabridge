@@ -332,6 +332,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      checksums_sha256: ${{ steps.signed.outputs.checksums_sha256 }}
     steps:
       # A new runner: no SDK checkout, compilation, or restored build cache.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -364,6 +366,7 @@ jobs:
           (root / 'updater.pub').write_text(key)
           PY
       - name: Sign production and validate against the app key
+        id: signed
         if: inputs.publish
         env:
           RELEASE_VERSION: ${{ inputs.version }}
@@ -372,6 +375,7 @@ jobs:
         run: |
           test -z "$(git status --porcelain --untracked-files=all)"
           python3 scripts/release-assets.py sign --directory "$RUNNER_TEMP/release-assets" --version "$RELEASE_VERSION" --pubkey "$RUNNER_TEMP/updater.pub"
+          echo "checksums_sha256=$(sha256sum "$RUNNER_TEMP/release-assets/SHA256SUMS" | cut -d " " -f1)" >> "$GITHUB_OUTPUT"
       - name: Preserve complete signed release for inspection
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -546,6 +550,7 @@ jobs:
       - name: Validate signed assets and publish only after Docker verification
         env:
           GH_TOKEN: ${{ github.token }}
+          CHECKSUMS_SHA256: ${{ needs.sign-production.outputs.checksums_sha256 }}
           DOCKER_ENABLED: ${{ needs.source.outputs.docker }}
           VERSION: ${{ inputs.version }}
           SOURCE: ${{ needs.source.outputs.sha }}
@@ -558,10 +563,9 @@ jobs:
           args=()
           if [ "$DOCKER_ENABLED" = true ]; then
             python3 scripts/docker-release.py check-record --version "$VERSION" --source "$SOURCE" --record "$RUNNER_TEMP/docker-record/docker-release.json" --record-sha "$RECORD_SHA"
-            cp "$RUNNER_TEMP/docker-record/docker-release.json" "$RUNNER_TEMP/release-assets/"
-            args+=(--require-docker)
+            args+=(--require-docker --docker-record "$RUNNER_TEMP/docker-record/docker-release.json")
           fi
-          python3 scripts/release-assets.py publish "${args[@]}" --directory "$RUNNER_TEMP/release-assets" --version "$VERSION" --source "$SOURCE" --pubkey "$RUNNER_TEMP/updater.pub"
+          python3 scripts/release-assets.py publish "${args[@]}" --checksums-sha256 "$CHECKSUMS_SHA256" --directory "$RUNNER_TEMP/release-assets" --version "$VERSION" --source "$SOURCE" --pubkey "$RUNNER_TEMP/updater.pub"
 
   docker-latest:
     needs: [source, plan, registry-preflight, docker-package, publish, docker-verify]
