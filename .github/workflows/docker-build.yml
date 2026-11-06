@@ -1,0 +1,57 @@
+name: Native Docker archive
+on:
+  workflow_call:
+    inputs:
+      source:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      created:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+    outputs:
+      sha256:
+        value: ${{ jobs.build.outputs.sha256 }}
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      sha256: ${{ steps.image.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: automation
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: source
+          ref: ${{ inputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - id: image
+        name: Build and test the exact exported image without credentials
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ inputs.source }}
+          CREATED: ${{ inputs.created }}
+          ARCH: ${{ inputs.arch }}
+        run: bash automation/scripts/build-docker-image.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          overwrite: true
+          name: docker-${{ inputs.arch }}
+          path: source/image.tar
+          compression-level: 0
+          if-no-files-found: error
+

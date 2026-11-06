@@ -330,6 +330,20 @@ class GitCandidate(unittest.TestCase):
         self.assertEqual(out.call_args.kwargs['source'], self.source)
         self.assertEqual(out.call_args.kwargs['mode'], 'resume')
 
+    def test_incomplete_docker_promotion_is_repaired_before_calendar_skip(self):
+        from unittest.mock import Mock
+        sdk.git('tag','v0.1.0-rc.14',self.source)
+        docker=Mock()
+        docker.enabled.return_value=True
+        docker.promotion_pending.return_value=True
+        args=type('Args',(),dict(scheduled=True,dry_run=False,tag=''))()
+        releases=[dict(tag_name='v0.1.0-rc.14',draft=False)]
+        with patch.object(sdk,'docker_tooling',return_value=docker), patch.object(sdk,'release_list',return_value=releases), patch.object(sdk,'scheduled_today',return_value=False) as calendar, patch.object(sdk,'outputs') as out:
+            sdk.detect(args)
+            self.assertEqual(out.call_args.kwargs['mode'],'repair')
+            self.assertEqual(out.call_args.kwargs['source'],self.source)
+            calendar.assert_not_called()
+
     def test_off_week_does_not_select_a_new_sdk(self):
         args = type('Args', (), dict(scheduled=True, dry_run=False, tag=''))()
         sdk.git('checkout', '--detach', self.base)
@@ -508,9 +522,56 @@ class Assets(unittest.TestCase):
             api.assert_not_called()
 
 
+class ChecksumManifest(unittest.TestCase):
+    """Pure manifest rules: byte inputs only, no filesystem or subprocesses."""
+
+    def parse(self, contents):
+        digest = hashlib.sha256(contents).hexdigest()
+        return assets.parse_checksums(contents, digest)
+
+    def test_complete_manifest_preserves_names_and_digests(self):
+        content = ('a' * 64 + '  cli\n' + 'b' * 64 + '  app archive.tar.gz\n').encode()
+        self.assertEqual(self.parse(content), {'cli': 'a' * 64, 'app archive.tar.gz': 'b' * 64})
+
+    def test_replaced_manifest_is_rejected_before_its_contents_are_parsed(self):
+        original = ('a' * 64 + '  cli\n').encode()
+        for replacement in (b'invalid manifest', ('b' * 64 + '  cli\n').encode()):
+            with self.subTest(replacement=replacement):
+                with self.assertRaisesRegex(ValueError, 'differ from signing-job'):
+                    assets.parse_checksums(replacement, hashlib.sha256(original).hexdigest())
+
+    def test_missing_or_malformed_trusted_digest_is_rejected(self):
+        for digest in (None, '', 'a' * 63, 'A' * 64, 'z' * 64, 'a' * 64 + '\n'):
+            with self.subTest(digest=digest):
+                with self.assertRaisesRegex(ValueError, 'signing-job checksums digest'):
+                    assets.parse_checksums(b'not inspected', digest)
+
+    def test_duplicate_and_unsafe_names_are_rejected(self):
+        for name in ('.', '..', '../cli', 'dir/cli', 'dir\\cli', 'SHA256SUMS', 'cli\0name'):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, 'Invalid signed checksums'):
+                    self.parse(('a' * 64 + '  ' + name + '\n').encode())
+        with self.assertRaisesRegex(ValueError, 'Invalid signed checksums'):
+            self.parse(('a' * 64 + '  cli\n' + 'b' * 64 + '  cli\n').encode())
+
+    def test_empty_or_malformed_entries_are_rejected(self):
+        for content in (b'', b'\n', b'not a checksum', b'\xff',
+                        ('g' * 64 + '  cli\n').encode(),
+                        ('a' * 64 + ' cli\n').encode(),
+                        ('a' * 64 + '  \n').encode()):
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError):
+                    self.parse(content)
+
+
 class PublicationRecovery(unittest.TestCase):
     def setUp(self):
         Assets.setUp(self)
+        docker = assets.load_docker()
+        switch = patch.object(docker, 'enabled', return_value=False)
+        switch.start(); self.addCleanup(switch.stop)
+        loader = patch.object(assets, 'load_docker', return_value=docker)
+        loader.start(); self.addCleanup(loader.stop)
         check = patch.object(assets, 'check_source')
         self.source_check = check.start()
         self.addCleanup(check.stop)
@@ -523,7 +584,90 @@ class PublicationRecovery(unittest.TestCase):
         with patch.object(assets, 'verify_signature'):
             self.data = assets.manifest(self.directory, self.args.version, 'public-key')
         (self.directory / 'latest.json').write_text(json.dumps(self.data))
-        (self.directory / 'SHA256SUMS').write_text('fixture checksums')
+        self.checksums()
+
+    def checksums(self, trust=True):
+        (self.directory / 'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in sorted(self.directory.iterdir()) if p.name not in ('SHA256SUMS','docker-release.json')))
+        if trust:
+            self.args.checksums_sha256 = hashlib.sha256((self.directory / 'SHA256SUMS').read_bytes()).hexdigest()
+
+    def test_changed_signed_bytes_are_rejected_before_any_api(self):
+        (self.directory / 'tutabridge-linux-x86_64').write_bytes(b'changed')
+        with patch.object(assets, 'api') as api:
+            with self.assertRaisesRegex(ValueError, 'checksum'): assets.publish(self.args)
+            api.assert_not_called()
+
+    def test_manifest_must_cover_exactly_the_downloaded_files(self):
+        extra = self.directory / 'unexpected'
+        extra.write_bytes(b'extra')
+        with self.assertRaisesRegex(ValueError, 'Incomplete or unexpected'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+        extra.unlink()
+        (self.directory / 'tutabridge-linux-x86_64').unlink()
+        with self.assertRaisesRegex(ValueError, 'Incomplete or unexpected'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+
+    def test_downloaded_asset_and_manifest_cannot_be_symlinks(self):
+        payload = self.directory / 'tutabridge-linux-x86_64'
+        payload.unlink()
+        payload.symlink_to(self.directory / 'tutabridge-macos-arm64')
+        with self.assertRaisesRegex(ValueError, 'Invalid signed asset'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+        manifest = self.directory / 'SHA256SUMS'
+        manifest.unlink()
+        manifest.symlink_to(self.directory / 'latest.json')
+        with self.assertRaisesRegex(ValueError, 'Invalid signed checksums file'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+
+    def test_replaced_cli_and_checksums_are_rejected_before_any_docker_or_api(self):
+        (self.directory / 'tutabridge-linux-x86_64').write_bytes(b'changed')
+        self.checksums(trust=False)
+        with patch.object(assets, 'load_docker') as docker, patch.object(assets, 'run') as run, patch.object(assets, 'api') as api:
+            with self.assertRaisesRegex(ValueError, 'checksums differ from signing-job'):
+                assets.publish(self.args)
+            docker.assert_not_called()
+            run.assert_not_called()
+            api.assert_not_called()
+            self.source_check.assert_not_called()
+
+    @unittest.skipUnless(shutil.which('minisign'), 'real minisign verifier required')
+    def test_real_updater_signatures_cannot_authorize_replaced_unsigned_assets(self):
+        with tempfile.TemporaryDirectory() as root:
+            key = Path(root) / 'test.key'
+            public = Path(root) / 'test.pub'
+            assets.run('minisign', '-G', '-W', '-s', str(key), '-p', str(public))
+            self.key.write_text(base64.b64encode(public.read_bytes()).decode())
+            for name in set(assets.PAYLOADS.values()):
+                signature = Path(root) / (name + '.minisig')
+                assets.run('minisign', '-Sm', str(self.directory / name), '-s', str(key), '-x', str(signature))
+                (self.directory / (name + '.sig')).write_text(base64.b64encode(signature.read_bytes()).decode())
+            data = assets.manifest(self.directory, self.args.version, self.key.read_text())
+            (self.directory / 'latest.json').write_text(json.dumps(data))
+            self.checksums()
+            with patch.object(assets, 'release_state', return_value=({'draft': False}, True)), patch.object(assets, 'api') as api:
+                assets.publish(self.args)  # Real verifier accepts the bound original.
+                api.assert_not_called()
+            (self.directory / 'tutabridge-linux-x86_64').write_bytes(b'replaced CLI')
+            self.checksums(trust=False)
+            # Every updater signature remains valid: it does not cover the CLI.
+            assets.manifest(self.directory, self.args.version, self.key.read_text())
+            with patch.object(assets, 'load_docker') as docker, patch.object(assets, 'api') as api:
+                with self.assertRaisesRegex(ValueError, 'checksums differ from signing-job'):
+                    assets.publish(self.args)
+                docker.assert_not_called()
+                api.assert_not_called()
+
+    def test_missing_or_invalid_signing_output_fails_closed(self):
+        del self.args.checksums_sha256
+        with self.assertRaisesRegex(ValueError, 'signing-job checksums digest'):
+            assets.publish(self.args)
+        for digest in (None, '', 'a'*63, 'A'*64, 'z'*64, 'a'*64+'\n'):
+            with self.subTest(digest=digest), patch.object(assets, 'load_docker') as docker, patch.object(assets, 'api') as api:
+                self.args.checksums_sha256 = digest
+                with self.assertRaisesRegex(ValueError, 'signing-job checksums digest'):
+                    assets.publish(self.args)
+                docker.assert_not_called()
+                api.assert_not_called()
 
     def test_published_release_is_immutable(self):
         with patch.object(assets, 'verify_signature'), patch.object(assets, 'release_state', return_value=({'draft':False}, True)), patch.object(assets, 'run') as run, patch.object(assets, 'api') as api:
@@ -535,16 +679,18 @@ class PublicationRecovery(unittest.TestCase):
     def test_wrong_manifest_version_refused_before_api(self):
         self.data['version'] = '0.1.0-99'
         (self.directory / 'latest.json').write_text(json.dumps(self.data))
+        self.checksums()
         with patch.object(assets, 'verify_signature'), patch.object(assets, 'api') as api:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, 'Updater manifest'):
                 assets.publish(self.args)
             api.assert_not_called()
 
     def test_wrong_manifest_url_refused_before_api(self):
         self.data['platforms']['linux-x86_64']['url'] = 'https://other.test/file'
         (self.directory / 'latest.json').write_text(json.dumps(self.data))
+        self.checksums()
         with patch.object(assets, 'verify_signature'), patch.object(assets, 'api') as api:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, 'Updater manifest'):
                 assets.publish(self.args)
             api.assert_not_called()
 
@@ -579,6 +725,46 @@ class PublicationRecovery(unittest.TestCase):
             assets.publish(self.args)
         self.assertEqual(calls[-1], ('releases/42','PATCH',dict(draft=False,prerelease=False,make_latest='true')))
         self.assertFalse(any(method == 'POST' for _,method,_ in calls))
+
+    def test_docker_is_required_at_both_publication_boundaries(self):
+        from unittest.mock import Mock
+        self.args.require_docker=True
+        record={'fixture':'record'}
+        record_path = self.directory.parent / (self.directory.name + '.docker.json')
+        record_path.write_text(json.dumps(record))
+        self.addCleanup(record_path.unlink)
+        self.args.docker_record = str(record_path)
+        docker=Mock()
+        docker.validate_record.return_value=record
+        docker.RECORD='docker-release.json'
+        docker.durable_bytes.return_value=record_path.read_bytes()
+        docker.registries.return_value=[object(),object()]
+        calls=[]
+        def run(*args,**kwargs):
+            if args[:3]==('gh','api','--paginate'): return '[[]]'
+            if args[:3]==('gh','release','upload'):
+                self.assertNotIn(str(self.directory/'docker-release.json'),args)
+            if args[:3]==('gh','release','download'):
+                destination=Path(args[args.index('--dir')+1])
+                for item in self.directory.iterdir(): shutil.copy2(item,destination/item.name)
+            return ''
+        def api(path,method='GET',data=None):
+            calls.append(method)
+            return {'id':42,'assets':[dict(name=p.name,size=p.stat().st_size) for p in self.directory.iterdir()]}
+        for outcomes in ([False],[True,True,False],[True,True,True,True]):
+            with self.subTest(outcomes=outcomes), patch.object(assets,'load_docker',return_value=docker), patch.object(assets,'verify_signature'), patch.object(assets,'release_state',return_value=({'draft':True,'id':42},True)), patch.object(assets,'run',side_effect=run), patch.object(assets,'api',side_effect=api):
+                (self.directory/'docker-release.json').unlink(missing_ok=True)
+                self.checksums()
+                calls.clear()
+                docker.inspect_record.side_effect=outcomes
+                if all(outcomes):
+                    assets.publish(self.args)
+                    self.assertEqual(calls[-1], 'PATCH')
+                    self.assertEqual((self.directory/'docker-release.json').read_bytes(), record_path.read_bytes())
+                    self.assertIn('  docker-release.json\n', (self.directory/'SHA256SUMS').read_text())
+                else:
+                    with self.assertRaisesRegex(ValueError,'Docker'): assets.publish(self.args)
+                    self.assertNotIn('PATCH',calls)
 
 
 @unittest.skipUnless(shutil.which('tauri') and shutil.which('minisign'), 'real signing tools required')
