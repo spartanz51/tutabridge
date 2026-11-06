@@ -3,9 +3,9 @@ name: Docker
 on:
   push:
     branches: [main]
-    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', 'scripts/docker-release.py', 'scripts/install-regctl.sh', '.github/workflows/docker.yml']
+    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', 'scripts/docker-release.py', 'scripts/install-regctl.sh', 'scripts/build-docker-image.sh', 'scripts/docker-smoke.py', '.github/workflows/docker-build.yml', '.github/workflows/docker.yml']
   pull_request:
-    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', 'scripts/docker-release.py', 'scripts/install-regctl.sh', '.github/workflows/docker.yml']
+    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', 'scripts/docker-release.py', 'scripts/install-regctl.sh', 'scripts/build-docker-image.sh', 'scripts/docker-smoke.py', '.github/workflows/docker-build.yml', '.github/workflows/docker.yml']
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check entrypoint and unit tests
         run: |
-          shellcheck docker/entrypoint.sh
+          shellcheck docker/entrypoint.sh scripts/build-docker-image.sh
           python3 -m unittest discover -s scripts/tests -p 'test_docker_entrypoint.py' -v
           docker compose config --quiet
       - name: Build the CLI image

@@ -49,7 +49,7 @@ def enabled():
 
 def require_enabled():
     if not enabled():
-        raise ValueError('Docker publication is disabled pending Anthony approval')
+        raise ValueError('Docker publication is disabled pending maintainer approval')
     if os.environ.get('GITHUB_REF') != 'refs/heads/main':
         raise ValueError('Production automation must run from main')
 
@@ -367,7 +367,7 @@ def preflight(args):
     docker = enabled()
     if not docker and release and release['draft'] and any(
             asset['name'] == RECORD for asset in release.get('assets', [])):
-        raise ValueError('Draft reserved for Docker: finish it with Docker enabled or have Anthony explicitly abandon this version')
+        raise ValueError('Draft reserved for Docker: finish it with Docker enabled or have a maintainer explicitly abandon this version')
     mode = 'desktop'
     if docker:
         require_enabled()

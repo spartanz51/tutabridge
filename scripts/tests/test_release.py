@@ -522,6 +522,48 @@ class Assets(unittest.TestCase):
             api.assert_not_called()
 
 
+class ChecksumManifest(unittest.TestCase):
+    """Pure manifest rules: byte inputs only, no filesystem or subprocesses."""
+
+    def parse(self, contents):
+        digest = hashlib.sha256(contents).hexdigest()
+        return assets.parse_checksums(contents, digest)
+
+    def test_complete_manifest_preserves_names_and_digests(self):
+        content = ('a' * 64 + '  cli\n' + 'b' * 64 + '  app archive.tar.gz\n').encode()
+        self.assertEqual(self.parse(content), {'cli': 'a' * 64, 'app archive.tar.gz': 'b' * 64})
+
+    def test_replaced_manifest_is_rejected_before_its_contents_are_parsed(self):
+        original = ('a' * 64 + '  cli\n').encode()
+        for replacement in (b'invalid manifest', ('b' * 64 + '  cli\n').encode()):
+            with self.subTest(replacement=replacement):
+                with self.assertRaisesRegex(ValueError, 'differ from signing-job'):
+                    assets.parse_checksums(replacement, hashlib.sha256(original).hexdigest())
+
+    def test_missing_or_malformed_trusted_digest_is_rejected(self):
+        for digest in (None, '', 'a' * 63, 'A' * 64, 'z' * 64, 'a' * 64 + '\n'):
+            with self.subTest(digest=digest):
+                with self.assertRaisesRegex(ValueError, 'signing-job checksums digest'):
+                    assets.parse_checksums(b'not inspected', digest)
+
+    def test_duplicate_and_unsafe_names_are_rejected(self):
+        for name in ('.', '..', '../cli', 'dir/cli', 'dir\\cli', 'SHA256SUMS', 'cli\0name'):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, 'Invalid signed checksums'):
+                    self.parse(('a' * 64 + '  ' + name + '\n').encode())
+        with self.assertRaisesRegex(ValueError, 'Invalid signed checksums'):
+            self.parse(('a' * 64 + '  cli\n' + 'b' * 64 + '  cli\n').encode())
+
+    def test_empty_or_malformed_entries_are_rejected(self):
+        for content in (b'', b'\n', b'not a checksum', b'\xff',
+                        ('g' * 64 + '  cli\n').encode(),
+                        ('a' * 64 + ' cli\n').encode(),
+                        ('a' * 64 + '  \n').encode()):
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError):
+                    self.parse(content)
+
+
 class PublicationRecovery(unittest.TestCase):
     def setUp(self):
         Assets.setUp(self)
@@ -554,6 +596,28 @@ class PublicationRecovery(unittest.TestCase):
         with patch.object(assets, 'api') as api:
             with self.assertRaisesRegex(ValueError, 'checksum'): assets.publish(self.args)
             api.assert_not_called()
+
+    def test_manifest_must_cover_exactly_the_downloaded_files(self):
+        extra = self.directory / 'unexpected'
+        extra.write_bytes(b'extra')
+        with self.assertRaisesRegex(ValueError, 'Incomplete or unexpected'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+        extra.unlink()
+        (self.directory / 'tutabridge-linux-x86_64').unlink()
+        with self.assertRaisesRegex(ValueError, 'Incomplete or unexpected'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+
+    def test_downloaded_asset_and_manifest_cannot_be_symlinks(self):
+        payload = self.directory / 'tutabridge-linux-x86_64'
+        payload.unlink()
+        payload.symlink_to(self.directory / 'tutabridge-macos-arm64')
+        with self.assertRaisesRegex(ValueError, 'Invalid signed asset'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
+        manifest = self.directory / 'SHA256SUMS'
+        manifest.unlink()
+        manifest.symlink_to(self.directory / 'latest.json')
+        with self.assertRaisesRegex(ValueError, 'Invalid signed checksums file'):
+            assets.verify_checksums(self.directory, self.args.checksums_sha256)
 
     def test_replaced_cli_and_checksums_are_rejected_before_any_docker_or_api(self):
         (self.directory / 'tutabridge-linux-x86_64').write_bytes(b'changed')

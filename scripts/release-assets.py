@@ -198,29 +198,42 @@ def load_docker():
     return module
 
 
-def verify_checksums(directory, checksums_sha256):
-    # This digest must come from the signing job output, never the artifact.
-    if not isinstance(checksums_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", checksums_sha256):
-        raise ValueError("Missing or invalid signing-job checksums digest")
-    checksums = directory / 'SHA256SUMS'
-    if checksums.is_symlink() or not checksums.is_file():
-        raise ValueError('Invalid signed checksums file')
-    contents = checksums.read_bytes()
+def parse_checksums(contents: bytes, checksums_sha256: str | None) -> dict[str, str]:
+    """Validate the signer-bound manifest bytes without reading any files."""
+    if not isinstance(checksums_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', checksums_sha256):
+        raise ValueError('Missing or invalid signing-job checksums digest')
     if hashlib.sha256(contents).hexdigest() != checksums_sha256:
         raise ValueError('Signed checksums differ from signing-job output')
-    expected = {p.name for p in directory.iterdir()} - {'SHA256SUMS'}
-    seen = set()
+    entries = {}
     for line in contents.decode('utf-8').splitlines():
         match = re.fullmatch(r'([0-9a-f]{64})  ([^/\\]+)', line)
-        if not match or match[2] in seen or match[2] not in expected:
+        if not match:
             raise ValueError('Invalid signed checksums')
-        name = match[2]
+        checksum, name = match.groups()
+        if name in entries or name in ('.', '..', 'SHA256SUMS') or '\0' in name:
+            raise ValueError('Invalid signed checksums')
+        entries[name] = checksum
+    if not entries:
+        raise ValueError('Empty signed checksums')
+    return entries
+
+
+def verify_checksums(directory, checksums_sha256):
+    """Check the downloaded files against a manifest bound to the signing job."""
+    manifest = directory / 'SHA256SUMS'
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError('Invalid signed checksums file')
+    entries = parse_checksums(manifest.read_bytes(), checksums_sha256)
+    actual = {p.name for p in directory.iterdir()} - {'SHA256SUMS'}
+    if set(entries) != actual:
+        raise ValueError('Incomplete or unexpected signed assets')
+    for name, expected in entries.items():
         path = directory / name
-        if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != match[1]:
-            raise ValueError('Signed asset checksum mismatch')
-        seen.add(name)
-    if seen != expected:
-        raise ValueError('Incomplete signed checksums')
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('Invalid signed asset')
+        with path.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+                raise ValueError('Signed asset checksum mismatch')
 
 
 def publish(args):

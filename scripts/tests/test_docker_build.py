@@ -1,4 +1,4 @@
-"""Execute the native workflow shell with disposable command doubles, no daemon."""
+"""Exercise the native build script with disposable command doubles, no daemon."""
 import hashlib
 import json
 import os
@@ -11,11 +11,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / '.github/workflows/docker-build.yml'
-
-
-def image_step():
-    body = WORKFLOW.read_text().split('        run: |\n', 1)[1]
-    return '\n'.join(line[10:] for line in body.split('\n      - uses:', 1)[0].splitlines())
 
 
 @unittest.skipUnless(shutil.which('bash'), 'workflow requires bash')
@@ -47,7 +42,8 @@ class Smoke(unittest.TestCase):
         automation = root / 'automation/scripts'
         automation.mkdir(parents=True)
         (automation / 'install-regctl.sh').write_text('exit 0\n')
-        shutil.copy2(ROOT / 'scripts/docker-smoke.py', automation)
+        for name in ('docker-smoke.py', 'build-docker-image.sh'):
+            shutil.copy2(ROOT / 'scripts' / name, automation)
         binary = root / 'bin'
         binary.mkdir()
         commands = '''import hashlib, json, os, pathlib, sys
@@ -99,7 +95,7 @@ else:
                    GITHUB_OUTPUT=str(output), COMMAND_LOG=str(root/'commands'), FAILURE=failure,
                    PYTHONDONTWRITEBYTECODE='1')
         env.pop('TUTABRIDGE_HEALTH_TEST_BINARY', None)
-        result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', image_step()],
+        result = subprocess.run(['bash', str(automation / 'build-docker-image.sh')],
                                 cwd=root, env=env, capture_output=True, text=True)
         commands = [json.loads(line) for line in (root/'commands').read_text().splitlines()]
         return result, output, commands
@@ -107,6 +103,9 @@ else:
     def setUp(self):
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
+
+    def test_workflow_calls_the_tested_script(self):
+        self.assertIn('run: bash automation/scripts/build-docker-image.sh', WORKFLOW.read_text())
 
     def test_each_native_arch_builds_same_source_fixtures_before_smoke(self):
         for arch in ('amd64', 'arm64'):
