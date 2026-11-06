@@ -459,11 +459,8 @@ async fn serve_bridge(
 /// Interactive TOTP prompt used during a fresh (non-keyring) login.
 fn make_totp_cb() -> tuta::TwoFactorCallback {
     tuta::TwoFactorCallback::Totp(Box::new(|| {
-        use std::io::{BufRead, Write};
-        print!("TOTP code: ");
-        std::io::stdout().flush()?;
-        let mut code_str = String::new();
-        std::io::stdin().lock().read_line(&mut code_str)?;
+        // Read like the account password, without echo.
+        let code_str = rpassword::prompt_password("TOTP code: ")?;
         let code: u32 = code_str
             .trim()
             .parse()
