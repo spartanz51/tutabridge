@@ -1,5 +1,5 @@
 use base64::Engine;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -339,6 +339,8 @@ where
             .to_uppercase();
 
         if !authenticated && matches!(cmd.as_str(), "MAIL" | "RCPT" | "DATA") {
+            // Usually a client set to "no authentication": say so in the log.
+            warn!("SMTP: {cmd} before authentication rejected; set the mail client's outgoing server to use password authentication");
             writer
                 .write_all(b"530 5.7.0 Authentication required\r\n")
                 .await?;
