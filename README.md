@@ -17,7 +17,7 @@ encryption transparently, so your favourite desktop client just works.
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download)
 [![Built with Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-dea584?logo=rust)](#build-from-source)
 
-[**Download**](#download) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
+[**Download**](#download) · [**Docker**](#docker) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
 
 <br/>
 
@@ -90,6 +90,28 @@ The build is not code-signed, so the first launch needs one click to allow it:
 [`tutabridge-git`](https://aur.archlinux.org/packages/tutabridge-git),
 e.g. `yay -S tutabridge-desktop-bin`.
 
+### Docker
+
+```sh
+docker run -d --name tutabridge --restart unless-stopped \
+  -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
+  -v tutabridge:/data ghcr.io/spartanz51/tutabridge
+docker exec -it tutabridge init      # sign in to Tuta, once
+docker exec tutabridge password      # password for your mail client
+```
+
+<details>
+<summary>On a NAS, or with the mail client on another computer</summary>
+
+Publish the ports on your local network with `-p 1143:1143 -p 1025:1025`
+and point the mail client at the NAS address. Never forward these ports on
+your router. From a NAS interface, run `init` and `password` in the
+container's terminal.
+
+</details>
+
+More in the [Docker guide](docs/DOCKER.md).
+
 ---
 
 ## Updates
@@ -115,9 +137,7 @@ releases.
 
 ## Getting started
 
-For an unattended CLI deployment, see the experimental [Docker guide](docs/DOCKER.md).
-It uses the existing `pass` backend, an interactive initialization command, and
-a persistent volume; normal container starts never prompt for credentials.
+For a server or a NAS, use the [Docker image](#docker) instead.
 
 The desktop app has a tray icon (the menu bar on macOS). Closing its window
 keeps the bridge running; use **Open TutaBridge** to bring it back or

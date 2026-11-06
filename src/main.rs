@@ -234,6 +234,10 @@ async fn initialize() -> anyhow::Result<()> {
     #[cfg(unix)]
     if service::container() {
         config::save_config(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // The container's waiting service picks up the new session by itself.
+        info!("Session saved. The running service starts IMAP and SMTP within seconds.");
+        info!("Use `tutabridge password` to display the local mail-client password.");
+        return Ok(());
     }
     info!("Session saved. Start the service with `tutabridge run --non-interactive`.");
     info!("Use `tutabridge password` to display the local mail-client password.");
