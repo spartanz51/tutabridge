@@ -265,14 +265,14 @@ const MAX_APPEND_BYTES: usize = 26_214_400;
 /// through the bridge, to report its UID.
 const SENT_COPY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Handle an `APPEND`. Tuta saves sent mail server-side, so an APPEND to the
-/// Sent folder is accepted without storing anything: the real copy arrives via
-/// the syncer, and duplicating it would show the mail twice. When the message
-/// was sent through this bridge, the reply carries that copy's UID
-/// (`APPENDUID`, as UIDPLUS promises) so the client can find it; otherwise a
-/// plain OK. Other folders are not supported yet and are rejected before the
-/// literal is sent, so the client aborts the synchronizing literal and the
-/// stream stays in sync.
+/// Handle an `APPEND`. Tuta saves mail sent through the bridge in Sent by
+/// itself, so an APPEND to Sent stores nothing: duplicating that copy would
+/// show the mail twice. The reply carries the copy's UID (`APPENDUID`, as
+/// UIDPLUS promises) so the client can find it, or a plain OK while the copy
+/// is still on its way. A message that was not sent through the bridge would
+/// be kept nowhere, so it is refused rather than acknowledged and lost. Other
+/// folders are not supported yet and are rejected before the literal is sent,
+/// so the client aborts the synchronizing literal and the stream stays in sync.
 async fn handle_append<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -308,23 +308,26 @@ where
     let mut tail = String::new();
     reader.read_line(&mut tail).await?;
 
-    let message_id = crate::mail::parser::parse_rfc2822(&String::from_utf8_lossy(&buf)).message_id;
-    let uid = match message_id {
-        Some(id) => {
-            session
-                .sent_copy_uid(&req.mailbox, &id, SENT_COPY_WAIT)
-                .await
-        }
-        None => None,
-    };
-    // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
-    let resp = match uid {
-        Some(uid) => format!("{} OK [APPENDUID 1 {uid}] APPEND completed\r\n", req.tag),
-        None => format!("{} OK APPEND completed\r\n", req.tag),
-    };
+    let message_id = crate::mail::parser::parse_message_id(&String::from_utf8_lossy(&buf));
+    let copy = session
+        .sent_copy(&req.mailbox, message_id.as_deref(), SENT_COPY_WAIT)
+        .await;
+    let resp = append_sent_reply(&req.tag, &copy);
     writer.write_all(resp.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// The tagged reply to an APPEND to Sent, given where Tuta's copy stands.
+fn append_sent_reply(tag: &str, copy: &session::SentCopy) -> String {
+    match copy {
+        // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
+        session::SentCopy::Found(uid) => format!("{tag} OK [APPENDUID 1 {uid}] APPEND completed\r\n"),
+        session::SentCopy::Pending => format!("{tag} OK APPEND completed\r\n"),
+        session::SentCopy::Unknown => format!(
+            "{tag} NO [CANNOT] Only mail sent through the bridge can be saved to Sent; Tuta keeps it automatically\r\n"
+        ),
+    }
 }
 
 // Container health probes open unauthenticated sessions every thirty seconds.
@@ -740,7 +743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_to_sent_reads_literal_and_returns_ok() {
+    async fn append_of_a_mail_not_sent_here_is_read_then_refused() {
         let session = session_with_sent().await;
         let (mut client, server) = tokio::io::duplex(4096);
         let (sr, mut sw) = tokio::io::split(server);
@@ -766,7 +769,23 @@ mod tests {
         };
         let (res, resp) = tokio::join!(server_fut, client_fut);
         res.unwrap();
-        assert!(resp.contains("a1 OK APPEND completed"), "got {resp:?}");
+        // The literal was consumed (the stream stays in sync), then refused:
+        // acknowledging it would lose the message, since nothing keeps it.
+        assert!(resp.contains("a1 NO [CANNOT]"), "got {resp:?}");
+    }
+
+    #[test]
+    fn append_sent_reply_matches_where_the_copy_stands() {
+        use session::SentCopy;
+        assert_eq!(
+            append_sent_reply("a1", &SentCopy::Found(42)),
+            "a1 OK [APPENDUID 1 42] APPEND completed\r\n"
+        );
+        assert_eq!(
+            append_sent_reply("a2", &SentCopy::Pending),
+            "a2 OK APPEND completed\r\n"
+        );
+        assert!(append_sent_reply("a3", &SentCopy::Unknown).starts_with("a3 NO [CANNOT] "));
     }
 
     #[tokio::test]
