@@ -14,7 +14,9 @@ encryption transparently, so your favourite desktop client just works.
 [![CI](https://github.com/spartanz51/tutabridge/actions/workflows/ci.yml/badge.svg)](https://github.com/spartanz51/tutabridge/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/spartanz51/tutabridge?include_prereleases&sort=semver)](https://github.com/spartanz51/tutabridge/releases)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Docker-lightgrey)](#download)
+[![Docker pulls](https://img.shields.io/docker/pulls/spartanz51/tutabridge?logo=docker&logoColor=white)](https://hub.docker.com/r/spartanz51/tutabridge)
+[![GHCR](https://img.shields.io/badge/ghcr.io-spartanz51%2Ftutabridge-blue?logo=docker&logoColor=white)](https://github.com/spartanz51/tutabridge/pkgs/container/tutabridge)
 [![Built with Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-dea584?logo=rust)](#build-from-source)
 
 [**Download**](#download) · [**Docker**](#docker) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
