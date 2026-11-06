@@ -92,21 +92,25 @@ e.g. `yay -S tutabridge-desktop-bin`.
 
 ### Docker
 
-For a home server or a NAS, a headless image runs the bridge as a service
-(`linux/amd64`, `linux/arm64`):
-
 ```sh
 docker run -d --name tutabridge --restart unless-stopped \
   -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
   -v tutabridge:/data ghcr.io/spartanz51/tutabridge
-
-docker exec -it tutabridge init   # Tuta login, once
-docker exec tutabridge password   # password for your mail client
+docker exec -it tutabridge init      # sign in to Tuta, once
+docker exec tutabridge password      # password for your mail client
 ```
 
-The image is also on Docker Hub as `spartanz51/tutabridge`. The session stays
-encrypted on the volume, and later starts never ask for credentials. See the
-[Docker guide](docs/DOCKER.md) for Compose, NAS, updates and backups.
+<details>
+<summary>On a NAS, or with the mail client on another computer</summary>
+
+Publish the ports on your local network with `-p 1143:1143 -p 1025:1025`
+and point the mail client at the NAS address. Never forward these ports on
+your router. From a NAS interface, run `init` and `password` in the
+container's terminal.
+
+</details>
+
+More in the [Docker guide](docs/DOCKER.md).
 
 ---
 
