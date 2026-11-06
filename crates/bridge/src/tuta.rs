@@ -111,6 +111,12 @@ pub trait MailBackend: Send + Sync {
         target: &FolderInfo,
     ) -> Result<(), String>;
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String>;
+    /// Element id of a mail recently sent through this bridge, by the
+    /// Message-ID its client submitted. Lets IMAP answer the client's "save a
+    /// copy to Sent" with the UID of Tuta's own Sent copy.
+    async fn sent_mail_element_id(&self, _submitted_message_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Canonical IMAP name for a system folder, or `None` for custom/unsupported.
@@ -181,11 +187,13 @@ const SENT_ID_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 /// long-running bridge stays bounded.
 const SENT_ID_CACHE_MAX_ENTRIES: usize = 200;
 
-/// One remembered send: when it happened and the Message-ID the server
-/// assigned to the delivered mail (bare, no angle brackets).
+/// One remembered send: when it happened, the Message-ID the server
+/// assigned to the delivered mail (bare, no angle brackets), and the element
+/// id of the sent mail, which keeps its draft's id when it moves to Sent.
 struct SentIdEntry {
     stored_at: std::time::Instant,
     tuta_message_id: String,
+    element_id: String,
 }
 
 pub struct TutaSession {
@@ -374,6 +382,16 @@ impl TutaSession {
         if mail.mailDetailsDraft.is_some() {
             match mail_facade.load_mail_details_draft(mail).await {
                 Ok(details) => Ok(Some(details)),
+                // A draft that was just sent or deleted loses its draft
+                // details; callers re-read the mail, so this is not a failure.
+                Err(
+                    e @ ApiCallError::ServerResponseError {
+                        source: tutasdk::rest_error::HttpError::NotFoundError,
+                    },
+                ) => {
+                    log::debug!("Draft details gone (sent or deleted): {e}");
+                    Err(e)
+                }
                 Err(e) => {
                     log::error!("Failed to load mail details draft: {e}");
                     Err(e)
@@ -697,6 +715,7 @@ impl TutaSession {
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(randomizer.generate_random_array::<4>()),
         );
+        let draft_element_id = draft_return.draft.element_id.to_string();
         let send_data = build_send_draft_data(
             session_key.as_bytes().to_vec(),
             draft_return.draft,
@@ -714,7 +733,7 @@ impl TutaSession {
         // Remember submitted-id → delivered-id so the next patch in a
         // series can thread against what the server actually sent.
         if let Some(submitted_id) = &msg.message_id {
-            self.remember_sent_message_id(submitted_id, &send_return.messageId)
+            self.remember_sent_message_id(submitted_id, &send_return.messageId, &draft_element_id)
                 .await;
         }
         Ok(())
@@ -757,7 +776,7 @@ impl TutaSession {
     /// Remember which Message-ID the server assigned to a mail we just
     /// sent, keyed by the id the submitter used. Same soft-eviction shape
     /// as the self-send cache.
-    async fn remember_sent_message_id(&self, submitted_id: &str, tuta_id: &str) {
+    async fn remember_sent_message_id(&self, submitted_id: &str, tuta_id: &str, element_id: &str) {
         let mut cache = self.sent_id_cache.lock().await;
         if cache.len() >= SENT_ID_CACHE_MAX_ENTRIES && !cache.contains_key(submitted_id) {
             if let Some(oldest_key) = cache
@@ -773,6 +792,7 @@ impl TutaSession {
             SentIdEntry {
                 stored_at: std::time::Instant::now(),
                 tuta_message_id: tuta_id.to_string(),
+                element_id: element_id.to_string(),
             },
         );
     }
@@ -1111,6 +1131,14 @@ impl MailBackend for TutaSession {
 
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String> {
         self.send_mail_impl(msg).await.map_err(|e| format!("{e}"))
+    }
+
+    async fn sent_mail_element_id(&self, submitted_message_id: &str) -> Option<String> {
+        let cache = self.sent_id_cache.lock().await;
+        cache
+            .get(submitted_message_id)
+            .filter(|e| e.stored_at.elapsed() <= SENT_ID_CACHE_TTL)
+            .map(|e| e.element_id.clone())
     }
 }
 
