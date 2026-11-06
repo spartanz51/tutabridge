@@ -1348,7 +1348,7 @@ fn append_literal_size(args: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::Engine;
     use tutasdk::date::DateTime;
@@ -2619,7 +2619,7 @@ mod tests {
         }
     }
 
-    fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
+    pub(crate) fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
         Mail {
             _id: Some(IdTupleGenerated::new(test_id("list1"), test_id(element_id))),
             _permissions: test_id("perm1"),
