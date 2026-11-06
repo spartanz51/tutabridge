@@ -308,24 +308,26 @@ where
     let mut tail = String::new();
     reader.read_line(&mut tail).await?;
 
-    let message_id = crate::mail::parser::parse_rfc2822(&String::from_utf8_lossy(&buf)).message_id;
+    let message_id = crate::mail::parser::parse_message_id(&String::from_utf8_lossy(&buf));
     let copy = session
         .sent_copy(&req.mailbox, message_id.as_deref(), SENT_COPY_WAIT)
         .await;
-    let resp = match copy {
-        // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
-        session::SentCopy::Found(uid) => {
-            format!("{} OK [APPENDUID 1 {uid}] APPEND completed\r\n", req.tag)
-        }
-        session::SentCopy::Pending => format!("{} OK APPEND completed\r\n", req.tag),
-        session::SentCopy::Unknown => format!(
-            "{} NO [CANNOT] Only mail sent through the bridge can be saved to Sent; Tuta keeps it automatically\r\n",
-            req.tag
-        ),
-    };
+    let resp = append_sent_reply(&req.tag, &copy);
     writer.write_all(resp.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// The tagged reply to an APPEND to Sent, given where Tuta's copy stands.
+fn append_sent_reply(tag: &str, copy: &session::SentCopy) -> String {
+    match copy {
+        // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
+        session::SentCopy::Found(uid) => format!("{tag} OK [APPENDUID 1 {uid}] APPEND completed\r\n"),
+        session::SentCopy::Pending => format!("{tag} OK APPEND completed\r\n"),
+        session::SentCopy::Unknown => format!(
+            "{tag} NO [CANNOT] Only mail sent through the bridge can be saved to Sent; Tuta keeps it automatically\r\n"
+        ),
+    }
 }
 
 // Container health probes open unauthenticated sessions every thirty seconds.
@@ -770,6 +772,20 @@ mod tests {
         // The literal was consumed (the stream stays in sync), then refused:
         // acknowledging it would lose the message, since nothing keeps it.
         assert!(resp.contains("a1 NO [CANNOT]"), "got {resp:?}");
+    }
+
+    #[test]
+    fn append_sent_reply_matches_where_the_copy_stands() {
+        use session::SentCopy;
+        assert_eq!(
+            append_sent_reply("a1", &SentCopy::Found(42)),
+            "a1 OK [APPENDUID 1 42] APPEND completed\r\n"
+        );
+        assert_eq!(
+            append_sent_reply("a2", &SentCopy::Pending),
+            "a2 OK APPEND completed\r\n"
+        );
+        assert!(append_sent_reply("a3", &SentCopy::Unknown).starts_with("a3 NO [CANNOT] "));
     }
 
     #[tokio::test]
