@@ -1,5 +1,6 @@
 //! Process assertions run in an isolated test subprocess: subreaping must never
 //! interfere with the test harness's other children or signal dispositions.
+use super::health::connect_health;
 use super::*;
 
 fn temporary(name: &str) -> PathBuf {

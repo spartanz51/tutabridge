@@ -9,55 +9,16 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum State {
-    Configuration = 10,
-    Session = 11,
-    Storage = 12,
-    Rejected = 13,
-    Version = 14,
-    Occupied = 15,
-    Starting = 16,
-    Network = 17,
-    Failed = 18,
-    Stopping = 19,
-    Initialization = 20,
-}
-impl State {
-    pub fn reason(self) -> &'static str {
-        match self {
-            Self::Configuration => "Waiting for configuration; run tutabridge init",
-            Self::Session => "Waiting for a saved session; run tutabridge init",
-            Self::Storage => "Session storage unavailable; check volume permissions, GPG key and pass store",
-            Self::Rejected => "Saved session rejected; run tutabridge init (existing entry preserved)",
-            Self::Version => "Tuta rejects this version; update the image: docker compose pull && docker compose up -d",
-            Self::Occupied => "Data volume occupied by another init or service",
-            Self::Starting => "Starting IMAP and SMTP",
-            Self::Network => "Tuta temporarily unavailable; retrying with backoff",
-            Self::Failed => "Service failed; inspect startup diagnostics",
-            Self::Stopping => "Stopping",
-            Self::Initialization => "Initialization failed or cancelled; inspect diagnostics and saved session state",
-        }
-    }
-    fn from_code(code: i32) -> Self {
-        match code {
-            10 => Self::Configuration,
-            11 => Self::Session,
-            12 => Self::Storage,
-            13 => Self::Rejected,
-            14 => Self::Version,
-            17 => Self::Network,
-            20 => Self::Initialization,
-            _ => Self::Failed,
-        }
-    }
-}
+mod health;
+mod policy;
+
+pub use health::check as health;
+pub use policy::State;
 
 pub fn container() -> bool {
     std::env::var_os("TUTABRIDGE_CONTAINER").is_some_and(|v| v == "1")
@@ -245,215 +206,6 @@ impl StatusServer {
             task,
         })
     }
-}
-
-pub async fn health() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(4), async {
-        let mut socket = UnixStream::connect(runtime_dir().join("health.sock"))
-            .await
-            .context("Service status unavailable")?;
-        socket.write_all(b"h").await?;
-        let mut bytes = Vec::new();
-        (&mut socket).take(65537).read_to_end(&mut bytes).await?;
-        if bytes.len() > 65536 {
-            bail!("Invalid service status");
-        }
-        let status: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if status["state"].as_i64() != Some(State::Starting as i64) {
-            bail!(
-                "{}",
-                status["reason"].as_str().unwrap_or("Service unavailable")
-            );
-        }
-        let ports = status["ports"].as_array().context("Service is starting")?;
-        if ports.len() != 2 {
-            bail!("Invalid service ports");
-        }
-        let imap = u16::try_from(ports[0].as_u64().context("Invalid IMAP port")?)?;
-        let smtp = u16::try_from(ports[1].as_u64().context("Invalid SMTP port")?)?;
-        let pem = status["certificate"].as_str().context("TLS is starting")?;
-        let address = status["address"]
-            .as_str()
-            .context("Service address unavailable")?
-            .parse()?;
-        probe(address, imap, smtp, pem).await
-    })
-    .await
-    .context("Health check timed out")?
-}
-
-/// Pin the local leaf DER, independent of SAN/expiry; still verify possession
-/// of its private key via the provider's TLS handshake signature algorithms.
-#[derive(Debug)]
-struct PinnedCertificate(tokio_rustls::rustls::pki_types::CertificateDer<'static>);
-impl tokio_rustls::rustls::client::danger::ServerCertVerifier for PinnedCertificate {
-    fn verify_server_cert(
-        &self,
-        end: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
-        _: &tokio_rustls::rustls::pki_types::ServerName<'_>,
-        _: &[u8],
-        _: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
-    {
-        if end != &self.0 {
-            return Err(tokio_rustls::rustls::Error::General(
-                "Local certificate pin mismatch".into(),
-            ));
-        }
-        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        signature: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
-        tokio_rustls::rustls::Error,
-    > {
-        tokio_rustls::rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            signature,
-            &tokio_rustls::rustls::crypto::ring::default_provider()
-                .signature_verification_algorithms,
-        )
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        signature: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
-        tokio_rustls::rustls::Error,
-    > {
-        tokio_rustls::rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            signature,
-            &tokio_rustls::rustls::crypto::ring::default_provider()
-                .signature_verification_algorithms,
-        )
-    }
-    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
-        tokio_rustls::rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-async fn connect_health(address: std::net::IpAddr, port: u16) -> io::Result<tokio::net::TcpStream> {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    match address {
-        IpAddr::V4(ip) if ip.is_unspecified() => {
-            tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await
-        }
-        IpAddr::V6(ip) if ip.is_unspecified() => {
-            // Some dual-stack listeners have IPv4 loopback but no ::1 route.
-            // Only unspecified IPv6 permits fallback; explicit binds stay exact.
-            if let Ok(Ok(tcp)) = tokio::time::timeout(
-                Duration::from_secs(1),
-                tokio::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)),
-            )
-            .await
-            {
-                return Ok(tcp);
-            }
-            tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await
-        }
-        ip => tokio::net::TcpStream::connect((ip, port)).await,
-    }
-}
-
-async fn probe(address: std::net::IpAddr, imap: u16, smtp: u16, pem: &str) -> anyhow::Result<()> {
-    use rustls::pki_types::{pem::PemObject, CertificateDer};
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio_rustls::{rustls, TlsConnector};
-    let certificate = CertificateDer::from_pem_slice(pem.as_bytes())?;
-    let connector = TlsConnector::from(Arc::new(
-        rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(PinnedCertificate(certificate)))
-            .with_no_client_auth(),
-    ));
-    async fn line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> anyhow::Result<String> {
-        let mut value = String::new();
-        let mut limited = r.take(4097);
-        limited.read_line(&mut value).await?;
-        if value.len() > 4096 || !value.ends_with('\n') {
-            bail!("Invalid protocol response");
-        }
-        Ok(value)
-    }
-    let tcp = connect_health(address, imap)
-        .await
-        .context("IMAP unavailable")?;
-    let mut connection = BufReader::new(
-        connector
-            .connect("localhost".try_into()?, tcp)
-            .await
-            .context("IMAP TLS unavailable")?,
-    );
-    if !line(&mut connection).await?.starts_with("* OK") {
-        bail!("IMAP greeting unavailable");
-    }
-    connection.get_mut().write_all(b"health NOOP\r\n").await?;
-    if !line(&mut connection).await?.starts_with("health OK") {
-        bail!("IMAP NOOP failed");
-    }
-    connection
-        .get_mut()
-        .write_all(b"healthend LOGOUT\r\n")
-        .await?;
-    let mut logged_out = false;
-    for _ in 0..4 {
-        if line(&mut connection).await?.starts_with("healthend OK") {
-            logged_out = true;
-            break;
-        }
-    }
-    if !logged_out {
-        bail!("IMAP LOGOUT failed");
-    }
-    let _ = connection.get_mut().shutdown().await;
-    let tcp = connect_health(address, smtp)
-        .await
-        .context("SMTP unavailable")?;
-    let mut connection = BufReader::new(
-        connector
-            .connect("localhost".try_into()?, tcp)
-            .await
-            .context("SMTP TLS unavailable")?,
-    );
-    if !line(&mut connection).await?.starts_with("220 ") {
-        bail!("SMTP greeting unavailable");
-    }
-    connection
-        .get_mut()
-        .write_all(b"EHLO localhost\r\n")
-        .await?;
-    let mut hello = false;
-    for _ in 0..32 {
-        let reply = line(&mut connection).await?;
-        if reply.starts_with("250 ") {
-            hello = true;
-            break;
-        }
-        if !reply.starts_with("250-") {
-            break;
-        }
-    }
-    if !hello {
-        bail!("SMTP EHLO failed");
-    }
-    connection.get_mut().write_all(b"QUIT\r\n").await?;
-    if !line(&mut connection).await?.starts_with("221 ") {
-        bail!("SMTP QUIT failed");
-    }
-    let _ = connection.get_mut().shutdown().await;
-    Ok(())
 }
 
 fn configure_status() -> Status {
@@ -790,10 +542,10 @@ pub async fn supervise(
     } else {
         None
     };
-    let mut blocked = None;
+    let mut blocked: Option<(State, Option<Vec<u8>>)> = None;
     let mut state = State::Starting;
-    let mut logged = std::time::Instant::now() - Duration::from_secs(301);
-    let mut backoff = 10;
+    let mut logged = std::time::Instant::now() - policy::LOG_INTERVAL;
+    let mut backoff = policy::POLL_DELAY;
     loop {
         if *stop.borrow() {
             if init {
@@ -810,10 +562,10 @@ pub async fn supervise(
         let result = match acquired {
             Ok(Some(lock)) => {
                 let fingerprint = session_fingerprint();
-                if blocked.as_ref().is_some_and(|(reason, old)| {
-                    *reason == State::Version || (*reason == State::Rejected && old == &fingerprint)
+                if let Some((reason, _)) = blocked.as_ref().filter(|(reason, old)| {
+                    reason.awaits_repair(old.as_deref(), fingerprint.as_deref())
                 }) {
-                    blocked.as_ref().unwrap().0
+                    *reason
                 } else {
                     sender.send_replace(configure_status());
                     match worker(&lock, init, &mut stop, &sender).await? {
@@ -846,7 +598,7 @@ pub async fn supervise(
                 detail
             );
         }
-        if result != state || logged.elapsed() >= Duration::from_secs(300) {
+        if result.should_log(state, logged.elapsed()) {
             log::info!(
                 "{}{}{}",
                 result.reason(),
@@ -856,16 +608,10 @@ pub async fn supervise(
             logged = std::time::Instant::now();
         }
         state = result;
-        let delay = if matches!(result, State::Failed | State::Network) {
-            let delay = backoff;
-            backoff = (backoff * 2).min(300);
-            delay
-        } else {
-            backoff = 10;
-            10
-        };
+        let (delay, next_backoff) = result.retry_delay(backoff);
+        backoff = next_backoff;
         // All worker activity and guards have ended before this sleep.
-        let deadline = tokio::time::sleep(Duration::from_secs(delay));
+        let deadline = tokio::time::sleep(delay);
         tokio::pin!(deadline);
         let mut reap = tokio::time::interval(Duration::from_secs(1));
         loop {
@@ -948,7 +694,9 @@ pub async fn password() -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::health::probe;
     use super::*;
+    use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     #[test]

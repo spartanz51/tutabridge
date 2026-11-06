@@ -4,6 +4,18 @@ Run from a checkout whose pinned SDK has been prepared with
 `python3 scripts/sdk-prepare.py`. No registry credentials or Tuta account are
 needed. These commands are also run by `.github/workflows/docker.yml`.
 
+The pure retry policies and status validation can be tested without Docker,
+subprocess fixtures or a Tuta account:
+
+```sh
+cargo test --locked -p tutabridge --bin tutabridge service::policy::tests
+cargo test --locked -p tutabridge --bin tutabridge service::health::tests
+```
+
+These tests cover retry delays, repair detection, log cadence and health input
+validation. The integration checks below additionally exercise real locks,
+process cleanup, TLS and storage.
+
 ```sh
 docker build -t tutabridge:test .
 docker build --target test-binaries --output type=local,dest=/tmp/tutabridge-tests .
