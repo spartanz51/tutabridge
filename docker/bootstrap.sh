@@ -27,7 +27,8 @@ quietly() {
 
 # Only primary fingerprints; encryption subkeys must not count as extra keys.
 secret_keys() {
-    gpg --batch --with-colons --list-secret-keys |
+    # Listing must not print keybox or trustdb notices on a fresh volume.
+    gpg --batch --quiet --no-auto-check-trustdb --with-colons --list-secret-keys |
         awk -F: '$1 == "sec" { primary = 1; next } $1 == "fpr" && primary { print $10; primary = 0 }'
 }
 
