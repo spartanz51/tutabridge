@@ -196,9 +196,11 @@ jobs:
 
   release:
     needs: [detect, candidate, bridge-ci, integrate]
-    if: always() && !cancelled() && needs.bridge-ci.result == 'success' && (needs.integrate.result == 'success' || needs.detect.outputs.mode == 'resume')
+    if: always() && !cancelled() && needs.detect.result == 'success' && (needs.detect.outputs.mode == 'repair' || (needs.bridge-ci.result == 'success' && (needs.integrate.result == 'success' || needs.detect.outputs.mode == 'resume')))
     permissions:
       contents: write
+      packages: write
+      actions: read
     uses: ./.github/workflows/release.yml
     with:
       ref: ${{ needs.candidate.outputs.source || needs.detect.outputs.source }}
@@ -207,3 +209,4 @@ jobs:
     secrets:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

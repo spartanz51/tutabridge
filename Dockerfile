@@ -38,6 +38,16 @@ COPY --from=test-builder /build/test-core /test-core
 COPY --from=test-builder /build/test-service /test-service
 
 FROM debian:bookworm-slim AS runtime
+ARG TUTABRIDGE_VERSION
+ARG TUTABRIDGE_REVISION
+ARG TUTABRIDGE_CREATED
+LABEL org.opencontainers.image.source="https://github.com/spartanz51/tutabridge" \
+      org.opencontainers.image.version="${TUTABRIDGE_VERSION}" \
+      org.opencontainers.image.revision="${TUTABRIDGE_REVISION}" \
+      org.opencontainers.image.created="${TUTABRIDGE_CREATED}" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      org.opencontainers.image.title="TutaBridge" \
+      org.opencontainers.image.description="IMAP/SMTP bridge for Tuta encrypted email"
 # libdbus is still linked by the Linux keyring backend, although this image
 # explicitly selects pass. No desktop session or Secret Service is needed.
 RUN apt-get update && apt-get install --no-install-recommends -y \

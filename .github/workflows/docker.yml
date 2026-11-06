@@ -3,9 +3,9 @@ name: Docker
 on:
   push:
     branches: [main, develop]
-    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', '.github/workflows/docker.yml']
+    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', 'scripts/docker-release.py', 'scripts/install-regctl.sh', 'scripts/build-docker-image.sh', 'scripts/docker-smoke.py', '.github/workflows/docker-build.yml', '.github/workflows/docker.yml']
   pull_request:
-    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', '.github/workflows/docker.yml']
+    paths: ['Dockerfile', '.dockerignore', 'compose.yaml', 'docker/**', 'src/**', 'crates/**', 'sdk/**', 'Cargo.toml', 'Cargo.lock', '.gitmodules', 'tuta-repo', 'scripts/sdk-prepare.py', 'scripts/tests/test_docker*', 'scripts/docker-release.py', 'scripts/install-regctl.sh', 'scripts/build-docker-image.sh', 'scripts/docker-smoke.py', '.github/workflows/docker-build.yml', '.github/workflows/docker.yml']
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check entrypoint and unit tests
         run: |
-          shellcheck docker/entrypoint.sh docker/bootstrap.sh docker/tests/run-real-pass.sh docker/bin/init docker/bin/password
+          shellcheck docker/entrypoint.sh docker/bootstrap.sh docker/tests/run-real-pass.sh docker/bin/init docker/bin/password scripts/build-docker-image.sh
           python3 -m unittest discover -s scripts/tests -p 'test_docker_entrypoint.py' -v
           docker compose config --quiet
       - name: Build the CLI image
@@ -51,3 +51,17 @@ jobs:
           TUTABRIDGE_DOCKER_IMAGE: tutabridge:test
           TUTABRIDGE_HEALTH_TEST_BINARY: ${{ runner.temp }}/docker-test-binaries/test-service
         run: python3 -m unittest discover -s scripts/tests -p 'test_docker_smoke.py' -v
+
+  transport:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Exercise transport and retries against disposable loopback registries
+        env:
+          TUTABRIDGE_TEST_REGISTRY: "1"
+        run: |
+          bash scripts/install-regctl.sh "$RUNNER_TEMP/tools"
+          export PATH="$RUNNER_TEMP/tools:$PATH"
+          python3 -m unittest discover -s scripts/tests -p test_docker_release.py -v
