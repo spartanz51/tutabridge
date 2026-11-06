@@ -1178,6 +1178,18 @@ pub async fn login_with_2fa(
 pub enum PersistencePolicy {
     AllowVolatile,
     Required,
+    /// Container resume/init keeps rejected bytes until a successful new login.
+    PreserveExistingRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResumeError {
+    #[error("Saved session rejected; explicit initialization is required")]
+    SessionInvalid,
+    #[error("Tuta rejects this version; update the image")]
+    ClientRejected,
+    #[error("Tuta temporarily unavailable; saved session retained")]
+    Transient,
 }
 
 fn accept_session_save(
@@ -1185,7 +1197,9 @@ fn accept_session_save(
     result: Result<(), crate::session_store::SessionStoreError>,
 ) -> Result<(), crate::session_store::SessionStoreError> {
     match (policy, result) {
-        (PersistencePolicy::Required, result) => result,
+        (PersistencePolicy::Required | PersistencePolicy::PreserveExistingRequired, result) => {
+            result
+        }
         (_, Err(error)) => {
             log::warn!("Session is available only in memory: {error}");
             Ok(())
@@ -1205,6 +1219,10 @@ mod persistence_policy_tests {
             message: "encryption failed".into(),
         };
         assert!(accept_session_save(PersistencePolicy::Required, Err(failure())).is_err());
+        assert!(
+            accept_session_save(PersistencePolicy::PreserveExistingRequired, Err(failure()))
+                .is_err()
+        );
         assert!(accept_session_save(PersistencePolicy::AllowVolatile, Err(failure())).is_ok());
         for policy in [
             PersistencePolicy::Required,
@@ -1229,7 +1247,7 @@ pub async fn login_with_persistence(
     }
     // Only an explicit password login may continue without persistence when
     // the OS keychain cannot be accessed. Automatic resume remains strict.
-    let credentials = if persistence == PersistencePolicy::Required {
+    let credentials = if persistence != PersistencePolicy::AllowVolatile {
         store.load_persisted(password.is_some()).await?
     } else if password.is_some() {
         store.load_interactive().await?
@@ -1247,7 +1265,11 @@ pub async fn login_with_persistence(
     let sdk = Sdk::new_without_suspension(cfg.api_url.clone(), rest_client, file_client);
 
     if let Some(credentials) = credentials {
-        log::info!("Resuming saved session...");
+        if persistence == PersistencePolicy::PreserveExistingRequired {
+            log::debug!("Resuming saved session...");
+        } else {
+            log::info!("Resuming saved session...");
+        }
         let access_token = credentials.access_token.clone();
         match sdk.login(credentials).await {
             Ok(logged_in) => {
@@ -1260,6 +1282,14 @@ pub async fn login_with_persistence(
                 });
             }
             Err(e) => match classify_resume_failure(&e) {
+                ResumeFailure::SessionInvalid
+                    if persistence == PersistencePolicy::PreserveExistingRequired =>
+                {
+                    if password.is_none() {
+                        return Err(ResumeError::SessionInvalid.into());
+                    }
+                    // Explicit reauthentication may replace it only after success.
+                }
                 ResumeFailure::SessionInvalid => {
                     log::warn!("Saved session is no longer valid, re-authenticating: {e}");
                     if let Err(error) = store.delete().await {
@@ -1267,6 +1297,9 @@ pub async fn login_with_persistence(
                     }
                 }
                 ResumeFailure::ClientRejected => {
+                    if persistence == PersistencePolicy::PreserveExistingRequired {
+                        return Err(ResumeError::ClientRejected.into());
+                    }
                     return Err(format!(
                         "Tuta rejects this version of the bridge ({e}); update the bridge. \
                          The saved session was kept."
@@ -1274,6 +1307,9 @@ pub async fn login_with_persistence(
                     .into());
                 }
                 ResumeFailure::Transient => {
+                    if persistence == PersistencePolicy::PreserveExistingRequired {
+                        return Err(ResumeError::Transient.into());
+                    }
                     return Err(format!(
                         "Could not resume the saved session ({e}); it was kept, try again later."
                     )
@@ -1347,7 +1383,12 @@ pub async fn login_with_persistence(
         Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))
     })?;
 
-    accept_session_save(persistence, store.save(&credentials).await)?;
+    let saved = if persistence == PersistencePolicy::PreserveExistingRequired {
+        store.save_preserving(&credentials).await
+    } else {
+        store.save(&credentials).await
+    };
+    accept_session_save(persistence, saved)?;
 
     Ok(TutaSession {
         logged_in,
