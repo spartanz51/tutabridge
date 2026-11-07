@@ -279,12 +279,7 @@ async fn serve_bridge(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     info!("Storage encryption key derived");
 
-    let local_store = LocalStore::open(
-        &config::store_db_path(),
-        &config::store_mails_dir(),
-        storage_key,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let local_store = LocalStore::open_default(storage_key).map_err(|e| anyhow::anyhow!("{e}"))?;
     if !local_store.verify_key() {
         info!("Storage key changed — resetting local cache");
         let _ = local_store.reset();
@@ -554,12 +549,7 @@ async fn run_backup(output: &str) -> anyhow::Result<()> {
     // Open the cache without the reset-on-mismatch the bridge uses: a wrong
     // key just makes `read_eml` miss and fall through to a server fetch,
     // which is safe; wiping the cache during a backup would be destructive.
-    let local_store = LocalStore::open(
-        &config::store_db_path(),
-        &config::store_mails_dir(),
-        storage_key,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let local_store = LocalStore::open_default(storage_key).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let output_path = std::path::Path::new(output);
     info!("Backing up all mail to {} ...", output_path.display());
