@@ -20,3 +20,13 @@ log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
 rpassword = "7"
+
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+async-trait = "0.1"
+crypto-primitives = { path = "sdk/generated/tuta-sdk/rust/crypto-primitives" }
+rcgen = "0.13"

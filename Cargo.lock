@@ -6143,9 +6143,14 @@ name = "tutabridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "crypto-primitives",
  "env_logger",
+ "libc",
  "log 0.4.29",
+ "rcgen",
  "rpassword",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tuta-sdk",
@@ -6174,6 +6179,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",

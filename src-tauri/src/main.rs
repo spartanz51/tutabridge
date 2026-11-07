@@ -98,7 +98,6 @@ fn main() {
 
 async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
     use tutabridge_core::config;
-    use tutabridge_core::tuta;
 
     let mut cfg = match config::load_config() {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
@@ -110,9 +109,10 @@ async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
         log::warn!("Bridge password setup failed: {e}");
     }
 
-    match tuta::has_saved_session(&cfg) {
-        Ok(true) => {}
-        Ok(false) => return,
+    let store = state.lock().await.session_store(&cfg);
+    match store.load().await {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
         Err(e) => {
             log::warn!("Auto-start failed: {e}");
             return;

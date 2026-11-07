@@ -94,6 +94,7 @@ first, internal ones last; which is which, and their status, is tracked in
 | 10 AEAD session reads | Decrypts AEAD v3 values with the session key and field context | Hooks the existing primitives into the entity decoder. |
 | 11 AEAD group reads | Decrypts AEAD v2 values with versioned group keys and the KDF nonce | Key resolution belongs with the key loader. |
 | 12 bucket instance keys | Retains keys for attachment children from their parent Mail | Decapsulation and key context remain in the SDK. |
+| 13 Android logger | Honors the `logging` feature before installing the Android logger | The CLI already owns its logger; installing a second global logger panics on first SDK initialization. |
 
 What the fork used to carry beyond this (event bus client, folder tree,
 MOVE, `MailSetEntry` id codec, inline event decryption) composes from the

@@ -1,5 +1,6 @@
 use base64::Engine;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -141,12 +142,12 @@ fn redact_credentials<'a>(line: &'a str, step: &AuthStep) -> std::borrow::Cow<'a
 }
 
 pub async fn serve(
-    port: u16,
+    address: SocketAddr,
     tuta: Arc<dyn MailBackend>,
     tls: TlsAcceptor,
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = crate::net::bind_local("SMTP", port).await?;
+    let listener = crate::net::bind("SMTP", address).await?;
     serve_listener(listener, tuta, tls, password_hash).await
 }
 
@@ -176,10 +177,18 @@ pub async fn serve_listener(
                             handle_connection(tls_stream, tuta, pw_hash, SmtpLimits::default())
                                 .await
                         {
-                            error!("SMTP connection error: {}", e);
+                            if e.downcast_ref::<std::io::Error>()
+                                .is_some_and(crate::net::is_benign_disconnect)
+                            {
+                                debug!("SMTP peer disconnected");
+                            } else {
+                                error!("SMTP connection error: {}", e);
+                            }
                         }
                     }
-                    Ok(Err(e)) => error!("SMTP TLS handshake failed: {}", e),
+                    Ok(Err(e)) => {
+                        log::log!(crate::net::tls_failure_level(&e), "SMTP TLS failure: {e}");
+                    }
                     Err(_) => debug!("SMTP TLS handshake timed out"),
                 }
             }
@@ -330,6 +339,8 @@ where
             .to_uppercase();
 
         if !authenticated && matches!(cmd.as_str(), "MAIL" | "RCPT" | "DATA") {
+            // Usually a client set to "no authentication": say so in the log.
+            warn!("SMTP: {cmd} before authentication rejected; set the mail client's outgoing server to use password authentication");
             writer
                 .write_all(b"530 5.7.0 Authentication required\r\n")
                 .await?;
@@ -455,7 +466,7 @@ fn verify_smtp_plain_data(data: &str, expected: &Option<String>) -> String {
 
 fn verify_smtp_password(password: &str, expected: &Option<String>) -> String {
     match expected {
-        Some(expected_pw) if password == expected_pw => {
+        Some(expected_pw) if crate::util::secret_eq(password, expected_pw) => {
             "235 2.7.0 Authentication successful\r\n".to_string()
         }
         Some(_) => "535 5.7.8 Authentication failed\r\n".to_string(),
