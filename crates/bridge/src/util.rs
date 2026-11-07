@@ -31,6 +31,28 @@ pub fn secret_eq(presented: &str, expected: &str) -> bool {
     presented.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
+/// Keep the process's memory out of reach of other processes running as the
+/// same user. The bridge holds the Tuta session, the derived storage key and
+/// decrypted mail in memory, so on Linux it clears the dumpable flag: the
+/// kernel then refuses `ptrace` attach (and so `/proc/<pid>/mem`) from any
+/// unprivileged process, and writes no core dump if the bridge crashes.
+/// Root is unaffected, as are debuggers that launch the bridge themselves.
+/// Other platforms are a no-op. Call it once, early in `main`.
+pub fn harden_process() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: prctl with PR_SET_DUMPABLE takes one integer argument and
+        // touches no memory of ours.
+        let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong, 0, 0, 0) };
+        if rc != 0 {
+            log::warn!(
+                "Could not make the process non-dumpable: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

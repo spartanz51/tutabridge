@@ -6170,6 +6170,7 @@ dependencies = [
  "dirs",
  "hex",
  "keyring",
+ "libc",
  "log 0.4.29",
  "rand 0.8.6",
  "rand_core 0.6.4",

@@ -55,6 +55,8 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# `prctl(PR_SET_DUMPABLE)`: see `util::harden_process`.
+libc = "0.2"
 
 [dev-dependencies]
 tutabridge-tuta = { path = "../tuta", features = ["testing"] }
