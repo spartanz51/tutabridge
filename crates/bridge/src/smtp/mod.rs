@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::mail::parser::parse_rfc2822;
 use crate::tuta::MailBackend;
@@ -36,6 +37,9 @@ enum LineOutcome {
     TooLong,
 }
 
+/// Longest SMTP command line, CRLF included (RFC 5321, 4.5.3.1.4).
+const COMMAND_LINE_BYTES: usize = 512;
+
 /// Read one `\n`-terminated line without ever buffering more than `max_bytes`.
 /// Returns `TooLong` if a line exceeds the cap before terminating (the caller
 /// should drop the connection: the stream is now stuck mid-line). Uses the
@@ -48,7 +52,10 @@ async fn read_line_capped<R>(
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut raw: Vec<u8> = Vec::new();
+    // Wiped when dropped. Reserved up front so a command line (512 bytes at
+    // most, RFC 5321), AUTH credentials included, never makes it grow: growth
+    // would free a copy of the bytes read so far without wiping it.
+    let mut raw = Zeroizing::new(Vec::with_capacity(COMMAND_LINE_BYTES.min(max_bytes)));
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
@@ -82,7 +89,10 @@ fn finish_line(raw: &[u8], max_bytes: usize, out: &mut String) -> LineOutcome {
         return LineOutcome::TooLong;
     }
     out.clear();
-    out.push_str(&String::from_utf8_lossy(raw));
+    match String::from_utf8_lossy(raw) {
+        std::borrow::Cow::Borrowed(text) => out.push_str(text),
+        std::borrow::Cow::Owned(text) => out.push_str(&Zeroizing::new(text)),
+    }
     LineOutcome::Line
 }
 
@@ -214,7 +224,10 @@ where
 
     writer.write_all(b"220 TutaBridge SMTP ready\r\n").await?;
 
-    let mut line = String::new();
+    // The line buffer carries the AUTH credentials: wiped right after an
+    // AUTH line and when the session ends.
+    let mut line = Zeroizing::new(String::new());
+    let mut wipe_line = false;
     let mut data_buf = String::new();
     let mut in_data = false;
     let mut data_too_large = false;
@@ -222,6 +235,9 @@ where
     let mut authenticated = password_hash.is_none();
 
     loop {
+        if std::mem::take(&mut wipe_line) {
+            line.zeroize();
+        }
         let outcome = match read_line_capped(&mut reader, limits.max_line_bytes, &mut line).await {
             Ok(outcome) => outcome,
             Err(e) if crate::net::is_benign_disconnect(&e) => {
@@ -240,7 +256,15 @@ where
         }
 
         let trimmed = line.trim_end();
-        debug!("SMTP C: {}", redact_credentials(trimmed, &auth_step));
+        wipe_line = !in_data
+            && (!matches!(auth_step, AuthStep::None)
+                || trimmed
+                    .get(..4)
+                    .is_some_and(|verb| verb.eq_ignore_ascii_case("AUTH")));
+        // Message lines are mail content: never log them, only the commands.
+        if !in_data {
+            debug!("SMTP C: {}", redact_credentials(trimmed, &auth_step));
+        }
 
         if !matches!(auth_step, AuthStep::None) {
             let response = match auth_step {
@@ -254,12 +278,15 @@ where
                 }
                 AuthStep::WaitLoginPass => {
                     auth_step = AuthStep::None;
-                    let password = base64::engine::general_purpose::STANDARD
-                        .decode(trimmed.trim())
-                        .ok()
-                        .and_then(|b| String::from_utf8(b).ok())
-                        .unwrap_or_default();
-                    verify_smtp_password(&password, &password_hash)
+                    let decoded = Zeroizing::new(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(trimmed.trim())
+                            .unwrap_or_default(),
+                    );
+                    // Borrow from the wiping owner: invalid UTF-8 must not
+                    // drop an unprotected FromUtf8Error containing the bytes.
+                    let password = std::str::from_utf8(&decoded).unwrap_or_default();
+                    verify_smtp_password(password, &password_hash)
                 }
                 AuthStep::None => unreachable!(),
             };
@@ -451,16 +478,18 @@ fn extract_address(line: &str) -> String {
 }
 
 fn verify_smtp_plain_data(data: &str, expected: &Option<String>) -> String {
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(data.trim())
-        .unwrap_or_default();
+    let decoded = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .unwrap_or_default(),
+    );
     // AUTH PLAIN format: \0username\0password
     let parts: Vec<&[u8]> = decoded.splitn(3, |b| *b == 0).collect();
-    let password = if parts.len() >= 3 {
-        String::from_utf8_lossy(parts[2]).to_string()
+    let password = Zeroizing::new(if parts.len() >= 3 {
+        String::from_utf8_lossy(parts[2]).into_owned()
     } else {
         String::new()
-    };
+    });
     verify_smtp_password(&password, expected)
 }
 
@@ -649,6 +678,40 @@ mod tests {
         assert!(matches!(
             read_line_capped(&mut r, 5, &mut s).await.unwrap(),
             LineOutcome::TooLong
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_handles_fragmented_lines_at_the_limit() {
+        // Force several growth steps, including a split UTF-8 sequence.
+        let data = "AUTH é-long-synthetic-password\r\n".as_bytes();
+        for cap in [data.len() - 1, data.len(), data.len() + 1] {
+            let mut reader = BufReader::with_capacity(2, data);
+            let mut out = String::new();
+            let result = read_line_capped(&mut reader, cap, &mut out).await.unwrap();
+            if cap < data.len() {
+                assert!(matches!(result, LineOutcome::TooLong));
+            } else {
+                assert!(matches!(result, LineOutcome::Line));
+                assert_eq!(out.as_bytes(), data);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_preserves_lossy_utf8_and_final_unterminated_line() {
+        let mut reader = BufReader::with_capacity(2, &b"pw-\xff\r\nlast"[..]);
+        let mut out = String::new();
+        for expected in ["pw-\u{fffd}\r\n", "last"] {
+            assert!(matches!(
+                read_line_capped(&mut reader, 100, &mut out).await.unwrap(),
+                LineOutcome::Line
+            ));
+            assert_eq!(out, expected);
+        }
+        assert!(matches!(
+            read_line_capped(&mut reader, 100, &mut out).await.unwrap(),
+            LineOutcome::Eof
         ));
     }
 
@@ -1051,5 +1114,66 @@ mod tests {
             !crate::net::log_capture::lines_containing("SMTP C: QUIT").is_empty(),
             "QUIT was swallowed by the AUTH LOGIN exchange"
         );
+    }
+
+    #[tokio::test]
+    async fn login_rejects_invalid_utf8_then_accepts_a_valid_retry() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let task = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Arc::new(CountingBackend::default()),
+                Some("synthetic-password".into()),
+                SmtpLimits::default(),
+            )
+            .await
+            .unwrap();
+        });
+        assert!(drain(&mut client).await.starts_with("220"));
+        for (password, response) in [
+            (&b"synthetic-password\xff"[..], "535"),
+            (&b"synthetic-password"[..], "235"),
+        ] {
+            client.write_all(b"AUTH LOGIN\r\n").await.unwrap();
+            assert!(drain(&mut client).await.starts_with("334"));
+            client.write_all(b"dXNlcg==\r\n").await.unwrap();
+            assert!(drain(&mut client).await.starts_with("334"));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(password);
+            client
+                .write_all(format!("{encoded}\r\n").as_bytes())
+                .await
+                .unwrap();
+            assert!(drain(&mut client).await.starts_with(response));
+        }
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        assert!(drain(&mut client).await.starts_with("221"));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_content_never_reaches_the_debug_log() {
+        crate::net::log_capture::install();
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let backend = Arc::new(CountingBackend::default());
+        let b = backend.clone();
+        let h = tokio::spawn(async move {
+            let _ = handle_connection(
+                server,
+                b as Arc<dyn MailBackend>,
+                None,
+                SmtpLimits::default(),
+            )
+            .await;
+        });
+        run_to_data(&mut client).await;
+        client
+            .write_all(b"Subject: LOG-PRIVACY-SUBJECT-91aa\r\n\r\nLOG-PRIVACY-BODY-91aa\r\n.\r\n")
+            .await
+            .unwrap();
+        assert!(drain(&mut client).await.starts_with("250"));
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = h.await;
+        assert!(!crate::net::log_capture::lines_containing("SMTP C: DATA").is_empty());
+        assert!(crate::net::log_capture::lines_containing("LOG-PRIVACY").is_empty());
     }
 }

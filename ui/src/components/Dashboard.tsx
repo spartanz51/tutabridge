@@ -94,10 +94,15 @@ export function Dashboard({
             : "Start the bridge to connect your mail client";
 
   const handleStart = async () => {
-    await onStart(
-      needsPassword ? password : undefined,
-      needsEmail ? email.trim() : undefined,
-    );
+    try {
+      await onStart(
+        needsPassword ? password : undefined,
+        needsEmail ? email.trim() : undefined,
+      );
+    } finally {
+      // The bridge keeps the session from here on: do not hold the password.
+      setPassword("");
+    }
   };
 
   const handleVerifyTotp = async () => {

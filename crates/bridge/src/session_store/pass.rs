@@ -41,7 +41,7 @@ impl PassStore {
         Ok(command)
     }
 
-    pub(super) fn read(&self) -> Result<Option<Vec<u8>>, String> {
+    pub(super) fn read(&self) -> Result<Option<super::SecretBytes>, String> {
         // A nonzero exit status cannot distinguish a missing entry from a GPG
         // failure. Only a confirmed missing file means there is no session.
         if !self.entry_exists()? {
@@ -53,16 +53,22 @@ impl PassStore {
             .stdin(Stdio::null())
             .output()
             .map_err(|error| format!("cannot run pass: {error}"))?;
-        if !output.status.success() {
-            // Never include stdout: a failed command may still have emitted
-            // some of the decrypted credentials.
+        // Own stdout before looking at the status: a failed command may still
+        // have emitted some of the decrypted credentials, which must be wiped
+        // and never included in the error.
+        let std::process::Output {
+            status,
+            stdout,
+            stderr,
+        } = output;
+        let stdout = zeroize::Zeroizing::new(stdout);
+        if !status.success() {
             return Err(format!(
-                "pass show exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                "pass show exited with {status}: {}",
+                String::from_utf8_lossy(&stderr).trim()
             ));
         }
-        Ok(Some(output.stdout))
+        Ok(Some(stdout))
     }
 
     pub(super) fn write(&self, secret: &str) -> Result<(), String> {
@@ -112,7 +118,7 @@ impl PassStore {
             let verified = pending
                 .read()
                 .map_err(|_| "Encrypted session could not be decrypted for verification")?;
-            if verified.as_deref() != Some(value.as_bytes()) {
+            if verified.as_ref().map(|bytes| bytes.as_slice()) != Some(value.as_bytes()) {
                 return Err("Encrypted session failed read-back verification".into());
             }
             Ok(())
@@ -504,7 +510,10 @@ mod preservation_tests {
             directory: Some(directory.clone()),
         };
         store.write_preserving("synthetic first session").unwrap();
-        assert_eq!(store.read().unwrap().unwrap(), b"synthetic first session");
+        assert_eq!(
+            store.read().unwrap().unwrap().as_slice(),
+            b"synthetic first session"
+        );
         let target = directory.join(format!("{}.gpg", store.entry));
         let original = std::fs::read(&target).unwrap();
         let recipient = std::fs::read(directory.join(".gpg-id")).unwrap();
@@ -550,7 +559,7 @@ mod preservation_tests {
             .write_preserving("synthetic replacement session")
             .unwrap();
         assert_eq!(
-            store.read().unwrap().unwrap(),
+            store.read().unwrap().unwrap().as_slice(),
             b"synthetic replacement session"
         );
         assert!(std::fs::read_dir(target.parent().unwrap())

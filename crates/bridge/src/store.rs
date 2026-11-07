@@ -96,8 +96,10 @@ impl LocalStore {
         let conn = Connection::open(db_path)?;
         crate::fs_private::tighten(db_path);
 
-        let hex_key = hex::encode(storage_key.as_bytes());
-        conn.pragma_update(None, "key", format!("x'{hex_key}'"))?;
+        // Our copies of the key are wiped once SQLCipher has it.
+        let hex_key = zeroize::Zeroizing::new(hex::encode(storage_key.as_bytes()));
+        let key_pragma = zeroize::Zeroizing::new(format!("x'{}'", hex_key.as_str()));
+        conn.pragma_update(None, "key", key_pragma.as_str())?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
         // Migrate: if the stored schema version differs, drop the cache tables.
