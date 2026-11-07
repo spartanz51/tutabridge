@@ -167,6 +167,43 @@ fn push_alternative_body(msg: &mut String, boundary: &str, plain: &str, html: &s
     msg.push_str(&format!("\r\n--{}--\r\n", boundary));
 }
 
+/// The quote markers for text nested `depth` blockquotes deep: the `>`
+/// characters run together, with no spaces between them.
+///
+/// This is the form RFC 3676 defines and the one Tuta's own converters
+/// produce and parse — `PlainTextToHtmlConverter.ts` and the newer
+/// `plain_text_to_html_converter.rs` both count *consecutive* `>` and then
+/// skip exactly one space. `> > ` would be read back as a single level, so
+/// emitting that here would silently flatten every nested quote the moment
+/// the text was quoted again.
+fn quote_markers(depth: usize) -> String {
+    ">".repeat(depth)
+}
+
+/// Write the quote markers for a line that is about to take content.
+fn open_quoted_line(out: &mut String, fresh_line: &mut bool, after_break: &mut bool, depth: usize) {
+    if *fresh_line {
+        *fresh_line = false;
+        *after_break = false;
+        if depth > 0 {
+            out.push_str(&quote_markers(depth));
+            out.push(' ');
+        }
+    }
+}
+
+/// End the current line. A blank line inside a quote is the markers alone,
+/// with no trailing space — the shape Tuta's converter recognises as a
+/// quoted line with no content.
+fn end_quoted_line(out: &mut String, fresh_line: &mut bool, after_break: &mut bool, depth: usize) {
+    if *fresh_line && depth > 0 {
+        out.push_str(&quote_markers(depth));
+    }
+    *fresh_line = true;
+    *after_break = true;
+    out.push('\n');
+}
+
 /// Convert a Tuta HTML body to text for the text/plain alternative part.
 ///
 /// Must invert the storage encoding exactly, or `git am` breaks on received
@@ -177,8 +214,8 @@ fn push_alternative_body(msg: &mut String, boundary: &str, plain: &str, html: &s
 ///   versions before the plaintext fix stored them — the fast path.
 ///
 /// Anything else gets a whitespace-PRESERVING strip: `<br>` and closing
-/// block tags become newlines, script/style contents are dropped, entities
-/// are decoded. (`strip_html` is unsuitable here — it collapses whitespace
+/// block tags become newlines, `<blockquote>` nesting becomes `>` quote
+/// markers, script/style contents are dropped, entities are decoded. (`strip_html` is unsuitable here — it collapses whitespace
 /// for search indexing.)
 pub(crate) fn html_to_text(html: &str) -> String {
     let trimmed = html.trim();
@@ -197,9 +234,22 @@ pub(crate) fn html_to_text(html: &str) -> String {
 
     let mut out = String::with_capacity(trimmed.len());
     let mut chars = trimmed.chars();
+    // How many `<blockquote>` levels we are inside, and whether the current
+    // line still needs its quote markers written.
+    let mut depth: usize = 0;
+    let mut fresh_line = true;
+    // Whether the line we are on was opened by a break rather than simply
+    // being where the scan started. It is the only way to tell a blank
+    // quoted line from no line at all when a quote ends.
+    let mut after_break = false;
     while let Some(c) = chars.next() {
         if c != '<' {
-            out.push(c);
+            if c == '\n' {
+                end_quoted_line(&mut out, &mut fresh_line, &mut after_break, depth);
+            } else {
+                open_quoted_line(&mut out, &mut fresh_line, &mut after_break, depth);
+                out.push(c);
+            }
             continue;
         }
         let mut tag = String::new();
@@ -230,24 +280,38 @@ pub(crate) fn html_to_text(html: &str) -> String {
                     break;
                 }
             }
+        } else if name == "blockquote" {
+            // Quoted mail arrives as nesting alone: Gmail and Tuta express a
+            // quote with `<blockquote>` and carry no `>` characters at all.
+            // Rendered without markers, the reply's own words and the words
+            // it quotes become indistinguishable.
+            if !fresh_line {
+                end_quoted_line(&mut out, &mut fresh_line, &mut after_break, depth);
+            } else if closing && after_break && depth > 0 {
+                // `<br></blockquote>`: the break announced one more quoted
+                // line and the quote then ended, so that line is blank and
+                // quoted. Dropping it loses a paragraph break.
+                out.push_str(&quote_markers(depth));
+                out.push('\n');
+            }
+            // An opening tag consumes the break instead: the line it starts
+            // belongs to the deeper quote, not to this one.
+            after_break = false;
+            // Saturating, because real mail nests these unevenly: a stray
+            // closing tag must not underflow the depth.
+            depth = if closing {
+                depth.saturating_sub(1)
+            } else {
+                depth + 1
+            };
         } else if name == "br"
             || (closing
                 && matches!(
                     name,
-                    "p" | "div"
-                        | "tr"
-                        | "li"
-                        | "pre"
-                        | "blockquote"
-                        | "h1"
-                        | "h2"
-                        | "h3"
-                        | "h4"
-                        | "h5"
-                        | "h6"
+                    "p" | "div" | "tr" | "li" | "pre" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
                 ))
         {
-            out.push('\n');
+            end_quoted_line(&mut out, &mut fresh_line, &mut after_break, depth);
         }
     }
     decode_entities(&out)
@@ -1261,6 +1325,101 @@ mod tests {
     fn html_to_text_converts_breaks_and_blocks_to_newlines() {
         let html = "<div>first</div><p>second<br>third</p><style>.x{}</style><script>bad()</script>tail &amp; end";
         assert_eq!(html_to_text(html), "first\nsecond\nthird\ntail & end");
+    }
+
+    #[test]
+    fn html_to_text_marks_quoted_lines() {
+        // The shape Gmail and Tuta actually store: nesting, no `>` anywhere.
+        let html = "wrote:<blockquote><br>first<br>second</blockquote>reply";
+        assert_eq!(html_to_text(html), "wrote:\n>\n> first\n> second\nreply");
+    }
+
+    #[test]
+    fn html_to_text_marks_nested_quotes() {
+        let html = "<blockquote>outer<blockquote>inner</blockquote></blockquote>";
+        assert_eq!(html_to_text(html), "> outer\n>> inner\n");
+    }
+
+    /// Tuta's own `getLineQuoteLevel`, transcribed from
+    /// `PlainTextToHtmlConverter.ts` and `plain_text_to_html_converter.rs`:
+    /// count consecutive `>`, stop at the first space, reset to zero on
+    /// anything else.
+    fn tuta_quote_level(line: &str) -> usize {
+        let mut level = 0;
+        for c in line.chars() {
+            if c == '>' {
+                level += 1;
+            } else if c == ' ' {
+                break;
+            } else {
+                return 0;
+            }
+        }
+        level
+    }
+
+    #[test]
+    fn quoted_output_reparses_at_the_same_depth() {
+        // What matters is not that this inverts Tuta's converter — the HTML
+        // we render is the sender's, sanitised, and never passed through it.
+        // What matters is that quoting our output again preserves the depth.
+        let html = "<blockquote>a<blockquote>b<blockquote>c</blockquote></blockquote></blockquote>";
+        let text = html_to_text(html);
+        assert_eq!(text, "> a\n>> b\n>>> c\n");
+        let levels: Vec<usize> = text.lines().map(tuta_quote_level).collect();
+        // The `> > ` spelling would read back as 1, 1, 1 — every nested
+        // quote silently flattened on the next reply.
+        assert_eq!(levels, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_literal_angle_bracket_is_not_a_quote_marker() {
+        // Content that merely starts with `>` keeps its depth: the marker
+        // run comes from nesting, the rest is text.
+        let html = "<blockquote>&gt; inner quote text</blockquote>";
+        let text = html_to_text(html);
+        assert_eq!(text, "> > inner quote text\n");
+        // And Tuta reads that back as depth 1, which is correct: the second
+        // `>` is content, not a level.
+        assert_eq!(tuta_quote_level(text.lines().next().unwrap()), 1);
+    }
+
+    #[test]
+    fn html_to_text_keeps_markers_on_blank_quoted_lines() {
+        // A blank line inside a quote keeps its marker, trailing space
+        // trimmed — otherwise a quoted patch loses its paragraph breaks.
+        let html = "<blockquote>one<br><br>two</blockquote>";
+        assert_eq!(html_to_text(html), "> one\n>\n> two\n");
+    }
+
+    #[test]
+    fn html_to_text_keeps_a_blank_quoted_line_at_the_end_of_a_quote() {
+        // `<br></blockquote>` is a blank quoted line, not a stray break.
+        // Dropping it merges the quote into what follows.
+        assert_eq!(html_to_text("<blockquote>a<br></blockquote>b"), "> a\n>\nb");
+        // Without a break before the close there is no such line.
+        assert_eq!(html_to_text("<blockquote>a</blockquote>b"), "> a\nb");
+        // An opening tag consumes the break: the line belongs to the inner
+        // quote, so no blank line is invented at the outer level.
+        assert_eq!(
+            html_to_text("<blockquote>a<blockquote>b</blockquote></blockquote>"),
+            "> a\n>> b\n"
+        );
+    }
+
+    #[test]
+    fn html_to_text_survives_a_stray_closing_quote() {
+        // Real mail nests these unevenly; depth must not underflow.
+        let html = "<blockquote>a</blockquote></blockquote>b";
+        assert_eq!(html_to_text(html), "> a\nb");
+    }
+
+    #[test]
+    fn html_to_text_quotes_entities_without_double_marking() {
+        // `-&gt;` decodes to `->` after the markers are placed, so it must
+        // not be mistaken for a quote marker of its own.
+        let html = "<blockquote>x -&gt;open()</blockquote>";
+        assert_eq!(html_to_text(html), "> x ->open()\n");
     }
 
     #[test]
