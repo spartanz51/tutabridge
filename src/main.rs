@@ -34,6 +34,7 @@ async fn run() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Failed to install TLS crypto provider"))?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    tutabridge_core::util::harden_process();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse(&args).map_err(anyhow::Error::msg)?;

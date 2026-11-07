@@ -17,6 +17,7 @@ fn main() {
     const LOG_FILTER: &str = "info,tutabridge_core=debug,tutabridge_gui=debug,\
         h2=warn,hyper=warn,hyper_util=warn,rustls=warn,mio=warn,tokio_util=warn,want=warn";
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER)).init();
+    tutabridge_core::util::harden_process();
 
     tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default()
