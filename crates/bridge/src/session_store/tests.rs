@@ -28,7 +28,7 @@ impl FakeBackend {
     fn new(credentials: Option<&Credentials>) -> Self {
         Self {
             observations: Arc::new(Observations {
-                persisted: Mutex::new(credentials.map(codec::encode)),
+                persisted: Mutex::new(credentials.map(|c| codec::encode(c).to_string())),
                 ..Observations::default()
             }),
             read_results: VecDeque::new(),

@@ -32,17 +32,16 @@ pub fn secret_eq(presented: &str, expected: &str) -> bool {
 }
 
 /// Keep the process's memory out of reach of other processes running as the
-/// same user. The bridge holds the Tuta session, the derived storage key and
-/// decrypted mail in memory, so on Linux it clears the dumpable flag: the
-/// kernel then refuses `ptrace` attach (and so `/proc/<pid>/mem`) from any
-/// unprivileged process, and writes no core dump if the bridge crashes.
-/// Root is unaffected, as are debuggers that launch the bridge themselves.
-/// Other platforms are a no-op. Call it once, early in `main`.
+/// same user. The bridge holds the Tuta session, the cache key and decrypted
+/// mail in memory, so on Linux it clears the dumpable flag: the kernel then
+/// refuses `ptrace` attach (and so `/proc/<pid>/mem`) from unprivileged
+/// processes, and writes no core dump if the bridge crashes. Root is not
+/// affected. A no-op on other platforms. Call it once, early in `main`.
 pub fn harden_process() {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: prctl with PR_SET_DUMPABLE takes one integer argument and
-        // touches no memory of ours.
+        // SAFETY: PR_SET_DUMPABLE takes one integer argument and touches no
+        // memory of ours.
         let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong, 0, 0, 0) };
         if rc != 0 {
             log::warn!(
@@ -56,6 +55,29 @@ pub fn harden_process() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs in a child process, so the test binary itself stays dumpable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn harden_process_makes_the_process_non_dumpable() {
+        const CHILD: &str = "TUTABRIDGE_HARDEN_PROCESS_CHILD";
+        const NAME: &str = "util::tests::harden_process_makes_the_process_non_dumpable";
+        if std::env::var_os(CHILD).is_some() {
+            harden_process();
+            // SAFETY: PR_GET_DUMPABLE takes no argument and returns the flag.
+            let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+            assert_eq!(dumpable, 0, "the process is still dumpable");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        assert!(stdout.contains("1 passed"), "child ran no test: {stdout}");
+    }
     use std::sync::{Arc, Mutex};
 
     #[test]

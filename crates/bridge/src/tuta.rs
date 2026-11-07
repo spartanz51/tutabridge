@@ -276,11 +276,11 @@ impl TutaSession {
             .get_current_sym_group_key(&user_group_id)
             .await
             .map_err(|e| format!("Failed to get user group key: {e}"))?;
-        let derived = blake3_kdf(
+        let derived = zeroize::Zeroizing::new(blake3_kdf(
             &[versioned_key.object.as_bytes()],
             "tutabridge local storage v1",
             AES_256_KEY_SIZE,
-        );
+        ));
         GenericAesKey::from_bytes(&derived).map_err(|e| format!("Key derivation error: {e:?}"))
     }
 

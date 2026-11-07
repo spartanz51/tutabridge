@@ -195,6 +195,8 @@ impl BridgeHandle {
         password: Option<String>,
         totp_callback: Option<TwoFactorCallback>,
     ) -> Result<(), String> {
+        // The Tuta password is wiped from memory once this start is over.
+        let password = password.map(zeroize::Zeroizing::new);
         {
             let current = self.status.read().await;
             if *current == BridgeStatus::Running || *current == BridgeStatus::Starting {
@@ -242,13 +244,17 @@ impl BridgeHandle {
 
         self.emit_log(&format!("Authenticating as {}...", config.email));
         let session_store = self.session_store(&config);
-        let session =
-            match tuta::login_with_2fa(&config, &session_store, password.as_deref(), totp_callback)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
-            };
+        let session = match tuta::login_with_2fa(
+            &config,
+            &session_store,
+            password.as_ref().map(|p| p.as_str()),
+            totp_callback,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
+        };
         self.emit_log(&format!("Logged in as {}", config.email));
 
         // Every failure from here on must go through `start_failed` too: an

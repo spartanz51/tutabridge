@@ -126,6 +126,35 @@ fn redact_credentials(line: &str, awaiting_auth: bool) -> std::borrow::Cow<'_, s
     line.into()
 }
 
+/// Whether a client command line carries credentials (`LOGIN`, or
+/// `AUTHENTICATE` with an initial response).
+fn is_login_command(line: &str) -> bool {
+    let mut words = line.split_whitespace().skip(1);
+    words.next().is_some_and(|verb| {
+        verb.eq_ignore_ascii_case("LOGIN") || verb.eq_ignore_ascii_case("AUTHENTICATE")
+    })
+}
+
+/// What the debug log may show of a server response. Untagged data responses
+/// carry mail content (FETCH envelopes, headers and bodies), so only their
+/// first words and size are kept; tagged and continuation responses keep their
+/// first line, which never holds mail content.
+fn log_summary(response: &str) -> std::borrow::Cow<'_, str> {
+    let response = response.trim_end();
+    if let Some(rest) = response.strip_prefix("* ") {
+        let head: Vec<&str> = rest.split_whitespace().take(2).collect();
+        let shown = format!("* {}", head.join(" "));
+        if shown.len() >= response.len() {
+            return response.into();
+        }
+        return format!("{shown} … ({} bytes)", response.len()).into();
+    }
+    match response.split_once("\r\n") {
+        Some((first, _)) => format!("{first} … ({} bytes)", response.len()).into(),
+        None => response.into(),
+    }
+}
+
 async fn handle_connection(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     session_id: u64,
@@ -162,7 +191,9 @@ where
     W: AsyncWriteExt + Unpin,
 {
     let session_id = session.session_id();
-    let mut line = String::new();
+    // The line buffer carries LOGIN and AUTHENTICATE credentials: wiped right
+    // after such a line and when the session ends.
+    let mut line = zeroize::Zeroizing::new(String::new());
     loop {
         if session.is_idle() {
             line.clear();
@@ -188,7 +219,7 @@ where
                     if trimmed.eq_ignore_ascii_case("DONE") {
                         let responses = session.end_idle();
                         for resp in &responses {
-                            debug!("IMAP S: {}", resp.trim_end());
+                            debug!("IMAP S: {}", log_summary(resp));
                             writer.write_all(resp.as_bytes()).await?;
                         }
                         writer.flush().await?;
@@ -197,7 +228,7 @@ where
                 _ = store_watch.changed() => {
                     let updates = session.check_new_mail().await;
                     for resp in &updates {
-                        debug!("IMAP S (store update): {}", resp.trim_end());
+                        debug!("IMAP S (store update): {}", log_summary(resp));
                         writer.write_all(resp.as_bytes()).await?;
                     }
                     writer.flush().await?;
@@ -235,13 +266,17 @@ where
             }
         }
 
+        let carries_secret = session.is_awaiting_auth() || is_login_command(trimmed);
         let responses = if session.is_awaiting_auth() {
             session.handle_auth_response(trimmed)
         } else {
             session.handle_command(trimmed).await
         };
+        if carries_secret {
+            zeroize::Zeroize::zeroize(&mut *line);
+        }
         for resp in &responses {
-            debug!("IMAP S: {}", resp.trim_end());
+            debug!("IMAP S: {}", log_summary(resp));
             writer.write_all(resp.as_bytes()).await?;
         }
         writer.flush().await?;
@@ -870,5 +905,63 @@ mod tests {
             !resp.contains('+'),
             "a rejected folder must not get a continuation"
         );
+    }
+
+    #[test]
+    fn log_summary_keeps_no_mail_content() {
+        let fetch = log_summary("* 1 FETCH (ENVELOPE (\"date\" \"Secret subject\"))\r\n");
+        assert!(fetch.starts_with("* 1 FETCH … ("), "{fetch}");
+        assert!(!fetch.contains("Secret"), "{fetch}");
+        assert_eq!(log_summary("* 3 EXISTS\r\n"), "* 3 EXISTS");
+        assert_eq!(
+            log_summary("a1 OK FETCH completed\r\n"),
+            "a1 OK FETCH completed"
+        );
+        assert!(!log_summary("a2 OK done\r\nbody line\r\n").contains("body line"));
+    }
+
+    #[tokio::test]
+    async fn fetched_mail_content_never_reaches_the_debug_log() {
+        crate::net::log_capture::install();
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![FolderInfo {
+                id: "inbox".into(),
+                list_id: "folders".into(),
+                entries_list_id: "ie".into(),
+                kind: MailSetKind::Inbox,
+                imap_path: "INBOX".into(),
+                special_use: None,
+            }])
+            .await;
+        let marker = "LOG-PRIVACY-SUBJECT-7c1e";
+        store
+            .set_folder(
+                "inbox",
+                vec![crate::sync::StoredMail {
+                    mail: session::tests::make_mail("e1", marker, false),
+                    body_loaded: false,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
+            )
+            .await;
+        let mut script = std::collections::VecDeque::new();
+        script.push_back(Ok(b"p1 LOGIN \"user\" \"pass\"\r\n".to_vec()));
+        script.push_back(Ok(b"p2 SELECT INBOX\r\n".to_vec()));
+        script.push_back(Ok(b"p3 FETCH 1 (ENVELOPE BODY.PEEK[HEADER])\r\n".to_vec()));
+        script.push_back(Ok(b"p4 LOGOUT\r\n".to_vec()));
+        let mut reader = BufReader::new(ScriptedReader { script });
+        let mut writer = tokio::io::sink();
+        let (_tx, mut store_watch) = watch::channel(0u64);
+        let mut session = ImapSession::new(store, Arc::new(NoopBackend::default()), None, None);
+        run_connection_loop(&mut reader, &mut writer, &mut session, &mut store_watch)
+            .await
+            .unwrap();
+        assert!(
+            !crate::net::log_capture::lines_containing("* 1 FETCH").is_empty(),
+            "the FETCH response itself is still logged"
+        );
+        assert!(crate::net::log_capture::lines_containing(marker).is_empty());
     }
 }

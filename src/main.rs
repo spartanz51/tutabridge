@@ -518,13 +518,22 @@ async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<
         Err(e) if store.load().await?.is_some() => return Err(anyhow::anyhow!("{e}")),
         Err(_) => {}
     }
-    let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email)).context(
-        "Could not read the Tuta password; an interactive terminal is required \
-         (Docker: `docker compose run --rm tutabridge init`)",
-    )?;
-    tuta::login_with_persistence(cfg, &store, Some(&password), Some(make_totp_cb()), policy)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    // Wiped from memory once the login is over.
+    let password = zeroize::Zeroizing::new(
+        rpassword::prompt_password(format!("Password for {}: ", cfg.email)).context(
+            "Could not read the Tuta password; an interactive terminal is required \
+             (Docker: `docker compose run --rm tutabridge init`)",
+        )?,
+    );
+    tuta::login_with_persistence(
+        cfg,
+        &store,
+        Some(password.as_str()),
+        Some(make_totp_cb()),
+        policy,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// `tutabridge backup <dir>` — export every mail of every folder to a tree of

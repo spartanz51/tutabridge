@@ -107,7 +107,7 @@ impl ImapSession {
 
         let decoded =
             match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, line.trim()) {
-                Ok(d) => d,
+                Ok(d) => zeroize::Zeroizing::new(d),
                 Err(_) => {
                     return vec![format!(
                         "{} NO [AUTHENTICATIONFAILED] Invalid base64\r\n",
@@ -118,16 +118,16 @@ impl ImapSession {
 
         // PLAIN format: \0authcid\0password (authzid is empty)
         let parts: Vec<&[u8]> = decoded.splitn(3, |&b| b == 0).collect();
-        let password = if parts.len() == 3 {
-            String::from_utf8_lossy(parts[2]).to_string()
+        let password = zeroize::Zeroizing::new(if parts.len() == 3 {
+            String::from_utf8_lossy(parts[2]).into_owned()
         } else if parts.len() == 2 {
-            String::from_utf8_lossy(parts[1]).to_string()
+            String::from_utf8_lossy(parts[1]).into_owned()
         } else {
             return vec![format!(
                 "{} NO [AUTHENTICATIONFAILED] Invalid PLAIN data\r\n",
                 tag
             )];
-        };
+        });
 
         if let Some(ref expected) = self.password_hash {
             if !crate::util::secret_eq(&password, expected) {
@@ -223,7 +223,7 @@ impl ImapSession {
             "CAPABILITY" => self.cmd_capability(&tag),
             "NOOP" => vec![format!("{} OK NOOP completed\r\n", tag)],
             "LOGOUT" => self.cmd_logout(&tag),
-            "LOGIN" => self.cmd_login(&tag, &args),
+            "LOGIN" => self.cmd_login(&tag, args),
             "AUTHENTICATE" => {
                 if args.trim().eq_ignore_ascii_case("PLAIN") {
                     self.auth_tag = Some(tag.clone());
@@ -232,18 +232,18 @@ impl ImapSession {
                     vec![format!("{} NO Unsupported mechanism\r\n", tag)]
                 }
             }
-            "LIST" => self.cmd_list(&tag, &args).await,
-            "LSUB" => self.cmd_list(&tag, &args).await,
-            "SELECT" => self.cmd_select(&tag, &args).await,
-            "EXAMINE" => self.cmd_select(&tag, &args).await,
-            "STATUS" => self.cmd_status(&tag, &args).await,
-            "FETCH" => self.cmd_fetch(&tag, &args, false).await,
-            "UID" => self.cmd_uid(&tag, &args).await,
+            "LIST" => self.cmd_list(&tag, args).await,
+            "LSUB" => self.cmd_list(&tag, args).await,
+            "SELECT" => self.cmd_select(&tag, args).await,
+            "EXAMINE" => self.cmd_select(&tag, args).await,
+            "STATUS" => self.cmd_status(&tag, args).await,
+            "FETCH" => self.cmd_fetch(&tag, args, false).await,
+            "UID" => self.cmd_uid(&tag, args).await,
             "CLOSE" => self.cmd_close(&tag),
             "EXPUNGE" => self.cmd_expunge(&tag).await,
-            "SEARCH" => self.cmd_search(&tag, &args, false),
-            "STORE" => self.cmd_store(&tag, &args, false).await,
-            "MOVE" => self.cmd_move(&tag, &args, false).await,
+            "SEARCH" => self.cmd_search(&tag, args, false),
+            "STORE" => self.cmd_store(&tag, args, false).await,
+            "MOVE" => self.cmd_move(&tag, args, false).await,
             "COPY" => self.cmd_copy(&tag),
             "IDLE" => {
                 self.idle_tag = Some(tag.clone());
@@ -320,7 +320,7 @@ impl ImapSession {
 
     fn cmd_login(&mut self, tag: &str, args: &str) -> Vec<String> {
         if let Some(ref expected) = self.password_hash {
-            let (_, password) = parse_login_args(args);
+            let password = zeroize::Zeroizing::new(parse_login_args(args).1);
             if !crate::util::secret_eq(&password, expected) {
                 return vec![format!(
                     "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
@@ -1275,7 +1275,9 @@ fn parse_login_args(args: &str) -> (String, String) {
 
 fn parse_imap_token(s: &str) -> (String, &str) {
     if s.starts_with('"') {
-        let mut result = String::new();
+        // Unescaping cannot grow the token. Reserve before copying so a
+        // password never leaves an old allocation behind during growth.
+        let mut result = String::with_capacity(s.len() - 1);
         let mut chars = s[1..].char_indices();
         while let Some((i, c)) = chars.next() {
             match c {
@@ -1298,11 +1300,13 @@ fn parse_imap_token(s: &str) -> (String, &str) {
     }
 }
 
-fn parse_command(line: &str) -> (String, String, String) {
+fn parse_command(line: &str) -> (String, String, &str) {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     let tag = parts.first().unwrap_or(&"*").to_string();
     let cmd = parts.get(1).unwrap_or(&"").to_string();
-    let args = parts.get(2).unwrap_or(&"").to_string();
+    // LOGIN arguments contain the password. Borrow the wiped connection
+    // buffer, including when parse_append probes a non-APPEND command.
+    let args = parts.get(2).copied().unwrap_or("");
     (tag, cmd, args)
 }
 
@@ -1333,8 +1337,8 @@ pub(crate) fn parse_append(line: &str) -> Option<AppendRequest> {
     if !cmd.eq_ignore_ascii_case("APPEND") {
         return None;
     }
-    let mailbox = append_first_token(&args)?;
-    let literal_size = append_literal_size(&args)?;
+    let mailbox = append_first_token(args)?;
+    let literal_size = append_literal_size(args)?;
     Some(AppendRequest {
         tag,
         mailbox,
