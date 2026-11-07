@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::event_handler;
 use crate::store::LocalStore;
 use crate::sync::{self, MailStore};
@@ -241,11 +241,7 @@ impl BridgeHandle {
         };
         self.emit_log("Storage encryption key derived");
 
-        let local_store = match LocalStore::open(
-            &config::store_db_path(),
-            &config::store_mails_dir(),
-            storage_key,
-        ) {
+        let local_store = match LocalStore::open_default(storage_key) {
             Ok(store) => store,
             Err(e) => {
                 let msg = format!("Failed to open local store: {e}");

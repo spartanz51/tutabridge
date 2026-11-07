@@ -67,19 +67,19 @@ pub fn tighten(path: impl AsRef<Path>) {
     }
 }
 
-/// Best-effort chmod 0700 of an existing directory, the counterpart of
-/// [`tighten`] for directories created by versions that predate
-/// [`create_dir_all_private`]. No-op on non-Unix platforms or when the
-/// directory is absent.
-pub fn tighten_dir(path: impl AsRef<Path>) {
+/// Chmod 0700 of an existing, application-owned directory. Unlike [`tighten`],
+/// errors are returned so callers do not open a cache whose directory could
+/// not be protected. No-op on non-Unix platforms.
+pub fn tighten_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
     {
         let _ = path;
+        Ok(())
     }
 }
 
@@ -138,9 +138,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        tighten_dir(&dir);
+        tighten_dir(&dir).unwrap();
         assert_eq!(mode_of(&dir), 0o700);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tighten_dir_reports_errors() {
+        let dir = std::env::temp_dir().join(format!(
+            "fs_private_missing_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        assert_eq!(
+            tighten_dir(&dir).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }
