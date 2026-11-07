@@ -334,6 +334,13 @@ async fn serve_bridge(
     }
     let bus_ids_for_handler = bus_client.last_batch_ids();
 
+    // Let the session resolve an `In-Reply-To` against the Message-IDs the
+    // store has on record. Without this a reply to someone else's mail cannot
+    // be threaded, and with `strict_threading` in the config it is refused
+    // outright. Must happen before `session` is moved into the backend.
+    session.attach_message_id_index(local_store.clone());
+    session.set_strict_threading(cfg.strict_threading);
+
     let backend: Arc<dyn tuta::MailBackend> = Arc::new(session);
 
     let store = sync::MailStore::new();

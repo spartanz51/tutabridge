@@ -229,9 +229,47 @@ pub struct TutaSession {
     /// we sent (patch 2..N of a git send-email series) must be threaded
     /// against the id the server actually delivered.
     sent_id_cache: Arc<tokio::sync::Mutex<HashMap<String, SentIdEntry>>>,
+    /// Message-IDs of mail this account holds, for threading replies to mail
+    /// the bridge did not send. Attached by the bridge after the local store
+    /// is open; `None` for sessions without one (the `backup` path), which
+    /// simply falls back to the unindexed behaviour.
+    message_ids: std::sync::OnceLock<Arc<dyn MessageIdIndex>>,
+    /// Refuse a reply whose `In-Reply-To` cannot be resolved instead of
+    /// sending it as an unthreaded NEW message (`strict_threading` in the
+    /// config). Tuta carries no `In-Reply-To`/`References` of its own: the
+    /// server derives them from `previousMessageId`, so an unresolvable
+    /// reference does not merely lose a header, it detaches the message
+    /// from its thread, which the sender only notices in the archive.
+    strict_threading: std::sync::atomic::AtomicBool,
+}
+
+/// Lookup of Message-IDs the account holds, implemented by the local store.
+///
+/// Deliberately one method: the session talks to Tuta and the store owns the
+/// disk, and this is the only thing the send path needs from the other side
+/// of that line. Keeping it this narrow keeps the backend mockable.
+pub trait MessageIdIndex: Send + Sync {
+    fn knows_message_id(&self, message_id: &str) -> bool;
 }
 
 impl TutaSession {
+    /// Give the send path a way to ask whether a Message-ID belongs to mail
+    /// this account holds. Called once, after the local store is open.
+    pub fn attach_message_id_index(&self, index: Arc<dyn MessageIdIndex>) {
+        let _ = self.message_ids.set(index);
+    }
+
+    /// Apply the config's `strict_threading` (see the field).
+    pub fn set_strict_threading(&self, strict: bool) {
+        self.strict_threading
+            .store(strict, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn strict_threading(&self) -> bool {
+        self.strict_threading
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub async fn load_mailbox(&self) -> Result<MailBox, ApiCallError> {
         self.logged_in.mail_facade().load_user_mailbox().await
     }
@@ -739,9 +777,26 @@ impl TutaSession {
 
         // Thread replies: a submission carrying In-Reply-To (git send-email
         // series, MUA replies) gets its reference resolved to an id the
-        // server can act on. Unresolvable → (None, NEW), today's behavior.
+        // server can act on. Unresolvable → (None, NEW), today's behavior,
+        // unless strict threading is on (see the `strict_threading` field).
         let (previous_message_id, conversation_type) = match &msg.in_reply_to {
-            Some(irt) => self.resolve_previous_message(irt).await,
+            Some(irt) => {
+                let resolved = self.resolve_previous_message(irt).await;
+                if resolved.0.is_none() && self.strict_threading() {
+                    return Err(ApiCallError::InternalSdkError {
+                        error_message: format!(
+                            "In-Reply-To <{irt}> could not be resolved to a Tuta \
+                             conversation, so this reply would be delivered \
+                             detached from its thread. Refusing because \
+                             strict_threading is set in the config. The referenced \
+                             message has to be one this bridge sent recently, \
+                             one it served over IMAP, or one whose Message-ID \
+                             the index holds."
+                        ),
+                    });
+                }
+                resolved
+            }
             None => (None, CONVERSATION_TYPE_NEW),
         };
 
@@ -888,6 +943,25 @@ impl TutaSession {
                 _ => (None, CONVERSATION_TYPE_NEW),
             };
         }
+        // Mail this account holds: its Message-ID is exactly what the server
+        // stores in ConversationEntry.messageId, so it can be passed straight
+        // through. This is what threads a reply to someone else's mail, which
+        // neither branch above can do.
+        match self.message_ids.get() {
+            Some(index) if index.knows_message_id(in_reply_to) => {
+                return (Some(in_reply_to.to_string()), CONVERSATION_TYPE_REPLY);
+            }
+            Some(_) => {}
+            // Nothing attached the index. Every foreign reply then falls
+            // through to the unthreaded branch below, which looks exactly
+            // like an id the mailbox does not hold — so say which it is,
+            // or the wiring bug is invisible from the outside.
+            None => log::warn!(
+                "No Message-ID index is attached to this session; \
+                 replies to mail this bridge did not send cannot be threaded"
+            ),
+        }
+
         // A foreign id the server may not know, and no conversation type
         // can safely carry it (see `CONVERSATION_TYPE_NEW` above), so keep
         // today's unthreaded behavior rather than risk the send.
@@ -1350,6 +1424,8 @@ pub async fn login_with_persistence(
                     access_token,
                     self_send_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                     sent_id_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                    message_ids: std::sync::OnceLock::new(),
+                    strict_threading: std::sync::atomic::AtomicBool::new(false),
                 });
             }
             Err(e) => match classify_resume_failure(&e) {
@@ -1467,6 +1543,8 @@ pub async fn login_with_persistence(
         access_token: credentials.access_token,
         self_send_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         sent_id_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        message_ids: std::sync::OnceLock::new(),
+        strict_threading: std::sync::atomic::AtomicBool::new(false),
     })
 }
 

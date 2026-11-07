@@ -6,7 +6,7 @@ use log::{debug, info, warn};
 use tokio::sync::{watch, RwLock};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails, TutanotaFile};
 
-use crate::mail::{extract_body_text, mail_to_rfc2822, strip_html};
+use crate::mail::{extract_body_text, header_message_id, mail_to_rfc2822, strip_html};
 use crate::store::{LocalStore, MailMetadata};
 use crate::tuta::{FolderInfo, MailBackend};
 
@@ -575,6 +575,9 @@ pub async fn run_syncer(
         info!("Full-text body index backfill complete ({indexed} messages)");
     }
 
+    // Same one-time shape as the block above, for the Message-ID index.
+    backfill_message_ids(&store, &local_store, &*backend, sync_limit, &shutdown).await;
+
     // From here on the syncer only owns the slow body prefetch (capped at
     // `sync_limit` — the body-prefetch depth). Folder / new-mail refresh is
     // driven by the event bus + `event_handler`.
@@ -587,6 +590,93 @@ pub async fn run_syncer(
     )
     .await;
     info!("Mail syncer shutting down");
+}
+
+/// Marker for the one-time Message-ID backfill (see `backfill_message_ids`).
+const MESSAGE_ID_BACKFILL_MARKER: &str = "message_ids_backfilled_v1";
+
+/// Record the `Message-ID` of mail that was already cached before the index
+/// existed.
+///
+/// `prefetch_details` indexes every mail it fetches, but it skips anything
+/// already complete on disk — so on an existing install the index starts
+/// empty and stays empty, and a reply to any mail the user already has cannot
+/// be threaded. The id is not recoverable locally: the cached `.eml` carries
+/// the id this bridge mints for IMAP, not the one the sender set. Only
+/// `MailDetails.headers` holds the original, so this pass re-fetches details
+/// for the mails it has not resolved yet.
+///
+/// Runs once, inline, after the startup sync has already opened the IMAP and
+/// SMTP listeners. It costs one request per unresolved mail, bounded by the
+/// same body-prefetch window the rest of the syncer uses, and it only delays
+/// body prefetch, never mail delivery.
+async fn backfill_message_ids(
+    store: &MailStore,
+    local_store: &LocalStore,
+    backend: &dyn MailBackend,
+    body_prefetch_limit: usize,
+    shutdown: &watch::Receiver<bool>,
+) {
+    if local_store.get_meta(MESSAGE_ID_BACKFILL_MARKER).is_some() {
+        return;
+    }
+    let known = local_store.indexed_element_ids();
+    let (mut found, mut fetched, mut all_ok) = (0usize, 0usize, true);
+    info!("Backfilling the Message-ID index from cached messages\u{2026}");
+    for folder in store.list_folders().await {
+        if *shutdown.borrow() {
+            return;
+        }
+        // The same newest-first window the body prefetch covers.
+        let batch = prefetch_window(store.get_folder(&folder.id).await, body_prefetch_limit);
+        for stored in &batch {
+            if *shutdown.borrow() {
+                return;
+            }
+            let mail = &stored.mail;
+            let Some(id) = &mail._id else { continue };
+            let eid = id.element_id.to_string();
+            if known.contains(&eid) {
+                continue;
+            }
+            tokio::time::sleep(INTER_REQUEST_DELAY).await;
+            fetched += 1;
+            let details = match retry(|| backend.load_mail_details(mail)).await {
+                Ok(Some(details)) => details,
+                // A mail with no details is normal — `prefetch_details`
+                // caches those too. There is no header block to read, so
+                // skip it without holding the marker back.
+                Ok(None) => continue,
+                // A failed fetch is different: retry it on the next start.
+                Err(_) => {
+                    all_ok = false;
+                    continue;
+                }
+            };
+            // Mail this account sent has no stored header block, so `None` is
+            // an ordinary outcome here. It must not hold the marker back, or
+            // the pass would repeat in full on every start.
+            let Some(message_id) = header_message_id(&details) else {
+                continue;
+            };
+            if let Err(error) = local_store.remember_message_id(&message_id, &eid) {
+                warn!("Message-ID backfill could not record {eid}: {error}");
+                all_ok = false;
+            } else {
+                found += 1;
+            }
+        }
+    }
+    // Only mark done if nothing errored, so a partial run retries next boot.
+    if all_ok {
+        if let Err(error) = local_store.set_meta(MESSAGE_ID_BACKFILL_MARKER, "1") {
+            warn!("Could not persist Message-ID backfill marker: {error}");
+        }
+    }
+    info!(
+        "Message-ID backfill complete ({found} recorded from {fetched} fetched, {} indexed in all)",
+        local_store.message_id_count()
+    );
 }
 
 /// Event-driven background prefetch. Wakes whenever the `MailStore`'s
@@ -952,6 +1042,14 @@ pub(crate) async fn prefetch_details(
             let body_text = strip_html(body_html);
             if let Err(error) = local_store.index_body(&eid, &body_text) {
                 warn!("Failed to index complete message: {error}");
+            }
+            // The header block came with the details we already fetched, so
+            // remembering the Message-ID costs no request and lets a later
+            // reply to this mail be threaded (see `MessageIdIndex`).
+            if let Some(message_id) = header_message_id(details) {
+                if let Err(error) = local_store.remember_message_id(&message_id, &eid) {
+                    warn!("Failed to index message id: {error}");
+                }
             }
         }
         store

@@ -367,6 +367,16 @@ async fn apply_mail_set_entry_create(
                 ""
             },
         );
+        // The header block rode in with the details, so remember the
+        // Message-ID now. A mail cached complete on this path is skipped by
+        // the prefetch loop, the only other place that indexes it, so without
+        // this a reply to mail that arrived while the bridge was running could
+        // never be threaded (see `MessageIdIndex`).
+        if let Some(message_id) = details.as_ref().and_then(crate::mail::header_message_id) {
+            if let Err(error) = local_store.remember_message_id(&message_id, &mail_eid) {
+                warn!("Failed to index message id for {}: {error}", mail_eid);
+            }
+        }
         // Render the inline body to an RFC 2822 envelope only when the mail
         // has zero attachments — those need a separate blob download per
         // File that the event-bus handler cannot do synchronously. Mails

@@ -35,6 +35,14 @@ pub struct Config {
     /// keyring on supported desktop platforms; Android requires this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_path: Option<String>,
+    /// Refuse to send a reply whose `In-Reply-To` cannot be resolved to a
+    /// Tuta conversation, instead of delivering it detached from its thread.
+    /// Off by default: for ordinary mail, losing threading beats losing the
+    /// message. Worth turning on when a detached reply is worse than none,
+    /// e.g. when posting patches to a mailing list. Kept outside
+    /// EditableSettings, like `bind_addr`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict_threading: bool,
 }
 
 /// The fields the settings form owns. Hidden configuration must come from
@@ -153,6 +161,7 @@ impl Default for Config {
             mcp_port: default_mcp_port(),
             auto_update: default_auto_update(),
             pass_path: None,
+            strict_threading: false,
         }
     }
 }
@@ -423,6 +432,32 @@ smtp_port = 1025
     }
 
     #[test]
+    fn strict_threading_is_off_unless_set_and_only_written_when_on() {
+        let cfg = parse_config(
+            r#"email = "me@tuta.io"
+imap_port = 1143
+smtp_port = 1025
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.strict_threading);
+        // Off is the default, so it stays out of a saved file.
+        assert!(!toml::to_string_pretty(&cfg)
+            .unwrap()
+            .contains("strict_threading"));
+
+        let cfg = parse_config(
+            r#"email = "me@tuta.io"
+imap_port = 1143
+smtp_port = 1025
+strict_threading = true
+"#,
+        )
+        .unwrap();
+        assert!(cfg.strict_threading);
+    }
+
+    #[test]
     fn test_config_roundtrip() {
         let cfg = Config {
             email: "roundtrip@tuta.com".to_string(),
@@ -436,6 +471,7 @@ smtp_port = 1025
             mcp_port: 1944,
             auto_update: false,
             pass_path: Some("Tuta/Bridge".to_string()),
+            strict_threading: true,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
@@ -544,6 +580,7 @@ auto_update = true
 bridge_password = "keep-me"
 pass_path = "Tuta/Bridge"
 bind_addr = "0.0.0.0"
+strict_threading = true
 [future_settings]
 enabled = true
 "#;
@@ -566,6 +603,8 @@ enabled = true
         assert_eq!(merged["bridge_password"].as_str(), Some("keep-me"));
         assert_eq!(merged["pass_path"].as_str(), Some("Tuta/Bridge"));
         assert_eq!(merged["bind_addr"].as_str(), Some("0.0.0.0"));
+        assert!(config.strict_threading);
+        assert_eq!(merged["strict_threading"].as_bool(), Some(true));
         assert_eq!(merged["future_settings"]["enabled"].as_bool(), Some(true));
         assert_eq!(config, toml::from_str::<Config>(&content).unwrap());
     }

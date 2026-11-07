@@ -155,6 +155,10 @@ impl LocalStore {
                 last_batch_id  TEXT NOT NULL,
                 updated_at_ms  INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS message_ids (
+                message_id  TEXT PRIMARY KEY,
+                element_id  TEXT NOT NULL
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts USING fts5(
                 element_id UNINDEXED,
                 body,
@@ -191,6 +195,60 @@ impl LocalStore {
             |row| row.get::<_, String>(0),
         )
         .ok()
+    }
+
+    /// Remember that a mail we hold carries this RFC `Message-ID`.
+    ///
+    /// Tuta keeps the id in `ConversationEntry.messageId`, bare, and that is
+    /// what a reply has to pass as `previousMessageId`. The same string is in
+    /// the mail's stored header block, so indexing it as mail arrives lets a
+    /// later reply be threaded without asking the server anything.
+    ///
+    /// `message_id` is stored bare: callers strip the angle brackets, because
+    /// a submission's `In-Reply-To` is parsed bare too.
+    pub fn remember_message_id(
+        &self,
+        message_id: &str,
+        element_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO message_ids(message_id, element_id) VALUES (?1, ?2)",
+            [message_id, element_id],
+        )?;
+        Ok(())
+    }
+
+    /// Is this `Message-ID` one of a mail we hold? See `remember_message_id`.
+    pub fn knows_message_id(&self, message_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM message_ids WHERE message_id = ?1",
+            [message_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok()
+    }
+
+    /// Element ids that already have a `Message-ID` on record. The backfill
+    /// uses this to skip mails it has already resolved, so an interrupted
+    /// pass costs only the mails it had not reached.
+    pub fn indexed_element_ids(&self) -> std::collections::HashSet<String> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = std::collections::HashSet::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT element_id FROM message_ids") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// How many Message-IDs are indexed. Diagnostics only.
+    pub fn message_id_count(&self) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM message_ids", [], |row| row.get(0))
+            .unwrap_or(0)
     }
 
     /// Write a value into the generic `store_meta` key-value table.
@@ -638,6 +696,12 @@ impl LocalStore {
     }
 }
 
+impl crate::tuta::MessageIdIndex for LocalStore {
+    fn knows_message_id(&self, message_id: &str) -> bool {
+        LocalStore::knows_message_id(self, message_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +720,51 @@ mod tests {
         let db_path = tmp_dir.join("test.db");
         let mails_dir = tmp_dir.join("mails");
         LocalStore::open(&db_path, &mails_dir, key).unwrap()
+    }
+
+    #[test]
+    fn message_ids_are_remembered_and_found() {
+        let store = open_memory_store();
+        assert_eq!(store.message_id_count(), 0);
+        assert!(!store.knows_message_id("a1b2@mail.example.org"));
+
+        store
+            .remember_message_id("a1b2@mail.example.org", "elem1")
+            .unwrap();
+        assert!(store.knows_message_id("a1b2@mail.example.org"));
+        assert_eq!(store.message_id_count(), 1);
+
+        // Ids are matched exactly: a reply's In-Reply-To is parsed bare, so a
+        // bracketed form is a different string and must not match.
+        assert!(!store.knows_message_id("<a1b2@mail.example.org>"));
+        assert!(!store.knows_message_id("other@example.org"));
+
+        // Re-indexing the same mail is idempotent, not a duplicate row.
+        store
+            .remember_message_id("a1b2@mail.example.org", "elem1")
+            .unwrap();
+        assert_eq!(store.message_id_count(), 1);
+    }
+
+    #[test]
+    fn the_index_survives_reopening_the_store() {
+        let key = test_key();
+        let tmp_dir =
+            std::env::temp_dir().join(format!("tutabridge_test_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let db_path = tmp_dir.join("test.db");
+        let mails_dir = tmp_dir.join("mails");
+
+        {
+            let store = LocalStore::open(&db_path, &mails_dir, key.clone()).unwrap();
+            store
+                .remember_message_id("kept@example.org", "elem1")
+                .unwrap();
+        }
+        // The point of putting this on disk rather than in a cache: a reply
+        // sent days after the mail arrived still threads.
+        let store = LocalStore::open(&db_path, &mails_dir, key).unwrap();
+        assert!(store.knows_message_id("kept@example.org"));
     }
 
     fn meta(element_id: &str, folder_id: &str, received: i64) -> MailMetadata {
