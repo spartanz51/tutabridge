@@ -77,8 +77,12 @@ impl From<tutabridge_tuta::event_bus::WsState> for WsStatus {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BridgeStats {
     pub uptime_secs: Option<u64>,
+    /// When the running bridge started, in ms since the epoch.
+    pub started_at_ms: Option<u64>,
     pub mails_synced: usize,
     pub ws_status: WsStatus,
+    /// Mail apps signed in over IMAP.
+    pub clients: Vec<crate::activity::ClientInfo>,
 }
 
 pub struct BridgeHandle {
@@ -90,7 +94,10 @@ pub struct BridgeHandle {
     /// mail count, ws state, uptime tick on start/stop. Lets the UI replace
     /// its 1s poll with a push subscription.
     stats_dirty_tx: broadcast::Sender<()>,
+    /// Live activity and connected mail apps, for the GUI.
+    activity: crate::activity::Activity,
     started_at: Option<std::time::Instant>,
+    started_at_ms: Option<u64>,
     store: Option<Arc<MailStore>>,
     /// Logged-in backend + local cache, kept after `start` so a backup can
     /// reuse the live session instead of opening a second one.
@@ -105,13 +112,16 @@ impl BridgeHandle {
     pub fn new() -> Self {
         let (log_tx, _) = broadcast::channel(256);
         let (stats_dirty_tx, _) = broadcast::channel(16);
+        let activity = crate::activity::Activity::new(stats_dirty_tx.clone());
         Self {
             session_store: None,
             status: Arc::new(RwLock::new(BridgeStatus::Stopped)),
             shutdown_tx: None,
             log_tx,
             stats_dirty_tx,
+            activity,
             started_at: None,
+            started_at_ms: None,
             store: None,
             backend: None,
             local_store: None,
@@ -144,6 +154,11 @@ impl BridgeHandle {
         self.stats_dirty_tx.subscribe()
     }
 
+    /// Live activity events (mail synced, received, sent...), content-free.
+    pub fn subscribe_activity(&self) -> broadcast::Receiver<crate::activity::ActivityEvent> {
+        self.activity.subscribe()
+    }
+
     pub async fn status(&self) -> BridgeStatus {
         self.status.read().await.clone()
     }
@@ -167,8 +182,14 @@ impl BridgeHandle {
                 .started_at
                 .filter(|_| running)
                 .map(|t| t.elapsed().as_secs()),
+            started_at_ms: self.started_at_ms.filter(|_| running),
             mails_synced: count,
             ws_status,
+            clients: if running {
+                self.activity.clients()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -306,6 +327,11 @@ impl BridgeHandle {
         let (shutdown_sync_tx, shutdown_sync_rx) = watch::channel(false);
         self.shutdown_tx = Some(tx);
         self.started_at = Some(std::time::Instant::now());
+        self.started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64);
+        let activity = self.activity.clone();
 
         let status = self.status.clone();
         let log_tx = self.log_tx.clone();
@@ -438,6 +464,7 @@ impl BridgeHandle {
                 event_rx,
                 startup_done_rx,
                 shutdown_sync_rx.clone(),
+                Some(activity.clone()),
             ));
             let mut imap_handle = tokio::spawn(imap::serve_listener(
                 imap_listener,
@@ -446,6 +473,7 @@ impl BridgeHandle {
                 local_store.clone(),
                 imap_tls,
                 pw.clone(),
+                activity.clone(),
             ));
             // Read-only MCP server, only when enabled (its listener is then
             // bound above). Kept out of the select!: it is optional, and
@@ -466,6 +494,7 @@ impl BridgeHandle {
                 backend.clone(),
                 smtp_tls,
                 pw,
+                activity,
             ));
 
             let mut server_failure: Option<String> = None;
@@ -535,6 +564,7 @@ impl BridgeHandle {
             let _ = task.await;
         }
         self.started_at = None;
+        self.started_at_ms = None;
         self.ws_state_rx = None;
         self.backend = None;
         self.local_store = None;

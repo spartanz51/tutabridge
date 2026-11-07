@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod backup;
 pub mod body_cache;
 pub mod bridge;

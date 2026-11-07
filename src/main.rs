@@ -401,6 +401,7 @@ async fn serve_bridge(
         event_rx,
         startup_done_rx,
         shutdown_rx.clone(),
+        None,
     ));
     let imap_server = imap::serve(
         cfg.imap_addr(),

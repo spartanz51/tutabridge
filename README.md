@@ -23,8 +23,10 @@ encryption transparently, so your favourite desktop client just works.
 
 <br/>
 
-<img src="docs/screenshots/dashboard.png" alt="TutaBridge dashboard" width="49%" />
-<img src="docs/screenshots/connection.png" alt="Mail client connection settings" width="49%" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/live-dark.gif" />
+  <img src="docs/screenshots/live-light.gif" alt="TutaBridge live view: connected mail apps and activity as it happens" width="700" />
+</picture>
 
 </div>
 

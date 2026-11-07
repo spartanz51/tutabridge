@@ -158,7 +158,9 @@ pub async fn serve(
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = crate::net::bind("SMTP", address).await?;
-    serve_listener(listener, tuta, tls, password_hash).await
+    // No live view outside the GUI: the events go nowhere.
+    let activity = crate::activity::Activity::new(tokio::sync::broadcast::channel(1).0);
+    serve_listener(listener, tuta, tls, password_hash, activity).await
 }
 
 /// Serve SMTP on a listener the caller has already bound (see
@@ -168,6 +170,7 @@ pub async fn serve_listener(
     tuta: Arc<dyn MailBackend>,
     tls: TlsAcceptor,
     password_hash: Option<String>,
+    activity: crate::activity::Activity,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("SMTP server listening on {} (TLS)", listener.local_addr()?);
 
@@ -179,13 +182,19 @@ pub async fn serve_listener(
             let tuta = tuta.clone();
             let tls = tls.clone();
             let pw_hash = password_hash.clone();
+            let activity = activity.clone();
             async move {
                 match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
                 {
                     Ok(Ok(tls_stream)) => {
-                        if let Err(e) =
-                            handle_connection(tls_stream, tuta, pw_hash, SmtpLimits::default())
-                                .await
+                        if let Err(e) = serve_connection(
+                            tls_stream,
+                            tuta,
+                            pw_hash,
+                            SmtpLimits::default(),
+                            Some(&activity),
+                        )
+                        .await
                         {
                             if e.downcast_ref::<std::io::Error>()
                                 .is_some_and(crate::net::is_benign_disconnect)
@@ -209,11 +218,26 @@ pub async fn serve_listener(
     Ok(())
 }
 
+#[cfg(test)]
 async fn handle_connection<S>(
     stream: S,
     tuta: Arc<dyn MailBackend>,
     password_hash: Option<String>,
     limits: SmtpLimits,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_connection(stream, tuta, password_hash, limits, None).await
+}
+
+/// One SMTP connection; a mail it sends is reported to the live view.
+async fn serve_connection<S>(
+    stream: S,
+    tuta: Arc<dyn MailBackend>,
+    password_hash: Option<String>,
+    limits: SmtpLimits,
+    activity: Option<&crate::activity::Activity>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -332,6 +356,9 @@ where
                 match tuta.send_mail(&parsed).await {
                     Ok(()) => {
                         info!("SMTP: mail sent successfully via Tuta");
+                        if let Some(activity) = activity {
+                            activity.emit(crate::activity::ActivityEvent::Sent);
+                        }
                         writer.write_all(b"250 OK message sent\r\n").await?;
                     }
                     Err(e) => {
