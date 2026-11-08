@@ -363,7 +363,7 @@ where
                     }
                     Err(e) => {
                         error!("SMTP: failed to send via Tuta: {}", e);
-                        writer.write_all(b"451 Temporary failure\r\n").await?;
+                        writer.write_all(send_failure_reply(&e).as_bytes()).await?;
                     }
                 }
                 state = SmtpState::Greeted;
@@ -493,6 +493,18 @@ where
     Ok(())
 }
 
+/// The reply when Tuta did not take the mail. It carries the reason, which
+/// the mail client shows: the Windows desktop app has no console, so its log
+/// is out of reach (#77). One line, within SMTP's 512-byte limit.
+fn send_failure_reply(reason: &str) -> String {
+    let reason: String = reason
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(400)
+        .collect();
+    format!("451 4.3.0 Sending through Tuta failed: {reason}\r\n")
+}
+
 fn extract_address(line: &str) -> String {
     if let Some(start) = line.find('<') {
         if let Some(end) = line.find('>') {
@@ -533,6 +545,18 @@ fn verify_smtp_password(password: &str, expected: &Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_failure_reply_carries_the_reason_on_one_line() {
+        assert_eq!(
+            send_failure_reply("ServerResponseError: PreconditionFailed"),
+            "451 4.3.0 Sending through Tuta failed: ServerResponseError: PreconditionFailed\r\n"
+        );
+        let reply = send_failure_reply(&format!("first\r\nsecond {}", "x".repeat(1000)));
+        assert!(reply.starts_with("451 4.3.0 Sending through Tuta failed: first  second x"));
+        assert_eq!(reply.matches("\r\n").count(), 1);
+        assert!(reply.len() <= 512, "{}", reply.len());
+    }
 
     #[test]
     fn auth_plain_inline_credentials_are_redacted() {
