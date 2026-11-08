@@ -5,7 +5,7 @@ use tutasdk::entities::generated::tutanota::{Mail, MailAddress, TutanotaFile};
 use crate::activity::{Activity, ActivityEvent, ClientGuard, ClientIdentity};
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
-use crate::mail::parser::{parse_address_headers, AddressHeaders};
+use crate::mail::parser::{parse_address_headers, AddressHeaders, ParsedMessage};
 use crate::mail::rfc2822::{
     extract_headers, format_address, format_internal_date, format_name_and_address,
     format_rfc2822_date, reply_to_addresses,
@@ -131,6 +131,10 @@ impl ImapSession {
         self.state == State::Logout
     }
 
+    pub(crate) fn is_authenticated(&self) -> bool {
+        matches!(self.state, State::Authenticated | State::Selected)
+    }
+
     pub fn is_idle(&self) -> bool {
         self.idle_tag.is_some()
     }
@@ -246,7 +250,17 @@ impl ImapSession {
 
         // Apply the new view, then notify. RFC 3501: EXPUNGEs go in
         // descending seqno order so subsequent values are not shifted.
+        // Mails still here keep their \Deleted mark until EXPUNGE.
+        let deleted: std::collections::HashSet<u32> = self
+            .mails
+            .iter()
+            .filter(|m| m.deleted)
+            .map(|m| m.uid)
+            .collect();
         let _ = self.refresh_mails(&folder.id).await;
+        for m in &mut self.mails {
+            m.deleted = deleted.contains(&m.uid);
+        }
 
         let mut responses = Vec::with_capacity(expunges.len() + 1);
         expunges.sort_unstable_by(|a, b| b.cmp(a));
@@ -299,17 +313,54 @@ impl ImapSession {
         }
     }
 
-    /// `true` if `mailbox` resolves to the Sent folder. Tuta saves sent mail
-    /// server-side, so an `APPEND` there is a no-op (see `handle_append` in the
-    /// connection loop), which is what lets a client's "save to Sent" succeed
-    /// without creating a duplicate.
-    pub(crate) async fn append_targets_sent(&self, mailbox: &str) -> bool {
+    /// What an `APPEND` to `mailbox` does (see `handle_append` in the
+    /// connection loop): Sent and Drafts are supported, nothing else.
+    pub(crate) async fn append_target(&self, mailbox: &str) -> AppendTarget {
         let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
-        self.store
-            .folder_by_imap_path(&name)
-            .await
-            .map(|f| f.special_use.as_deref() == Some("\\Sent"))
-            .unwrap_or(false)
+        let folder = self.store.folder_by_imap_path(&name).await;
+        match folder.and_then(|f| f.special_use).as_deref() {
+            Some("\\Sent") => AppendTarget::Sent,
+            Some("\\Drafts") => AppendTarget::Drafts,
+            _ => AppendTarget::Unsupported,
+        }
+    }
+
+    /// Save an `APPEND`ed message as a draft and return the UID it gets in
+    /// `mailbox`, so the client can drop its previous autosave. `None` means
+    /// the draft is saved but has not shown up within `wait`.
+    pub(crate) async fn create_draft(
+        &self,
+        msg: &ParsedMessage,
+        mailbox: &str,
+        wait: std::time::Duration,
+    ) -> Result<Option<u32>, String> {
+        let draft = self.backend.create_draft(msg).await?;
+        Ok(self
+            .uid_in(mailbox, &draft.element_id.to_string(), wait)
+            .await)
+    }
+
+    /// The UID of mail `element_id` in `mailbox`, waiting up to `wait` for it
+    /// to arrive through the event bus.
+    async fn uid_in(
+        &self,
+        mailbox: &str,
+        element_id: &str,
+        wait: std::time::Duration,
+    ) -> Option<u32> {
+        let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
+        let folder = self.store.folder_by_imap_path(&name).await?;
+        let mut changes = self.store.subscribe();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Some(mail) = self.store.mail_in_folder(&folder.id, element_id).await {
+                return Some(mail.uid);
+            }
+            match tokio::time::timeout_at(deadline, changes.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => return None,
+            }
+        }
     }
 
     /// Find Tuta's own Sent copy of a mail this bridge just sent, so an APPEND
@@ -328,20 +379,9 @@ impl ImapSession {
         let Some(element_id) = self.backend.sent_mail_element_id(id).await else {
             return SentCopy::Unknown;
         };
-        let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
-        let Some(sent) = self.store.folder_by_imap_path(&name).await else {
-            return SentCopy::Pending;
-        };
-        let mut changes = self.store.subscribe();
-        let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            if let Some(copy) = self.store.mail_in_folder(&sent.id, &element_id).await {
-                return SentCopy::Found(copy.uid);
-            }
-            match tokio::time::timeout_at(deadline, changes.changed()).await {
-                Ok(Ok(())) => continue,
-                _ => return SentCopy::Pending,
-            }
+        match self.uid_in(mailbox, &element_id, wait).await {
+            Some(uid) => SentCopy::Found(uid),
+            None => SentCopy::Pending,
         }
     }
 
@@ -1426,6 +1466,16 @@ fn parse_command(line: &str) -> (String, String, &str) {
     (tag, cmd, args)
 }
 
+/// What an `APPEND` can do with its target mailbox.
+pub(crate) enum AppendTarget {
+    /// Tuta already keeps mail sent through the bridge here.
+    Sent,
+    /// The message is saved as a draft.
+    Drafts,
+    /// Tuta cannot create a mail anywhere else.
+    Unsupported,
+}
+
 /// Where an APPEND to Sent stands relative to the mails this bridge sent.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SentCopy {
@@ -2507,23 +2557,33 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn append_targets_sent_only_for_the_sent_folder() {
+    async fn append_target_is_sent_or_drafts_only() {
         let backend = Arc::new(MockBackend::with_mails(vec![]));
         let store = MailStore::new();
-        let sent = FolderInfo {
-            id: "sent".into(),
-            list_id: "folders".into(),
-            entries_list_id: "sent_entries".into(),
-            kind: MailSetKind::Sent,
-            imap_path: "Sent".into(),
-            special_use: Some("\\Sent".into()),
-        };
-        store.set_folder_list(vec![inbox_folder(), sent]).await;
+        store
+            .set_folder_list(vec![inbox_folder(), sent_folder(), drafts_folder()])
+            .await;
         let session = ImapSession::new(store, backend, None, None);
 
-        assert!(session.append_targets_sent("Sent").await);
-        assert!(!session.append_targets_sent("INBOX").await);
-        assert!(!session.append_targets_sent("Nonexistent").await);
+        let target = |name| session.append_target(name);
+        assert!(matches!(target("Sent").await, AppendTarget::Sent));
+        assert!(matches!(target("Drafts").await, AppendTarget::Drafts));
+        assert!(matches!(target("INBOX").await, AppendTarget::Unsupported));
+        assert!(matches!(
+            target("Nonexistent").await,
+            AppendTarget::Unsupported
+        ));
+    }
+
+    fn drafts_folder() -> FolderInfo {
+        FolderInfo {
+            id: "drafts".into(),
+            list_id: "folders".into(),
+            entries_list_id: "drafts_entries".into(),
+            kind: MailSetKind::Draft,
+            imap_path: "Drafts".into(),
+            special_use: Some("\\Drafts".into()),
+        }
     }
 
     fn sent_folder() -> FolderInfo {
