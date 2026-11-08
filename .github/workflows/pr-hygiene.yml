@@ -1,0 +1,47 @@
+name: PR hygiene
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: No AI attribution in commits or description
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          pattern='co-authored-by:.*(claude|anthropic|openai|chatgpt|gpt-|copilot|codex|cursor|gemini|devin)|generated (with|by) \[?(claude|chatgpt|copilot|codex|cursor|gemini|an? ai)'
+          found=0
+          if git log --format=%B "$BASE..$HEAD" | grep -Eiq "$pattern"; then
+            echo "::error::A commit message carries AI attribution. See CONTRIBUTING.md."
+            found=1
+          fi
+          if printf '%s' "$BODY" | grep -Eiq "$pattern"; then
+            echo "::error::The PR description carries AI attribution. See CONTRIBUTING.md."
+            found=1
+          fi
+          exit "$found"
+
+      - name: Size
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          read -r files lines < <(git diff --numstat "$BASE...$HEAD" -- . ':(exclude)Cargo.lock' ':(exclude)ui/package-lock.json' \
+            | awk '{f++; l+=$1+$2} END {print f+0, l+0}')
+          echo "$files files, $lines lines changed"
+          if [ "$files" -gt 10 ] || [ "$lines" -gt 400 ]; then
+            echo "::warning::Large PR ($files files, $lines lines). Consider splitting it."
+          fi
