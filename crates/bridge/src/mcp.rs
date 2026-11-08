@@ -42,7 +42,7 @@ use crate::tuta::MailBackend;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "tutabridge";
-const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SERVER_VERSION: &str = crate::VERSION;
 
 #[derive(Clone)]
 struct McpState {
@@ -464,25 +464,59 @@ fn pretty(v: &Value) -> String {
 
 /// Only localhost origins are accepted; a missing Origin (a non-browser client
 /// like Claude) is fine.
+///
+/// The host is compared whole, not by prefix: `http://localhost.example.com`
+/// is a public host that a DNS-rebinding page could be served from, and a
+/// prefix test would have waved it through.
 fn origin_ok(origin: Option<&str>) -> bool {
     match origin {
         None => true,
-        Some(o) => {
-            o.starts_with("http://127.0.0.1")
-                || o.starts_with("http://localhost")
-                || o.starts_with("https://127.0.0.1")
-                || o.starts_with("https://localhost")
-        }
+        Some(o) => origin_host(o).is_some_and(is_loopback_host),
     }
 }
 
-/// Constant-time-ish bearer check. `None` token means auth is disabled (tests).
+/// The host part of an `Origin` header value (`scheme://host[:port]`), or
+/// `None` when the value is not of that shape (`null`, a bare word, a path).
+fn origin_host(origin: &str) -> Option<&str> {
+    let authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))?;
+    // An Origin is only a scheme and authority, never a URL with a path,
+    // query, fragment or user information. Validate the entire value.
+    if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
+        return None;
+    }
+    let (host, suffix) = if let Some(bracketed) = authority.strip_prefix('[') {
+        // IPv6 literal: `[::1]` or `[::1]:1944`.
+        let end = bracketed.find(']')?;
+        authority.split_at(end + 2)
+    } else {
+        authority.split_at(authority.find(':').unwrap_or(authority.len()))
+    };
+    if host.is_empty() {
+        return None;
+    }
+    if !suffix.is_empty() {
+        let port = suffix.strip_prefix(':')?;
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        port.parse::<u16>().ok()?;
+    }
+    Some(host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
+}
+
+/// Constant-time bearer check. `None` token means auth is disabled (tests).
 fn authorized(auth_header: Option<&str>, token: Option<&str>) -> bool {
     let Some(token) = token else {
         return true;
     };
     match auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(presented) => presented == token,
+        Some(presented) => crate::util::secret_eq(presented, token),
         None => false,
     }
 }
@@ -520,7 +554,74 @@ mod tests {
         assert!(origin_ok(None));
         assert!(origin_ok(Some("http://127.0.0.1:1944")));
         assert!(origin_ok(Some("http://localhost:3000")));
+        assert!(origin_ok(Some("https://localhost")));
+        assert!(origin_ok(Some("http://LOCALHOST:3000")));
+        assert!(origin_ok(Some("http://[::1]:3000")));
+        assert!(origin_ok(Some("http://localhost")));
+        assert!(origin_ok(Some("http://127.0.0.1")));
+        assert!(origin_ok(Some("https://[::1]")));
         assert!(!origin_ok(Some("https://evil.example.com")));
+    }
+
+    #[test]
+    fn origin_guard_compares_the_whole_host() {
+        // A public host that merely starts with a loopback name is exactly
+        // what a DNS-rebinding page would be served from.
+        assert!(!origin_ok(Some("http://localhost.example.com")));
+        assert!(!origin_ok(Some("http://localhost.example.com:1944")));
+        assert!(!origin_ok(Some("http://127.0.0.1.example.com")));
+        assert!(!origin_ok(Some("http://127.0.0.10")));
+        assert!(!origin_ok(Some("http://localhostx")));
+        assert!(!origin_ok(Some("http://localhost@evil.example.com")));
+        assert!(!origin_ok(Some("http://[::1].example.com")));
+    }
+
+    #[test]
+    fn origin_guard_rejects_values_that_are_not_an_origin() {
+        assert!(!origin_ok(Some("null")));
+        assert!(!origin_ok(Some("localhost")));
+        assert!(!origin_ok(Some("file://localhost")));
+        assert!(!origin_ok(Some("http://")));
+    }
+
+    #[test]
+    fn origin_guard_rejects_url_components() {
+        for host in ["localhost", "127.0.0.1", "[::1]"] {
+            for suffix in ["/", "/chemin", "/@evil", "?x=1", "#fragment"] {
+                for port in ["", ":1944"] {
+                    let origin = format!("http://{host}{port}{suffix}");
+                    assert!(!origin_ok(Some(&origin)), "accepted {origin}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn origin_guard_validates_the_entire_port() {
+        for host in ["localhost", "127.0.0.1", "[::1]"] {
+            for port in ["0", "80", "1944", "65535"] {
+                let origin = format!("https://{host}:{port}");
+                assert!(origin_ok(Some(&origin)), "rejected {origin}");
+            }
+            for port in ["", "abc", "65536", "+80", "-1", " 80", "80 ", "80:90"] {
+                let origin = format!("http://{host}:{port}");
+                assert!(!origin_ok(Some(&origin)), "accepted {origin}");
+            }
+        }
+    }
+
+    #[test]
+    fn origin_guard_rejects_malformed_ipv6_authorities() {
+        for origin in [
+            "http://[::1",
+            "http://[::1]extra",
+            "http://[::1]]",
+            "http://[::1]1944",
+            "http://::1",
+            "http://:1944",
+        ] {
+            assert!(!origin_ok(Some(origin)), "accepted {origin}");
+        }
     }
 
     #[test]

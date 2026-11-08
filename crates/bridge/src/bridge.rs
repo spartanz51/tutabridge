@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::event_handler;
+use crate::session_store::SessionStore;
 use crate::store::LocalStore;
 use crate::sync::{self, MailStore};
 use crate::tuta::{self, MailBackend, TwoFactorCallback};
@@ -76,11 +77,16 @@ impl From<tutabridge_tuta::event_bus::WsState> for WsStatus {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BridgeStats {
     pub uptime_secs: Option<u64>,
+    /// When the running bridge started, in ms since the epoch.
+    pub started_at_ms: Option<u64>,
     pub mails_synced: usize,
     pub ws_status: WsStatus,
+    /// Mail apps signed in over IMAP.
+    pub clients: Vec<crate::activity::ClientInfo>,
 }
 
 pub struct BridgeHandle {
+    session_store: Option<SessionStore>,
     status: Arc<RwLock<BridgeStatus>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     log_tx: broadcast::Sender<String>,
@@ -88,7 +94,10 @@ pub struct BridgeHandle {
     /// mail count, ws state, uptime tick on start/stop. Lets the UI replace
     /// its 1s poll with a push subscription.
     stats_dirty_tx: broadcast::Sender<()>,
+    /// Live activity and connected mail apps, for the GUI.
+    activity: crate::activity::Activity,
     started_at: Option<std::time::Instant>,
+    started_at_ms: Option<u64>,
     store: Option<Arc<MailStore>>,
     /// Logged-in backend + local cache, kept after `start` so a backup can
     /// reuse the live session instead of opening a second one.
@@ -103,12 +112,16 @@ impl BridgeHandle {
     pub fn new() -> Self {
         let (log_tx, _) = broadcast::channel(256);
         let (stats_dirty_tx, _) = broadcast::channel(16);
+        let activity = crate::activity::Activity::new(stats_dirty_tx.clone());
         Self {
+            session_store: None,
             status: Arc::new(RwLock::new(BridgeStatus::Stopped)),
             shutdown_tx: None,
             log_tx,
             stats_dirty_tx,
+            activity,
             started_at: None,
+            started_at_ms: None,
             store: None,
             backend: None,
             local_store: None,
@@ -141,6 +154,11 @@ impl BridgeHandle {
         self.stats_dirty_tx.subscribe()
     }
 
+    /// Live activity events (mail synced, received, sent...), content-free.
+    pub fn subscribe_activity(&self) -> broadcast::Receiver<crate::activity::ActivityEvent> {
+        self.activity.subscribe()
+    }
+
     pub async fn status(&self) -> BridgeStatus {
         self.status.read().await.clone()
     }
@@ -164,9 +182,32 @@ impl BridgeHandle {
                 .started_at
                 .filter(|_| running)
                 .map(|t| t.elapsed().as_secs()),
+            started_at_ms: self.started_at_ms.filter(|_| running),
             mails_synced: count,
             ws_status,
+            clients: if running {
+                self.activity.clients()
+            } else {
+                Vec::new()
+            },
         }
+    }
+
+    /// Reuse a session cache only while its account and backend still match.
+    /// Callers may clone the handle before awaiting I/O so the GUI state lock
+    /// need not be held through keyring or pinentry prompts.
+    pub fn session_store(&mut self, config: &Config) -> SessionStore {
+        if self
+            .session_store
+            .as_ref()
+            .is_none_or(|store| !store.matches_config(config))
+        {
+            self.session_store = Some(SessionStore::new(config));
+        }
+        self.session_store
+            .as_ref()
+            .expect("session store initialized")
+            .clone()
     }
 
     pub async fn start(
@@ -175,6 +216,8 @@ impl BridgeHandle {
         password: Option<String>,
         totp_callback: Option<TwoFactorCallback>,
     ) -> Result<(), String> {
+        // The Tuta password is wiped from memory once this start is over.
+        let password = password.map(zeroize::Zeroizing::new);
         {
             let current = self.status.read().await;
             if *current == BridgeStatus::Running || *current == BridgeStatus::Starting {
@@ -199,11 +242,11 @@ impl BridgeHandle {
         // already holds then fails the start at once, with a message naming
         // it, instead of a full login (and a TOTP prompt) followed by a
         // teardown that logged nothing.
-        let imap_listener = match crate::net::bind_local("IMAP", config.imap_port).await {
+        let imap_listener = match crate::net::bind("IMAP", config.imap_addr()).await {
             Ok(listener) => listener,
             Err(msg) => return Err(self.start_failed(msg).await),
         };
-        let smtp_listener = match crate::net::bind_local("SMTP", config.smtp_port).await {
+        let smtp_listener = match crate::net::bind("SMTP", config.smtp_addr()).await {
             Ok(listener) => listener,
             Err(msg) => return Err(self.start_failed(msg).await),
         };
@@ -217,11 +260,18 @@ impl BridgeHandle {
         } else {
             None
         };
-        self.emit_log(&format!("IMAP listening on 127.0.0.1:{}", config.imap_port));
-        self.emit_log(&format!("SMTP listening on 127.0.0.1:{}", config.smtp_port));
+        self.emit_log(&format!("IMAP listening on {}", config.imap_addr()));
+        self.emit_log(&format!("SMTP listening on {}", config.smtp_addr()));
 
         self.emit_log(&format!("Authenticating as {}...", config.email));
-        let session = match tuta::login_with_2fa(&config, password.as_deref(), totp_callback).await
+        let session_store = self.session_store(&config);
+        let session = match tuta::login_with_2fa(
+            &config,
+            &session_store,
+            password.as_ref().map(|p| p.as_str()),
+            totp_callback,
+        )
+        .await
         {
             Ok(s) => s,
             Err(e) => return Err(self.start_failed(format!("Login failed: {e}")).await),
@@ -241,11 +291,7 @@ impl BridgeHandle {
         };
         self.emit_log("Storage encryption key derived");
 
-        let local_store = match LocalStore::open(
-            &config::store_db_path(),
-            &config::store_mails_dir(),
-            storage_key,
-        ) {
+        let local_store = match LocalStore::open_default(storage_key) {
             Ok(store) => store,
             Err(e) => {
                 let msg = format!("Failed to open local store: {e}");
@@ -281,6 +327,11 @@ impl BridgeHandle {
         let (shutdown_sync_tx, shutdown_sync_rx) = watch::channel(false);
         self.shutdown_tx = Some(tx);
         self.started_at = Some(std::time::Instant::now());
+        self.started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64);
+        let activity = self.activity.clone();
 
         let status = self.status.clone();
         let log_tx = self.log_tx.clone();
@@ -413,6 +464,7 @@ impl BridgeHandle {
                 event_rx,
                 startup_done_rx,
                 shutdown_sync_rx.clone(),
+                Some(activity.clone()),
             ));
             let mut imap_handle = tokio::spawn(imap::serve_listener(
                 imap_listener,
@@ -421,6 +473,7 @@ impl BridgeHandle {
                 local_store.clone(),
                 imap_tls,
                 pw.clone(),
+                activity.clone(),
             ));
             // Read-only MCP server, only when enabled (its listener is then
             // bound above). Kept out of the select!: it is optional, and
@@ -441,6 +494,7 @@ impl BridgeHandle {
                 backend.clone(),
                 smtp_tls,
                 pw,
+                activity,
             ));
 
             let mut server_failure: Option<String> = None;
@@ -510,6 +564,7 @@ impl BridgeHandle {
             let _ = task.await;
         }
         self.started_at = None;
+        self.started_at_ms = None;
         self.ws_state_rx = None;
         self.backend = None;
         self.local_store = None;

@@ -7,74 +7,48 @@
 }
 
 :root {
-  /* Tuta light red theme */
-  --primary: #8F4A4E;
+  /* One dark theme: ink surfaces, the logo's crimson for what goes through
+     Tuta, cyan for what stays on this device. */
+  --primary: #C23350;
   --on-primary: #FFFFFF;
-  --primary-container: #F4D2D2;
-  --on-primary-container: #733337;
-  --secondary: #87521B;
-  --tertiary: #63568F;
-  --surface: #FFFFFF;
-  --surface-container: #FCF9F6;
-  --surface-container-high: #F5EEEA;
-  --surface-container-highest: #e7e2de;
-  --on-surface: #221A14;
-  --on-surface-variant: #4e4545;
-  --outline: #7f7575;
-  --outline-variant: #d0c4c4;
+  --primary-container: #3A1F26;
+  --on-primary-container: #F6C9D0;
+  --secondary: #E0B25C;
+  --tertiary: #5CC8E0;
+  --surface: #121014;
+  --surface-container: #1B181D;
+  --surface-container-high: #241F26;
+  --surface-container-highest: #2E2830;
+  --on-surface: #F3EEEA;
+  --on-surface-variant: #A79FA3;
+  --muted: #8C8489;
+  --outline: #5A5058;
+  --outline-variant: #2E2830;
   --scrim: #000000;
-  --error: #BA1A1A;
-  --on-error: #FFFFFF;
-  --success: #44845E;
-  --success-container: #E9FFED;
-  --warning: #8D7426;
-  --tuta-nota: #D93951;
+  --error: #FF8A80;
+  --on-error: #2B0A0A;
+  --success: #5BC98A;
+  --success-container: #173326;
+  --warning: #E0B25C;
 
-  --green: #44845E;
-  --orange: #8D7426;
-  --red: #BA1A1A;
-  --gray: #7f7575;
+  /* Live view */
+  --crimson: #E2475F;
+  --cyan: #5CC8E0;
+
+  --green: #5BC98A;
+  --orange: #E0B25C;
+  --red: #FF8A80;
+  --gray: #5A5058;
 
   --sans: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", Consolas, monospace;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
   --brand: 'MDIO', var(--sans);
 
   font: 16px/1.4286 var(--sans);
-  color-scheme: light dark;
+  color-scheme: dark;
   color: var(--on-surface-variant);
   background: var(--surface);
   -webkit-font-smoothing: antialiased;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --primary: #FFB3B5;
-    --on-primary: #561D22;
-    --primary-container: #733337;
-    --on-primary-container: #FFDADA;
-    --secondary: #F3BD6E;
-    --tertiary: #CDBDFF;
-    --surface: #181212;
-    --surface-container: #241e1e;
-    --surface-container-high: #2f2828;
-    --surface-container-highest: #3d3434;
-    --on-surface: #f3ecec;
-    --on-surface-variant: #d0c4c4;
-    --outline: #998e8e;
-    --outline-variant: #4e4545;
-    --scrim: #000000;
-    --error: #FFB4AB;
-    --on-error: #690005;
-    --success: #5E9E77;
-    --success-container: #003920;
-    --warning: #FFE089;
-    --tuta-nota: #D93951;
-
-    --green: #5E9E77;
-    --orange: #FFE089;
-    --red: #FFB4AB;
-    --gray: #998e8e;
-  }
 }
 
 /* App is a fixed shell: no scrollbars anywhere. Scrollable regions (logs)

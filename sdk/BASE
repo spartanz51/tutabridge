@@ -1,4 +1,4 @@
 # Official Tuta release the vendored SDK is generated from.
 # scripts/sdk-generate.sh applies sdk/patches/*.patch on top of it.
-tag=tutanota-release-361.261006.0
-commit=bbc38dbec458eb36379d499a3d1de9932a6be9e9
+tag=tutanota-release-362.261020.0
+commit=f5e2d8628f17be558fe63130396ff625bbe69c77

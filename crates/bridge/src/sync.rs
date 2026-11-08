@@ -137,6 +137,22 @@ impl MailStore {
             .unwrap_or_default()
     }
 
+    /// The current version of one mail in one folder, without cloning the
+    /// folder. `None` when it is no longer there (moved, sent or deleted).
+    pub async fn mail_in_folder(&self, folder_id: &str, element_id: &str) -> Option<StoredMail> {
+        self.folders.read().await.get(folder_id).and_then(|mails| {
+            mails
+                .iter()
+                .find(|m| {
+                    m.mail
+                        ._id
+                        .as_ref()
+                        .is_some_and(|id| id.element_id.to_string() == element_id)
+                })
+                .cloned()
+        })
+    }
+
     /// A mail's rendered body (LRU hit, or re-read from the encrypted disk
     /// cache). `None` when the body was never fetched.
     pub async fn get_body(
@@ -835,6 +851,22 @@ pub(crate) async fn sync_folder(
     Ok(())
 }
 
+/// The mails `prefetch_details` covers: the newest `limit` of a folder, or all
+/// of them when `limit` is 0.
+///
+/// Sorted here rather than trusting the folder's order: a folder is loaded
+/// newest first, but mail that arrives later is appended by
+/// `upsert_mail_in_folder`, so in a folder larger than the window new mail
+/// would stay outside it until the bridge restarts, its body neither cached
+/// nor indexed for search.
+fn prefetch_window(mut mails: Vec<StoredMail>, limit: usize) -> Vec<StoredMail> {
+    mails.sort_by_key(|m| std::cmp::Reverse(m.mail.receivedDate.as_millis()));
+    if limit != 0 {
+        mails.truncate(limit);
+    }
+    mails
+}
+
 pub(crate) async fn prefetch_details(
     store: &MailStore,
     local_store: &LocalStore,
@@ -843,13 +875,8 @@ pub(crate) async fn prefetch_details(
     body_prefetch_limit: usize,
     attachment_retry_history: &mut HashMap<String, AttachmentRetry>,
 ) {
-    let mails = store.get_folder(&folder.id).await;
-    let window = if body_prefetch_limit == 0 {
-        &mails[..]
-    } else {
-        &mails[..mails.len().min(body_prefetch_limit)]
-    };
-    for stored in window {
+    let window = prefetch_window(store.get_folder(&folder.id).await, body_prefetch_limit);
+    for stored in &window {
         let mail = &stored.mail;
         let Some(id) = &mail._id else { continue };
         let eid = id.element_id.to_string();
@@ -864,8 +891,23 @@ pub(crate) async fn prefetch_details(
             continue;
         }
         tokio::time::sleep(INTER_REQUEST_DELAY).await;
-        let details = match retry(|| backend.load_mail_details(mail)).await {
-            Ok(details) => details,
+        // Re-read the mail before each attempt: the window is a snapshot, and
+        // a draft sent meanwhile has moved to Sent with its details replaced,
+        // so its stale draft reference would only answer Not Found.
+        let loaded = retry(|| async {
+            match store.mail_in_folder(&folder.id, &eid).await {
+                Some(current) => backend
+                    .load_mail_details(&current.mail)
+                    .await
+                    .map(|details| Some((current.mail, details))),
+                None => Ok(None),
+            }
+        })
+        .await;
+        let (mail, details) = match loaded {
+            Ok(Some(loaded)) => loaded,
+            // It left this folder; its new folder's pass renders it.
+            Ok(None) => continue,
             Err(_) => {
                 warn!("Failed to prefetch message details");
                 let retry = AttachmentRetry::after_failure(
@@ -877,6 +919,7 @@ pub(crate) async fn prefetch_details(
                 continue;
             }
         };
+        let mail = &mail;
         let attachments = match backend.load_attachments(mail).await {
             Ok(attachments) => attachments,
             Err(error) => {
@@ -1330,6 +1373,53 @@ mod tests {
             .upsert_mail_in_folder("A", stored(make_mail("L1", "e2", "two", true), 2))
             .await;
         assert_eq!(store.get_folder("A").await.len(), 2);
+    }
+
+    fn received_at(element: &str, received_ms: u64, uid: u32) -> StoredMail {
+        let mut mail = make_mail("L1", element, element, true);
+        mail.receivedDate = DateTime::from_millis(received_ms);
+        stored(mail, uid)
+    }
+
+    fn element_ids(mails: &[StoredMail]) -> Vec<String> {
+        mails
+            .iter()
+            .map(|m| m.mail._id.as_ref().unwrap().element_id.to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn prefetch_window_covers_mail_that_arrives_after_the_load() {
+        let store = MailStore::new();
+        // Loaded newest first, as at startup.
+        store
+            .set_folder(
+                "A",
+                vec![
+                    received_at("e3", 3_000, 3),
+                    received_at("e2", 2_000, 2),
+                    received_at("e1", 1_000, 1),
+                ],
+            )
+            .await;
+        // Newer than everything, and appended.
+        store
+            .upsert_mail_in_folder("A", received_at("e4", 4_000, 4))
+            .await;
+
+        let window = prefetch_window(store.get_folder("A").await, 2);
+        assert_eq!(element_ids(&window), ["e4", "e3"]);
+    }
+
+    #[test]
+    fn prefetch_window_without_a_limit_keeps_every_mail() {
+        let folder = vec![
+            received_at("e2", 2_000, 2),
+            received_at("e1", 1_000, 1),
+            received_at("e3", 3_000, 3),
+        ];
+        let window = prefetch_window(folder, 0);
+        assert_eq!(element_ids(&window), ["e3", "e2", "e1"]);
     }
 
     #[tokio::test]

@@ -36,12 +36,14 @@ const MAIL_JSON: &str =
 /// Blob contents served per archive id, as (blob id, bytes).
 type BlobsByArchive = HashMap<String, Vec<(GeneratedId, Vec<u8>)>>;
 
-/// Serves the fixture session, records moves and blob token requests, and
+/// Serves the fixture session, records moves, deletes and blob token requests, and
 /// answers blob and extra requests the test has registered.
 struct TestServer {
     fixtures: TestRestClient,
     move_status: u32,
     moves: Mutex<Vec<RestClientOptions>>,
+    deletes: Mutex<Vec<RestClientOptions>>,
+    fail_delete_after: Mutex<Option<usize>>,
     token_requests: Mutex<Vec<serde_json::Value>>,
     responses: Mutex<HashMap<String, Vec<u8>>>,
     blobs: Mutex<BlobsByArchive>,
@@ -82,6 +84,21 @@ impl RestClient for TestServer {
             headers: HashMap::new(),
             body: Some(body),
         };
+        if url.ends_with("/rest/tutanota/mailservice") {
+            assert_eq!(method, HttpMethod::DELETE);
+            let mut deletes = self.deletes.lock().unwrap();
+            deletes.push(options);
+            let fail = self
+                .fail_delete_after
+                .lock()
+                .unwrap()
+                .is_some_and(|n| deletes.len() > n);
+            return Ok(RestResponse {
+                status: if fail { 500 } else { 200 },
+                headers: HashMap::new(),
+                body: None,
+            });
+        }
         if url.ends_with("/rest/tutanota/movemailservice") {
             self.moves.lock().unwrap().push(options);
             return Ok(RestResponse {
@@ -198,6 +215,8 @@ async fn session_with_move_status(move_status: u32) -> Session {
         fixtures,
         move_status,
         moves: Mutex::new(vec![]),
+        deletes: Mutex::new(vec![]),
+        fail_delete_after: Mutex::new(None),
         token_requests: Mutex::new(vec![]),
         responses: Mutex::new(HashMap::new()),
         blobs: Mutex::new(HashMap::new()),
@@ -1570,4 +1589,62 @@ async fn own_key_failure_never_falls_back_to_a_working_bucket() {
         session.ext.load_attachments(&mail).await,
         Err(AttachmentError::Transport(_))
     ));
+}
+
+#[tokio::test]
+async fn delete_batches_preserve_list_folder_order_and_unique_ids() {
+    let session = session().await;
+    let target = IdTupleGenerated::new(GeneratedId("folders".into()), GeneratedId("trash".into()));
+    let other_mail = |i| {
+        IdTupleGenerated::new(
+            GeneratedId("other-list".into()),
+            GeneratedId(format!("mail-{i}")),
+        )
+    };
+    let mut mails: Vec<_> = (0..101).map(mail_id).collect();
+    // Interleave lists and reuse element ids across lists. Only identical
+    // (list, element) pairs are duplicates, including across batch boundaries.
+    mails.insert(10, other_mail(5));
+    mails.insert(20, other_mail(2));
+    mails.push(mail_id(5));
+    mails.push(other_mail(5));
+    session.ext.delete_mails(mails, target).await.unwrap();
+    let calls = session.server.deletes.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    for (index, options) in calls.iter().enumerate() {
+        let json: serde_json::Value =
+            serde_json::from_slice(options.body.as_ref().unwrap()).unwrap();
+        assert_eq!(json["724"], serde_json::json!([["folders", "trash"]]));
+        let expected: Vec<_> = if index < 3 {
+            (index * 50..((index + 1) * 50).min(101))
+                .map(|i| serde_json::json!(["mail-list", format!("mail-{i}")]))
+                .collect()
+        } else {
+            vec![
+                serde_json::json!(["other-list", "mail-5"]),
+                serde_json::json!(["other-list", "mail-2"]),
+            ]
+        };
+        assert_eq!(json["421"], serde_json::json!(expected));
+    }
+}
+
+#[tokio::test]
+async fn empty_delete_sends_no_request_and_failed_batches_stop_later_ones() {
+    // Cover failure before any deletion and after the first successful batch.
+    for successful_batches in [0, 1] {
+        let session = session().await;
+        *session.server.fail_delete_after.lock().unwrap() = Some(successful_batches);
+        session.ext.delete_mails(vec![], mail_id(0)).await.unwrap();
+        assert!(session.server.deletes.lock().unwrap().is_empty());
+        assert!(session
+            .ext
+            .delete_mails((0..101).map(mail_id).collect(), mail_id(0))
+            .await
+            .is_err());
+        assert_eq!(
+            session.server.deletes.lock().unwrap().len(),
+            successful_batches + 1
+        );
+    }
 }

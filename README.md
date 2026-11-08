@@ -14,15 +14,19 @@ encryption transparently, so your favourite desktop client just works.
 [![CI](https://github.com/spartanz51/tutabridge/actions/workflows/ci.yml/badge.svg)](https://github.com/spartanz51/tutabridge/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/spartanz51/tutabridge?include_prereleases&sort=semver)](https://github.com/spartanz51/tutabridge/releases)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Docker-lightgrey)](#download)
+[![Docker pulls](https://img.shields.io/docker/pulls/spartanz51/tutabridge?logo=docker&logoColor=white)](https://hub.docker.com/r/spartanz51/tutabridge)
+[![GHCR](https://img.shields.io/badge/ghcr.io-spartanz51%2Ftutabridge-blue?logo=docker&logoColor=white)](https://github.com/spartanz51/tutabridge/pkgs/container/tutabridge)
 [![Built with Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-dea584?logo=rust)](#build-from-source)
 
-[**Download**](#download) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
+[**Download**](#download) · [**Docker**](#docker) · [**Getting started**](#getting-started) · [**Features**](#features) · [**Backup**](#backup) · [**Architecture**](#architecture)
 
 <br/>
 
-<img src="docs/screenshots/dashboard.png" alt="TutaBridge dashboard" width="49%" />
-<img src="docs/screenshots/connection.png" alt="Mail client connection settings" width="49%" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/live-dark.gif" />
+  <img src="docs/screenshots/live-light.gif" alt="TutaBridge live view: connected mail apps and activity as it happens" width="700" />
+</picture>
 
 </div>
 
@@ -90,6 +94,28 @@ The build is not code-signed, so the first launch needs one click to allow it:
 [`tutabridge-git`](https://aur.archlinux.org/packages/tutabridge-git),
 e.g. `yay -S tutabridge-desktop-bin`.
 
+### Docker
+
+```sh
+docker run -d --name tutabridge --restart unless-stopped \
+  -p 127.0.0.1:1143:1143 -p 127.0.0.1:1025:1025 \
+  -v tutabridge:/data ghcr.io/spartanz51/tutabridge
+docker exec -it tutabridge init      # sign in to Tuta, once
+docker exec tutabridge password      # password for your mail client
+```
+
+<details>
+<summary>On a NAS, or with the mail client on another computer</summary>
+
+Publish the ports on your local network with `-p 1143:1143 -p 1025:1025`
+and point the mail client at the NAS address. Never forward these ports on
+your router. From a NAS interface, run `init` and `password` in the
+container's terminal.
+
+</details>
+
+More in the [Docker guide](docs/DOCKER.md).
+
 ---
 
 ## Updates
@@ -103,7 +129,8 @@ Linux packages installed through a package manager use that manager; only
 the AppImage updates itself. Turn automatic checks off in
 **Config, Updates** if you prefer to update by hand; the app then never
 contacts GitHub on its own, and the same screen still lets you check when
-you want to.
+you want to. The running version shows in the window header, in the tray
+menu and on that screen; the CLI prints it with `tutabridge --version`.
 
 Keeping up matters: Tuta only accepts clients above a minimum version that
 moves from time to time, and TutaBridge announces the version of the SDK it
@@ -113,6 +140,8 @@ releases.
 ---
 
 ## Getting started
+
+For a server or a NAS, use the [Docker image](#docker) instead.
 
 The desktop app has a tray icon (the menu bar on macOS). Closing its window
 keeps the bridge running; use **Open TutaBridge** to bring it back or
@@ -233,6 +262,23 @@ mails/<id>.eml.enc   per-mail encrypted bodies
 `sync_limit` controls how many recent message bodies are kept offline. The full
 mailbox is always listed and metadata-searchable regardless. Set it to `0` (or
 tick "keep every message body offline" in the GUI) to download everything.
+
+### Keeping the session in pass
+
+By default the login session is saved to your OS keychain (on Linux, a Secret
+Service provider such as GNOME Keyring or KeePassXC). On systems without one,
+you can keep it in [pass](https://www.passwordstore.org/) instead, encrypted
+with your GPG key. Add a `pass_path` to `config.toml`:
+
+```toml
+pass_path = "Tuta/Bridge"
+```
+
+The session is then stored as `Tuta/Bridge/<your address>`. `pass` must be on
+`PATH`, and `gpg-agent` must be able to decrypt the entry when the bridge
+starts, so a bridge started without a terminal needs a cached passphrase or a
+graphical pinentry. Log in once after setting it; an existing keychain session
+is not moved.
 
 ---
 

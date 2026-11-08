@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-primitives"
-version = "361.261006.0"
+version = "362.261020.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -6095,7 +6095,7 @@ dependencies = [
 
 [[package]]
 name = "tuta-sdk"
-version = "361.261006.0"
+version = "362.261020.0"
 dependencies = [
  "android_log",
  "argon2",
@@ -6143,14 +6143,20 @@ name = "tutabridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "crypto-primitives",
  "env_logger",
+ "libc",
  "log 0.4.29",
+ "rcgen",
  "rpassword",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tuta-sdk",
  "tutabridge-core",
  "tutabridge-tuta",
+ "zeroize",
 ]
 
 [[package]]
@@ -6165,6 +6171,7 @@ dependencies = [
  "dirs",
  "hex",
  "keyring",
+ "libc",
  "log 0.4.29",
  "rand 0.8.6",
  "rand_core 0.6.4",
@@ -6174,12 +6181,14 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "toml 0.8.2",
  "tuta-sdk",
  "tutabridge-tuta",
+ "zeroize",
 ]
 
 [[package]]
@@ -6488,7 +6497,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "util"
-version = "361.261006.0"
+version = "362.261020.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -7712,6 +7721,7 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

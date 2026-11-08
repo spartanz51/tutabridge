@@ -1,10 +1,16 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Config, BridgeStatus, BridgeStats, UpdateInfo } from "../types";
+import type { ActivityEvent, Config, BridgeStatus, BridgeStats, UpdateInfo } from "../types";
+import { pushFeed, type FeedItem } from "../activity";
 
 const MAX_LOG_LINES = 500;
+
+interface SessionStatus {
+  available: boolean;
+  warning: string | null;
+}
 
 export interface BackupStats {
   folders: number;
@@ -27,10 +33,31 @@ export function useBridge() {
   const [status, setStatus] = useState<BridgeStatus | null>(null);
   const [stats, setStats] = useState<BridgeStats>({
     uptime_secs: null,
+    started_at_ms: null,
     mails_synced: 0,
     ws_status: "Stopped",
+    clients: [],
   });
-  const [hasSavedSession, setHasSavedSession] = useState(false);
+  // Live activity: the feed survives tab switches; the Live view subscribes
+  // to each event for its animation.
+  const [feed, setFeed] = useState<FeedItem[]>([]);
+  const activityListeners = useRef(new Set<(event: ActivityEvent) => void>());
+  const subscribeActivity = useCallback((listener: (event: ActivityEvent) => void) => {
+    activityListeners.current.add(listener);
+    return () => {
+      activityListeners.current.delete(listener);
+    };
+  }, []);
+  const clientsRef = useRef(stats.clients);
+  useEffect(() => {
+    clientsRef.current = stats.clients;
+  }, [stats.clients]);
+  // null means unchecked or unreadable, not a confirmed missing session.
+  const [hasSavedSession, setHasSavedSession] = useState<boolean | null>(null);
+  const [sessionReadError, setSessionReadError] = useState<string | null>(null);
+  const [sessionWarning, setSessionWarning] = useState<string | null>(null);
+  const sessionReadEpoch = useRef(0);
+  const wasRunning = useRef(false);
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -53,14 +80,45 @@ export function useBridge() {
   // more rights): the banner offers the install instead.
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
 
-  const refresh = useCallback(() => {
-    invoke<BridgeStatus>("get_status").then(setStatus);
-    invoke<BridgeStats>("get_stats").then(setStats);
+  const readSavedSession = useCallback(async () => {
+    const epoch = ++sessionReadEpoch.current;
+    try {
+      const session = await invoke<SessionStatus>("has_saved_session");
+      if (epoch !== sessionReadEpoch.current) return null;
+      setHasSavedSession(session.available);
+      setSessionWarning(session.warning);
+      setSessionReadError(null);
+      return session.available;
+    } catch (e) {
+      if (epoch !== sessionReadEpoch.current) return null;
+      setHasSavedSession(null);
+      setSessionWarning(null);
+      setSessionReadError(String(e));
+      return null;
+    }
   }, []);
+
+  const acceptStatus = useCallback((next: BridgeStatus) => {
+    setStatus(next);
+    if (next === "Running" && !wasRunning.current) {
+      // A successful login can still be memory-only. Refresh the storage
+      // status so its warning survives successful startup and status events.
+      setSessionReadError(null);
+      void readSavedSession();
+    }
+    wasRunning.current = next === "Running";
+  }, [readSavedSession]);
+
+  const refresh = useCallback(() => {
+    invoke<BridgeStatus>("get_status").then(acceptStatus);
+    invoke<BridgeStats>("get_stats").then(setStats);
+  }, [acceptStatus]);
 
   useEffect(() => {
     invoke<Config>("get_config").then(setConfig);
-    invoke<boolean>("has_saved_session").then(setHasSavedSession);
+    // Strict storage errors block login; an unavailable OS keychain offers
+    // a manual login with a visible warning that it cannot be persisted.
+    void readSavedSession();
     invoke<string | null>("get_bridge_password").then(setBridgePassword);
     invoke<string>("get_app_version").then(setAppVersion);
     refresh();
@@ -68,7 +126,7 @@ export function useBridge() {
     // The bridge pushes `bridge://stats` and `bridge://status` whenever
     // anything changes (mail count, ws state, start/stop). No setInterval.
     const unlistenStats = listen<BridgeStats>("bridge://stats", (e) => setStats(e.payload));
-    const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => setStatus(e.payload));
+    const unlistenStatus = listen<BridgeStatus>("bridge://status", (e) => acceptStatus(e.payload));
     // The login (still in progress) needs a 2FA code: show the field.
     const unlistenTotp = listen("bridge://need-totp", () => setNeedsTotp(true));
     const unlistenUpdate = listen<{ version: string }>("bridge://update-ready", (e) => {
@@ -88,7 +146,21 @@ export function useBridge() {
       unlistenUpdate.then((fn) => fn());
       unlistenAvailable.then((fn) => fn());
     };
-  }, [refresh]);
+  }, [refresh, readSavedSession, acceptStatus]);
+
+  useEffect(() => {
+    let seq = 0;
+    const listeners = activityListeners.current;
+    const unlisten = listen<ActivityEvent>("bridge://activity", (e) => {
+      seq += 1;
+      const id = seq;
+      setFeed((prev) => pushFeed(prev, e.payload, clientsRef.current, Date.now(), id));
+      listeners.forEach((listener) => listener(e.payload));
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const unlisten = listen<string>("bridge://log", (event) => {
@@ -125,9 +197,10 @@ export function useBridge() {
   }, []);
 
   const saveConfig = useCallback(async (cfg: Config) => {
-    await invoke("save_config", { config: cfg });
-    setConfig(cfg);
-  }, []);
+    const saved = await invoke<Config>("save_config", { config: cfg });
+    setConfig(saved);
+    await readSavedSession();
+  }, [readSavedSession]);
 
   // One login. If the account has 2FA, the backend emits `bridge://need-totp`
   // mid-login and waits for `submitTotp`; this promise stays pending until then.
@@ -136,10 +209,15 @@ export function useBridge() {
       setLoading(true);
       setNeedsTotp(false);
       try {
+        // A previous pinentry failure may have been resolved, or the user
+        // may have removed the entry. Recheck before deciding to sign in.
+        const saved = await readSavedSession();
+        if (saved === null || (!saved && !password)) return;
         await invoke("start_bridge", {
           password: password || null,
           email: email || null,
         });
+        await readSavedSession();
         setNeedsTotp(false);
         refresh();
         invoke<string | null>("get_bridge_password").then(setBridgePassword);
@@ -150,7 +228,7 @@ export function useBridge() {
         setLoading(false);
       }
     },
-    [refresh],
+    [refresh, readSavedSession],
   );
 
   // Deliver the 2FA code to the login that's currently waiting for it.
@@ -179,15 +257,15 @@ export function useBridge() {
     try {
       await invoke("stop_bridge");
       await invoke("start_bridge", { password: null });
+      await readSavedSession();
       refresh();
     } catch (e) {
       setStatus({ Error: String(e) });
     } finally {
       setLoading(false);
     }
-  }, [refresh]);
+  }, [refresh, readSavedSession]);
 
-  const clearLogs = useCallback(() => setLogs([]), []);
 
   const checkUpdate = useCallback(() => invoke<UpdateInfo | null>("check_update"), []);
 
@@ -237,11 +315,16 @@ export function useBridge() {
 
   return {
     config,
-    status,
+    status: sessionReadError && status !== "Running" && status !== "Starting"
+      ? { Error: sessionReadError }
+      : status,
     stats,
     hasSavedSession,
+    sessionWarning,
     bridgePassword,
     logs,
+    feed,
+    subscribeActivity,
     loading,
     needsTotp,
     saveConfig,
@@ -249,7 +332,6 @@ export function useBridge() {
     submitTotp,
     stopBridge,
     restartBridge,
-    clearLogs,
     regenerateBridgePassword,
     backupBusy,
     backupProgress,

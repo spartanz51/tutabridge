@@ -2,6 +2,7 @@ use log::{debug, info};
 use std::sync::Arc;
 use tutasdk::entities::generated::tutanota::{Mail, MailAddress, TutanotaFile};
 
+use crate::activity::{Activity, ActivityEvent, ClientGuard, ClientIdentity};
 use crate::imap::search::{self, MsgView};
 use crate::mail::mail_to_rfc2822;
 use crate::mail::parser::{parse_address_headers, AddressHeaders, ParsedMessage};
@@ -12,6 +13,7 @@ use crate::mail::rfc2822::{
 use crate::store::LocalStore;
 use crate::sync::MailStore;
 use crate::tuta::{FolderInfo, MailBackend};
+use tutabridge_tuta::folder_system::MailSetKind;
 
 #[derive(Debug, Clone, PartialEq)]
 enum State {
@@ -50,26 +52,16 @@ pub struct ImapSession {
     /// `imap::SESSION_COUNTER`). `0` in unit tests, which construct a session
     /// with no connection behind it.
     session_id: u64,
+    /// Where the GUI's live view hears about this connection. `None` in unit
+    /// tests and outside the bridge.
+    activity: Option<Activity>,
+    peer: Option<std::net::SocketAddr>,
+    /// What the client said about itself with `ID`, which may come before or
+    /// after it signs in.
+    identity: ClientIdentity,
+    /// Keeps this client listed in the live view while it is signed in.
+    listed: Option<ClientGuard>,
 }
-
-/// The UIDVALIDITY every mailbox reports. The store allocates UIDs per folder
-/// and never renumbers them, so one value covers every mailbox.
-pub(crate) const UIDVALIDITY: u32 = 1;
-
-/// What Tuta can do with an `APPEND` to a given mailbox.
-pub(crate) enum AppendTarget {
-    /// Tuta saved the mail itself; the copy the client sends is redundant.
-    Sent,
-    /// The message becomes a server-side draft.
-    Drafts,
-    /// Tuta cannot create a mail in an arbitrary folder.
-    Unsupported,
-}
-
-/// How long an `APPEND` waits for the draft it just created to reach the store
-/// before it answers without `APPENDUID`: 40 × 50 ms = 2 s.
-const APPEND_UID_POLLS: usize = 40;
-const APPEND_UID_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 impl ImapSession {
     pub fn new(
@@ -90,6 +82,36 @@ impl ImapSession {
             auth_tag: None,
             password_hash,
             session_id: 0,
+            activity: None,
+            peer: None,
+            identity: ClientIdentity::default(),
+            listed: None,
+        }
+    }
+
+    /// Report this connection's activity to the live view.
+    pub fn with_activity(mut self, activity: Activity, peer: std::net::SocketAddr) -> Self {
+        self.activity = Some(activity);
+        self.peer = Some(peer);
+        self
+    }
+
+    fn report(&self, event: ActivityEvent) {
+        if let Some(activity) = &self.activity {
+            activity.emit(event);
+        }
+    }
+
+    /// List this client in the live view once it has signed in.
+    fn on_signed_in(&mut self) {
+        if let (Some(activity), Some(peer)) = (&self.activity, self.peer) {
+            self.listed = Some(activity.connect(self.session_id, peer, &self.identity));
+        }
+    }
+
+    fn report_folder(&self, folder: Option<String>) {
+        if let (Some(activity), Some(_)) = (&self.activity, &self.listed) {
+            activity.set_folder(self.session_id, folder);
         }
     }
 
@@ -109,6 +131,10 @@ impl ImapSession {
         self.state == State::Logout
     }
 
+    pub(crate) fn is_authenticated(&self) -> bool {
+        matches!(self.state, State::Authenticated | State::Selected)
+    }
+
     pub fn is_idle(&self) -> bool {
         self.idle_tag.is_some()
     }
@@ -125,7 +151,7 @@ impl ImapSession {
 
         let decoded =
             match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, line.trim()) {
-                Ok(d) => d,
+                Ok(d) => zeroize::Zeroizing::new(d),
                 Err(_) => {
                     return vec![format!(
                         "{} NO [AUTHENTICATIONFAILED] Invalid base64\r\n",
@@ -136,19 +162,19 @@ impl ImapSession {
 
         // PLAIN format: \0authcid\0password (authzid is empty)
         let parts: Vec<&[u8]> = decoded.splitn(3, |&b| b == 0).collect();
-        let password = if parts.len() == 3 {
-            String::from_utf8_lossy(parts[2]).to_string()
+        let password = zeroize::Zeroizing::new(if parts.len() == 3 {
+            String::from_utf8_lossy(parts[2]).into_owned()
         } else if parts.len() == 2 {
-            String::from_utf8_lossy(parts[1]).to_string()
+            String::from_utf8_lossy(parts[1]).into_owned()
         } else {
             return vec![format!(
                 "{} NO [AUTHENTICATIONFAILED] Invalid PLAIN data\r\n",
                 tag
             )];
-        };
+        });
 
         if let Some(ref expected) = self.password_hash {
-            if password != *expected {
+            if !crate::util::secret_eq(&password, expected) {
                 return vec![format!(
                     "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
                     tag
@@ -157,6 +183,7 @@ impl ImapSession {
         }
 
         self.state = State::Authenticated;
+        self.on_signed_in();
         info!(
             "IMAP session {}: authenticated via AUTHENTICATE PLAIN",
             self.session_id
@@ -223,7 +250,17 @@ impl ImapSession {
 
         // Apply the new view, then notify. RFC 3501: EXPUNGEs go in
         // descending seqno order so subsequent values are not shifted.
+        // Mails still here keep their \Deleted mark until EXPUNGE.
+        let deleted: std::collections::HashSet<u32> = self
+            .mails
+            .iter()
+            .filter(|m| m.deleted)
+            .map(|m| m.uid)
+            .collect();
         let _ = self.refresh_mails(&folder.id).await;
+        for m in &mut self.mails {
+            m.deleted = deleted.contains(&m.uid);
+        }
 
         let mut responses = Vec::with_capacity(expunges.len() + 1);
         expunges.sort_unstable_by(|a, b| b.cmp(a));
@@ -241,7 +278,8 @@ impl ImapSession {
             "CAPABILITY" => self.cmd_capability(&tag),
             "NOOP" => vec![format!("{} OK NOOP completed\r\n", tag)],
             "LOGOUT" => self.cmd_logout(&tag),
-            "LOGIN" => self.cmd_login(&tag, &args),
+            "LOGIN" => self.cmd_login(&tag, args),
+            "ID" => self.cmd_id(&tag, args),
             "AUTHENTICATE" => {
                 if args.trim().eq_ignore_ascii_case("PLAIN") {
                     self.auth_tag = Some(tag.clone());
@@ -250,18 +288,18 @@ impl ImapSession {
                     vec![format!("{} NO Unsupported mechanism\r\n", tag)]
                 }
             }
-            "LIST" => self.cmd_list(&tag, &args).await,
-            "LSUB" => self.cmd_list(&tag, &args).await,
-            "SELECT" => self.cmd_select(&tag, &args).await,
-            "EXAMINE" => self.cmd_select(&tag, &args).await,
-            "STATUS" => self.cmd_status(&tag, &args).await,
-            "FETCH" => self.cmd_fetch(&tag, &args, false).await,
-            "UID" => self.cmd_uid(&tag, &args).await,
+            "LIST" => self.cmd_list(&tag, args).await,
+            "LSUB" => self.cmd_list(&tag, args).await,
+            "SELECT" => self.cmd_select(&tag, args).await,
+            "EXAMINE" => self.cmd_select(&tag, args).await,
+            "STATUS" => self.cmd_status(&tag, args).await,
+            "FETCH" => self.cmd_fetch(&tag, args, false).await,
+            "UID" => self.cmd_uid(&tag, args).await,
             "CLOSE" => self.cmd_close(&tag),
             "EXPUNGE" => self.cmd_expunge(&tag).await,
-            "SEARCH" => self.cmd_search(&tag, &args, false),
-            "STORE" => self.cmd_store(&tag, &args, false).await,
-            "MOVE" => self.cmd_move(&tag, &args, false).await,
+            "SEARCH" => self.cmd_search(&tag, args, false),
+            "STORE" => self.cmd_store(&tag, args, false).await,
+            "MOVE" => self.cmd_move(&tag, args, false).await,
             "COPY" => self.cmd_copy(&tag),
             "IDLE" => {
                 self.idle_tag = Some(tag.clone());
@@ -275,46 +313,95 @@ impl ImapSession {
         }
     }
 
-    /// Resolve an `APPEND` target mailbox to what the server can do with it.
+    /// What an `APPEND` to `mailbox` does (see `handle_append` in the
+    /// connection loop): Sent and Drafts are supported, nothing else.
     pub(crate) async fn append_target(&self, mailbox: &str) -> AppendTarget {
         let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
-        let special_use = self
-            .store
-            .folder_by_imap_path(&name)
-            .await
-            .and_then(|f| f.special_use);
-        match special_use.as_deref() {
+        let folder = self.store.folder_by_imap_path(&name).await;
+        match folder.and_then(|f| f.special_use).as_deref() {
             Some("\\Sent") => AppendTarget::Sent,
             Some("\\Drafts") => AppendTarget::Drafts,
             _ => AppendTarget::Unsupported,
         }
     }
 
-    /// Save an `APPEND`ed message as a server-side draft, and report the UID the
-    /// store gave it so the client can delete its previous autosave.
-    pub(crate) async fn create_draft(&self, msg: &ParsedMessage) -> Result<Option<u32>, String> {
+    /// Save an `APPEND`ed message as a draft and return the UID it gets in
+    /// `mailbox`, so the client can drop its previous autosave. `None` means
+    /// the draft is saved but has not shown up within `wait`.
+    pub(crate) async fn create_draft(
+        &self,
+        msg: &ParsedMessage,
+        mailbox: &str,
+        wait: std::time::Duration,
+    ) -> Result<Option<u32>, String> {
         let draft = self.backend.create_draft(msg).await?;
-        Ok(self.append_uid(&draft.element_id.to_string()).await)
+        Ok(self
+            .uid_in(mailbox, &draft.element_id.to_string(), wait)
+            .await)
     }
 
-    /// The UID of a mail that was just created on the server. The event bus
-    /// delivers it a moment after the API call returns, so this waits briefly.
-    /// `None` is not an error: the draft is saved either way, and only the
-    /// client's own bookkeeping (deleting the previous autosave) suffers.
-    async fn append_uid(&self, element_id: &str) -> Option<u32> {
-        for _ in 0..APPEND_UID_POLLS {
-            if let Some((_, stored)) = self.store.find_mail_anywhere(element_id).await {
-                return Some(stored.uid);
+    /// The UID of mail `element_id` in `mailbox`, waiting up to `wait` for it
+    /// to arrive through the event bus.
+    async fn uid_in(
+        &self,
+        mailbox: &str,
+        element_id: &str,
+        wait: std::time::Duration,
+    ) -> Option<u32> {
+        let name = super::utf7::decode(mailbox).unwrap_or_else(|| mailbox.to_string());
+        let folder = self.store.folder_by_imap_path(&name).await?;
+        let mut changes = self.store.subscribe();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Some(mail) = self.store.mail_in_folder(&folder.id, element_id).await {
+                return Some(mail.uid);
             }
-            tokio::time::sleep(APPEND_UID_POLL_INTERVAL).await;
+            match tokio::time::timeout_at(deadline, changes.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => return None,
+            }
         }
-        None
+    }
+
+    /// Find Tuta's own Sent copy of a mail this bridge just sent, so an APPEND
+    /// to Sent can answer with `APPENDUID` (UIDPLUS) and the client can find
+    /// its copy, for example to run its after-send filters. Waits up to `wait`
+    /// for the copy to arrive through the event bus.
+    pub(crate) async fn sent_copy(
+        &self,
+        mailbox: &str,
+        message_id: Option<&str>,
+        wait: std::time::Duration,
+    ) -> SentCopy {
+        let Some(id) = message_id else {
+            return SentCopy::Unknown;
+        };
+        let Some(element_id) = self.backend.sent_mail_element_id(id).await else {
+            return SentCopy::Unknown;
+        };
+        match self.uid_in(mailbox, &element_id, wait).await {
+            Some(uid) => SentCopy::Found(uid),
+            None => SentCopy::Pending,
+        }
     }
 
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
         vec![
-            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE\r\n".to_string(),
+            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE ID\r\n".to_string(),
             format!("{} OK CAPABILITY completed\r\n", tag),
+        ]
+    }
+
+    /// ID (RFC 2971): the client says which app it is, which the live view
+    /// shows. Allowed in any state.
+    fn cmd_id(&mut self, tag: &str, args: &str) -> Vec<String> {
+        self.identity = ClientIdentity::from_params(&parse_id_params(args));
+        if let (Some(activity), Some(_)) = (&self.activity, &self.listed) {
+            activity.identify(self.session_id, &self.identity);
+        }
+        vec![
+            "* ID (\"name\" \"TutaBridge\")\r\n".to_string(),
+            format!("{} OK ID completed\r\n", tag),
         ]
     }
 
@@ -328,8 +415,8 @@ impl ImapSession {
 
     fn cmd_login(&mut self, tag: &str, args: &str) -> Vec<String> {
         if let Some(ref expected) = self.password_hash {
-            let (_, password) = parse_login_args(args);
-            if password != *expected {
+            let password = zeroize::Zeroizing::new(parse_login_args(args).1);
+            if !crate::util::secret_eq(&password, expected) {
                 return vec![format!(
                     "{} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n",
                     tag
@@ -337,6 +424,7 @@ impl ImapSession {
             }
         }
         self.state = State::Authenticated;
+        self.on_signed_in();
         info!(
             "IMAP session {}: authenticated (bridge session)",
             self.session_id
@@ -387,6 +475,7 @@ impl ImapSession {
             }
         };
         let folder_id = folder.id.clone();
+        self.report_folder(Some(folder.imap_path.clone()));
         self.selected_folder = Some(folder);
         self.state = State::Selected;
 
@@ -405,7 +494,7 @@ impl ImapSession {
                     "* 0 RECENT\r\n".to_string(),
                     "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n".to_string(),
                     "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Limited\r\n".to_string(),
-                    "* OK [UIDVALIDITY {UIDVALIDITY}] UIDs valid\r\n".to_string(),
+                    "* OK [UIDVALIDITY 1] UIDs valid\r\n".to_string(),
                     format!("* OK [UIDNEXT {}] Predicted next UID\r\n", self.uid_next),
                 ];
                 if first_unseen > 0 {
@@ -439,7 +528,7 @@ impl ImapSession {
         let unseen = stored.iter().filter(|m| m.mail.unread).count();
         vec![
             format!(
-                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY {UIDVALIDITY})\r\n",
+                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY 1)\r\n",
                 raw_name, count, unseen, self.uid_next
             ),
             format!("{} OK STATUS completed\r\n", tag),
@@ -515,6 +604,9 @@ impl ImapSession {
                                     .await;
                             }
                             self.mails[idx].body_loaded = true;
+                            self.report(ActivityEvent::BodyDownloaded {
+                                client: self.session_id,
+                            });
                         }
                         Err(e) => {
                             log::warn!(
@@ -552,6 +644,13 @@ impl ImapSession {
             responses.push(resp);
         }
 
+        if let (false, Some(folder)) = (responses.is_empty(), &self.selected_folder) {
+            self.report(ActivityEvent::Synced {
+                client: self.session_id,
+                folder: folder.imap_path.clone(),
+                messages: responses.len(),
+            });
+        }
         let cmd_name = if uid_mode { "UID FETCH" } else { "FETCH" };
         responses.push(format!("{} OK {} completed\r\n", tag, cmd_name));
         responses
@@ -695,8 +794,14 @@ impl ImapSession {
                 .collect();
 
             if !mail_ids.is_empty() {
-                if let Err(e) = self.backend.set_unread_status(mail_ids, !adding).await {
-                    log::warn!("Failed to update read status on server: {}", e);
+                let count = mail_ids.len();
+                match self.backend.set_unread_status(mail_ids, !adding).await {
+                    Ok(()) => self.report(ActivityEvent::MarkedRead {
+                        client: self.session_id,
+                        count,
+                        read: adding,
+                    }),
+                    Err(e) => log::warn!("Failed to update read status on server: {}", e),
                 }
             }
         }
@@ -733,6 +838,7 @@ impl ImapSession {
     }
 
     fn cmd_close(&mut self, tag: &str) -> Vec<String> {
+        self.report_folder(None);
         self.state = State::Authenticated;
         self.selected_folder = None;
         self.mails.clear();
@@ -751,10 +857,28 @@ impl ImapSession {
             .filter_map(|m| m.mail._id.clone())
             .collect();
 
+        let deleted_count = deleted_ids.len();
         if !deleted_ids.is_empty() {
-            if let Err(e) = self.backend.trash_mails(deleted_ids).await {
-                log::warn!("Failed to trash mails: {}", e);
+            // Trash and Spam are where Tuta deletes permanently; anywhere else
+            // an expunged mail goes to Trash, as before.
+            match self.selected_folder.as_ref() {
+                Some(folder) if matches!(folder.kind, MailSetKind::Trash | MailSetKind::Spam) => {
+                    if let Err(e) = self.backend.delete_mails(deleted_ids, folder).await {
+                        log::warn!("Failed to delete mails from {}: {}", folder.imap_path, e);
+                        return vec![format!("{} NO EXPUNGE failed\r\n", tag)];
+                    }
+                }
+                _ => {
+                    if let Err(e) = self.backend.trash_mails(deleted_ids).await {
+                        log::warn!("Failed to trash mails: {}", e);
+                        return vec![format!("{} NO EXPUNGE failed\r\n", tag)];
+                    }
+                }
             }
+            self.report(ActivityEvent::Deleted {
+                client: self.session_id,
+                count: deleted_count,
+            });
         }
 
         let mut responses = Vec::new();
@@ -807,10 +931,16 @@ impl ImapSession {
             .map(|id| id.element_id.to_string())
             .collect();
 
+        let count = mail_ids.len();
         if let Err(e) = self.backend.move_mails(mail_ids, &target).await {
             log::warn!("{} to {} failed: {}", label, folder_name, e);
             return vec![format!("{} NO {} failed\r\n", tag, label)];
         }
+        self.report(ActivityEvent::Moved {
+            client: self.session_id,
+            count,
+            folder: target.imap_path.clone(),
+        });
 
         // Expunge the moved messages from the source view (RFC 6851).
         let mut responses = Vec::new();
@@ -1261,6 +1391,34 @@ fn needs_body(items: &str) -> bool {
         .any(|token| token == "RFC822")
 }
 
+/// The `(field value ...)` list of an ID command as pairs; `NIL` (no list)
+/// or a `NIL` value yields nothing for it.
+fn parse_id_params(args: &str) -> Vec<(String, String)> {
+    let Some(inner) = args
+        .trim()
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return Vec::new();
+    };
+    let mut tokens = Vec::new();
+    let mut rest = inner.trim_start();
+    // RFC 2971 allows 30 pairs at most.
+    while !rest.is_empty() && tokens.len() < 60 {
+        let (token, after) = parse_imap_token(rest);
+        if after.len() == rest.len() {
+            break;
+        }
+        tokens.push(token);
+        rest = after.trim_start();
+    }
+    tokens
+        .chunks_exact(2)
+        .filter(|pair| !pair[1].eq_ignore_ascii_case("NIL"))
+        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .collect()
+}
+
 fn parse_login_args(args: &str) -> (String, String) {
     let args = args.trim();
     let (user, rest) = parse_imap_token(args);
@@ -1270,7 +1428,9 @@ fn parse_login_args(args: &str) -> (String, String) {
 
 fn parse_imap_token(s: &str) -> (String, &str) {
     if s.starts_with('"') {
-        let mut result = String::new();
+        // Unescaping cannot grow the token. Reserve before copying so a
+        // password never leaves an old allocation behind during growth.
+        let mut result = String::with_capacity(s.len() - 1);
         let mut chars = s[1..].char_indices();
         while let Some((i, c)) = chars.next() {
             match c {
@@ -1293,12 +1453,35 @@ fn parse_imap_token(s: &str) -> (String, &str) {
     }
 }
 
-fn parse_command(line: &str) -> (String, String, String) {
+fn parse_command(line: &str) -> (String, String, &str) {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     let tag = parts.first().unwrap_or(&"*").to_string();
     let cmd = parts.get(1).unwrap_or(&"").to_string();
-    let args = parts.get(2).unwrap_or(&"").to_string();
+    // LOGIN arguments contain the password. Borrow the wiped connection
+    // buffer, including when parse_append probes a non-APPEND command.
+    let args = parts.get(2).copied().unwrap_or("");
     (tag, cmd, args)
+}
+
+/// What an `APPEND` can do with its target mailbox.
+pub(crate) enum AppendTarget {
+    /// Tuta already keeps mail sent through the bridge here.
+    Sent,
+    /// The message is saved as a draft.
+    Drafts,
+    /// Tuta cannot create a mail anywhere else.
+    Unsupported,
+}
+
+/// Where an APPEND to Sent stands relative to the mails this bridge sent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SentCopy {
+    /// Tuta's copy is in Sent under this UID.
+    Found(u32),
+    /// Sent through this bridge, but Tuta's copy has not arrived yet.
+    Pending,
+    /// Not sent through this bridge recently: nothing would keep it.
+    Unknown,
 }
 
 /// A parsed `APPEND` command: the tag, the target mailbox, and the size of the
@@ -1317,8 +1500,8 @@ pub(crate) fn parse_append(line: &str) -> Option<AppendRequest> {
     if !cmd.eq_ignore_ascii_case("APPEND") {
         return None;
     }
-    let mailbox = append_first_token(&args)?;
-    let literal_size = append_literal_size(&args)?;
+    let mailbox = append_first_token(args)?;
+    let literal_size = append_literal_size(args)?;
     Some(AppendRequest {
         tag,
         mailbox,
@@ -1349,7 +1532,7 @@ fn append_literal_size(args: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::Engine;
     use tutasdk::date::DateTime;
@@ -2018,14 +2201,17 @@ mod tests {
         mails: Mutex<Vec<Mail>>,
         details: Mutex<std::collections::HashMap<String, MailDetails>>,
         trashed: Mutex<Vec<IdTupleGenerated>>,
+        deleted: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
+        fail_expunge: Mutex<bool>,
         unread_calls: Mutex<Vec<(Vec<IdTupleGenerated>, bool)>>,
         sent: Mutex<Vec<ParsedMessage>>,
-        created_drafts: Mutex<Vec<ParsedMessage>>,
         moved: Mutex<Vec<(Vec<IdTupleGenerated>, String)>>,
         fail_details: Mutex<bool>,
         attachment_failure: Mutex<u8>,
         details_calls: Mutex<usize>,
         attachments: Mutex<Vec<(TutanotaFile, Vec<u8>)>>,
+        /// Submitted Message-ID -> element id of the mail sent with it.
+        sent_ids: Mutex<std::collections::HashMap<String, String>>,
     }
 
     impl MockBackend {
@@ -2034,14 +2220,16 @@ mod tests {
                 mails: Mutex::new(Vec::new()),
                 details: Mutex::new(std::collections::HashMap::new()),
                 trashed: Mutex::new(Vec::new()),
+                deleted: Mutex::new(Vec::new()),
+                fail_expunge: Mutex::new(false),
                 unread_calls: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
-                created_drafts: Mutex::new(Vec::new()),
                 moved: Mutex::new(Vec::new()),
                 fail_details: Mutex::new(false),
                 attachment_failure: Mutex::new(0),
                 details_calls: Mutex::new(0),
                 attachments: Mutex::new(Vec::new()),
+                sent_ids: Mutex::new(std::collections::HashMap::new()),
             }
         }
 
@@ -2366,74 +2554,111 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_target_is_sent_or_drafts_and_nothing_else() {
+    async fn append_target_is_sent_or_drafts_only() {
         let backend = Arc::new(MockBackend::with_mails(vec![]));
         let store = MailStore::new();
-        let sent = FolderInfo {
+        store
+            .set_folder_list(vec![inbox_folder(), sent_folder(), drafts_folder()])
+            .await;
+        let session = ImapSession::new(store, backend, None, None);
+
+        let target = |name| session.append_target(name);
+        assert!(matches!(target("Sent").await, AppendTarget::Sent));
+        assert!(matches!(target("Drafts").await, AppendTarget::Drafts));
+        assert!(matches!(target("INBOX").await, AppendTarget::Unsupported));
+        assert!(matches!(
+            target("Nonexistent").await,
+            AppendTarget::Unsupported
+        ));
+    }
+
+    fn drafts_folder() -> FolderInfo {
+        FolderInfo {
+            id: "drafts".into(),
+            list_id: "folders".into(),
+            entries_list_id: "drafts_entries".into(),
+            kind: MailSetKind::Draft,
+            imap_path: "Drafts".into(),
+            special_use: Some("\\Drafts".into()),
+        }
+    }
+
+    fn sent_folder() -> FolderInfo {
+        FolderInfo {
             id: "sent".into(),
             list_id: "folders".into(),
             entries_list_id: "sent_entries".into(),
             kind: MailSetKind::Sent,
             imap_path: "Sent".into(),
             special_use: Some("\\Sent".into()),
-        };
-        let drafts = FolderInfo {
-            id: "drafts".into(),
-            list_id: "folders".into(),
-            entries_list_id: "drafts_entries".into(),
-            kind: MailSetKind::Draft,
-            imap_path: "Drafts".into(),
-            special_use: Some("\\Drafts".into()),
-        };
-        store
-            .set_folder_list(vec![inbox_folder(), sent, drafts])
-            .await;
-        let session = ImapSession::new(store, backend, None, None);
-
-        assert!(matches!(
-            session.append_target("Sent").await,
-            AppendTarget::Sent
-        ));
-        assert!(matches!(
-            session.append_target("Drafts").await,
-            AppendTarget::Drafts
-        ));
-        assert!(matches!(
-            session.append_target("INBOX").await,
-            AppendTarget::Unsupported
-        ));
-        assert!(matches!(
-            session.append_target("Nonexistent").await,
-            AppendTarget::Unsupported
-        ));
+        }
     }
 
     #[tokio::test]
-    async fn append_uid_is_the_uid_the_store_gave_the_new_draft() {
+    async fn sent_copy_waits_for_tuta_copy_of_a_mail_sent_here() {
+        let backend = Arc::new(MockBackend::new());
+        backend
+            .sent_ids
+            .lock()
+            .unwrap()
+            .insert("abc@client".into(), "sent-1".into());
         let store = MailStore::new();
-        let drafts = FolderInfo {
-            id: "drafts".into(),
-            list_id: "folders".into(),
-            entries_list_id: "drafts_entries".into(),
-            kind: MailSetKind::Draft,
-            imap_path: "Drafts".into(),
-            special_use: Some("\\Drafts".into()),
-        };
-        store.set_folder_list(vec![drafts]).await;
         store
-            .set_folder(
-                "drafts",
-                vec![StoredMail {
-                    mail: make_mail("draft-1", "a draft", false),
-                    body_loaded: false,
-                    uid: 42,
-                    attachments_pending: false,
-                }],
+            .set_folder_list(vec![inbox_folder(), sent_folder()])
+            .await;
+        let session = ImapSession::new(store.clone(), backend, None, None);
+        // The copy arrives through the event bus shortly after the APPEND.
+        let arriving = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            arriving
+                .upsert_mail_in_folder(
+                    "sent",
+                    StoredMail {
+                        mail: make_mail("sent-1", "Hello", false),
+                        body_loaded: false,
+                        uid: 7,
+                        attachments_pending: false,
+                    },
+                )
+                .await;
+        });
+        let copy = session
+            .sent_copy(
+                "Sent",
+                Some("abc@client"),
+                std::time::Duration::from_secs(5),
             )
             .await;
-        let session = ImapSession::new(store, Arc::new(MockBackend::new()), None, None);
+        assert_eq!(copy, SentCopy::Found(7));
+    }
 
-        assert_eq!(session.append_uid("draft-1").await, Some(42));
+    #[tokio::test]
+    async fn sent_copy_tells_unknown_mail_from_a_late_copy() {
+        let backend = Arc::new(MockBackend::new());
+        backend
+            .sent_ids
+            .lock()
+            .unwrap()
+            .insert("abc@client".into(), "sent-1".into());
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![inbox_folder(), sent_folder()])
+            .await;
+        let session = ImapSession::new(store, backend, None, None);
+        let short = std::time::Duration::from_millis(50);
+        assert_eq!(
+            session.sent_copy("Sent", Some("other@client"), short).await,
+            SentCopy::Unknown
+        );
+        assert_eq!(
+            session.sent_copy("Sent", None, short).await,
+            SentCopy::Unknown
+        );
+        assert_eq!(
+            session.sent_copy("Sent", Some("abc@client"), short).await,
+            SentCopy::Pending
+        );
     }
 
     async fn populate_store(store: &MailStore, mails: &[Mail]) {
@@ -2552,7 +2777,24 @@ mod tests {
             Ok(())
         }
         async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String> {
+            if *self.fail_expunge.lock().unwrap() {
+                return Err("server unavailable".into());
+            }
             self.trashed.lock().unwrap().extend(mail_ids);
+            Ok(())
+        }
+        async fn delete_mails(
+            &self,
+            mail_ids: Vec<IdTupleGenerated>,
+            folder: &FolderInfo,
+        ) -> Result<(), String> {
+            if *self.fail_expunge.lock().unwrap() {
+                return Err("server unavailable".into());
+            }
+            self.deleted
+                .lock()
+                .unwrap()
+                .push((mail_ids, folder.id.clone()));
             Ok(())
         }
         async fn move_mails(
@@ -2570,13 +2812,16 @@ mod tests {
             self.sent.lock().unwrap().push(msg.clone());
             Ok(())
         }
-        async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
-            self.created_drafts.lock().unwrap().push(msg.clone());
-            Ok(IdTupleGenerated::new(test_id("drafts"), test_id("draft-1")))
+        async fn sent_mail_element_id(&self, submitted_message_id: &str) -> Option<String> {
+            self.sent_ids
+                .lock()
+                .unwrap()
+                .get(submitted_message_id)
+                .cloned()
         }
     }
 
-    fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
+    pub(crate) fn make_mail(element_id: &str, subject: &str, unread: bool) -> Mail {
         Mail {
             _id: Some(IdTupleGenerated::new(test_id("list1"), test_id(element_id))),
             _permissions: test_id("perm1"),
@@ -2738,6 +2983,81 @@ mod tests {
         assert!(resp[0].contains(&b64_body));
     }
 
+    #[test]
+    fn id_params_parse_pairs_and_skip_nil() {
+        assert_eq!(
+            parse_id_params(r#"("name" "Thunderbird" "version" "128.4" "os" NIL)"#),
+            vec![
+                ("name".to_string(), "Thunderbird".to_string()),
+                ("version".to_string(), "128.4".to_string()),
+            ]
+        );
+        assert!(parse_id_params("NIL").is_empty());
+        assert!(parse_id_params("(\"name\"").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_live_view_lists_a_signed_in_client_and_hears_its_activity() {
+        let backend = Arc::new(MockBackend::with_mails(vec![make_mail(
+            "m1",
+            "LIVE-VIEW-SUBJECT-5d2e",
+            true,
+        )]));
+        let store = MailStore::new();
+        let mails = backend.mails.lock().unwrap().clone();
+        populate_store(&store, &mails).await;
+        let (changed, _) = tokio::sync::broadcast::channel(16);
+        let activity = Activity::new(changed);
+        let mut events = activity.subscribe();
+        let mut session = ImapSession::new(store, backend.clone(), None, None)
+            .with_session_id(9)
+            .with_activity(activity.clone(), "127.0.0.1:50999".parse().unwrap());
+
+        let resp = session.handle_command("a CAPABILITY").await;
+        assert!(resp[0].contains(" ID"));
+        let resp = session
+            .handle_command(r#"b ID ("name" "Thunderbird" "version" "128.4")"#)
+            .await;
+        assert!(resp.last().unwrap().contains("OK ID"));
+        assert!(activity.clients().is_empty(), "listed only once signed in");
+
+        session.handle_command("c LOGIN u p").await;
+        session.handle_command("d SELECT INBOX").await;
+        let clients = activity.clients();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].name.as_deref(), Some("Thunderbird"));
+        assert_eq!(clients[0].version.as_deref(), Some("128.4"));
+        assert_eq!(clients[0].folder.as_deref(), Some("INBOX"));
+
+        session.handle_command("e FETCH 1:* (FLAGS UID)").await;
+        session.handle_command("f STORE 1 +FLAGS (\\Seen)").await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        assert!(seen.contains(&ActivityEvent::Synced {
+            client: 9,
+            folder: "INBOX".into(),
+            messages: 1,
+        }));
+        assert!(seen.contains(&ActivityEvent::MarkedRead {
+            client: 9,
+            count: 1,
+            read: true,
+        }));
+        let json = serde_json::to_string(&seen).unwrap();
+        assert!(
+            !json.contains("LIVE-VIEW-SUBJECT"),
+            "no mail content: {json}"
+        );
+
+        drop(session);
+        assert!(
+            activity.clients().is_empty(),
+            "gone when the connection ends"
+        );
+    }
+
     #[tokio::test]
     async fn test_store_seen_flag_calls_backend() {
         let backend = Arc::new(MockBackend::with_mails(vec![make_mail(
@@ -2764,6 +3084,136 @@ mod tests {
         // Verify local state updated
         let resp = session.handle_command("A004 FETCH 1 (FLAGS)").await;
         assert!(resp[0].contains("\\Seen"));
+    }
+
+    /// Expunging in Trash or Spam deletes for real: trashing a mail that is
+    /// already in Trash changes nothing, so it would come back on the next
+    /// sync.
+    #[tokio::test]
+    async fn expunge_in_trash_or_spam_deletes_permanently() {
+        for (id, kind, path, special_use) in [
+            ("trash", MailSetKind::Trash, "Trash", "\\Trash"),
+            ("spam", MailSetKind::Spam, "Spam", "\\Junk"),
+        ] {
+            let backend = Arc::new(MockBackend::with_mails(vec![
+                make_mail("m1", "Mail 1", false),
+                make_mail("m2", "Mail 2", false),
+            ]));
+            let store = MailStore::new();
+            let folder = FolderInfo {
+                id: id.into(),
+                list_id: "folders".into(),
+                entries_list_id: format!("{id}_entries"),
+                kind,
+                imap_path: path.into(),
+                special_use: Some(special_use.into()),
+            };
+            store.set_folder_list(vec![inbox_folder(), folder]).await;
+            let stored: Vec<StoredMail> = backend
+                .mails
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, m)| StoredMail {
+                    mail: m.clone(),
+                    body_loaded: false,
+                    uid: (i + 1) as u32,
+                    attachments_pending: false,
+                })
+                .collect();
+            store.set_folder(id, stored).await;
+            let mut session = ImapSession::new(store, backend.clone(), None, None);
+
+            session.handle_command("A001 LOGIN user pass").await;
+            session.handle_command(&format!("A002 SELECT {path}")).await;
+            session
+                .handle_command("A003 STORE 2 +FLAGS (\\Deleted)")
+                .await;
+            let resp = session.handle_command("A004 EXPUNGE").await;
+            assert!(resp.iter().any(|r| r.contains("* 2 EXPUNGE")), "{path}");
+
+            assert!(backend.trashed.lock().unwrap().is_empty(), "{path}");
+            let deleted = backend.deleted.lock().unwrap();
+            assert_eq!(deleted.len(), 1, "{path}");
+            assert_eq!(deleted[0].0.len(), 1, "{path}");
+            assert_eq!(deleted[0].1, id, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_expunge_preserves_messages_and_can_be_retried() {
+        for (id, kind, path, special_use) in [
+            ("trash", MailSetKind::Trash, "Trash", "\\Trash"),
+            ("spam", MailSetKind::Spam, "Spam", "\\Junk"),
+            ("inbox", MailSetKind::Inbox, "INBOX", "\\Inbox"),
+        ] {
+            let backend = Arc::new(MockBackend::with_mails(vec![
+                make_mail("m1", "Mail 1", false),
+                make_mail("m2", "Mail 2", false),
+            ]));
+            let store = MailStore::new();
+            let folder = FolderInfo {
+                id: id.into(),
+                list_id: "folders".into(),
+                entries_list_id: format!("{id}_entries"),
+                kind,
+                imap_path: path.into(),
+                special_use: Some(special_use.into()),
+            };
+            store.set_folder_list(vec![folder]).await;
+            let stored: Vec<StoredMail> = backend
+                .mails
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, m)| StoredMail {
+                    mail: m.clone(),
+                    body_loaded: false,
+                    uid: (i + 1) as u32,
+                    attachments_pending: false,
+                })
+                .collect();
+            store.set_folder(id, stored).await;
+            *backend.fail_expunge.lock().unwrap() = true;
+            let mut session = ImapSession::new(store, backend.clone(), None, None);
+
+            session.handle_command("A001 LOGIN user pass").await;
+            session.handle_command(&format!("A002 SELECT {path}")).await;
+            session
+                .handle_command("A003 STORE 2 +FLAGS (\\Deleted)")
+                .await;
+            let resp = session.handle_command("A004 EXPUNGE").await;
+            assert_eq!(resp, vec!["A004 NO EXPUNGE failed\r\n"], "{path}");
+            assert_eq!(session.mails.len(), 2, "{path}");
+            assert_eq!(session.mails[1].uid, 2, "{path}");
+            assert!(session.mails[1].deleted, "{path}");
+            assert!(backend.trashed.lock().unwrap().is_empty());
+            assert!(backend.deleted.lock().unwrap().is_empty());
+
+            // Retrying needs neither a new SELECT nor another STORE.
+            *backend.fail_expunge.lock().unwrap() = false;
+            let resp = session.handle_command("A005 EXPUNGE").await;
+            assert_eq!(
+                resp,
+                vec!["* 2 EXPUNGE\r\n", "A005 OK EXPUNGE completed\r\n"],
+                "{path}"
+            );
+            assert_eq!(session.mails.len(), 1, "{path}");
+            assert_eq!(session.mails[0].uid, 1, "{path}");
+            let expected = vec![IdTupleGenerated::new(test_id("list1"), test_id("m2"))];
+            if kind == MailSetKind::Inbox {
+                assert_eq!(*backend.trashed.lock().unwrap(), expected);
+                assert!(backend.deleted.lock().unwrap().is_empty());
+            } else {
+                assert_eq!(
+                    *backend.deleted.lock().unwrap(),
+                    vec![(expected, id.into())]
+                );
+                assert!(backend.trashed.lock().unwrap().is_empty());
+            }
+        }
     }
 
     #[tokio::test]

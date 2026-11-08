@@ -147,8 +147,8 @@ pub async fn check(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
         .await
         .map_err(describe)?;
     Ok(update.map(|update| UpdateInfo {
-        version: update.version.clone(),
-        current: update.current_version.clone(),
+        version: display_version(&update.version),
+        current: tutabridge_core::VERSION.to_owned(),
         notes: update.body.clone(),
     }))
 }
@@ -184,7 +184,7 @@ async fn install_with_policy(app: &AppHandle, automatic: bool) -> Result<Option<
     if automatic && !auto_update_enabled() {
         return Ok(None);
     }
-    let version = update.version.clone();
+    let version = display_version(&update.version);
     log::info!("Downloading TutaBridge {version}");
     let bytes = update.download(|_, _| {}, || {}).await.map_err(describe)?;
     // The setting may change while a large download is in flight.
@@ -261,8 +261,26 @@ pub fn pending_update() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn get_app_version(app: AppHandle) -> String {
-    app.package_info().version.to_string()
+pub fn get_app_version() -> String {
+    tutabridge_core::VERSION.to_owned()
+}
+
+/// The tag form of a bundle version. The release job writes `X.Y.Z-N` into
+/// the bundles and the update manifest (`scripts/release-assets.py`); the
+/// release it comes from is tagged `vX.Y.Z-rc.N`, and that is the form
+/// shown everywhere else. Any other version is shown as it is.
+fn display_version(bundle_version: &str) -> String {
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    match bundle_version.split_once('-') {
+        Some((release, build))
+            if numeric(build)
+                && release.split('.').count() == 3
+                && release.split('.').all(numeric) =>
+        {
+            format!("{release}-rc.{build}")
+        }
+        _ => bundle_version.to_owned(),
+    }
 }
 
 #[tauri::command]
@@ -273,6 +291,16 @@ pub fn restart_app(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_versions_are_shown_as_their_tag() {
+        assert_eq!(display_version("0.1.0-14"), "0.1.0-rc.14");
+        assert_eq!(display_version("1.2.3-0"), "1.2.3-rc.0");
+        assert_eq!(display_version("0.1.0"), "0.1.0");
+        assert_eq!(display_version("0.1.0-rc.14"), "0.1.0-rc.14");
+        assert_eq!(display_version("0.1.0-dev"), "0.1.0-dev");
+        assert_eq!(display_version("0.1-14"), "0.1-14");
+    }
 
     #[test]
     fn unreadable_config_disables_automatic_updates() {

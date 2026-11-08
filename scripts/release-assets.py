@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from types import SimpleNamespace
 
 REPO = 'spartanz51/tutabridge'
 PAYLOADS = {
@@ -87,7 +88,7 @@ def require_assets(directory, signed=False):
         p = directory / name
         if p.is_symlink() or not p.is_file() or p.stat().st_size == 0:
             raise ValueError(f'Missing or invalid asset: {name}')
-    allowed = expected | ({'latest.json', 'SHA256SUMS'} if signed else set())
+    allowed = expected | ({'latest.json', 'SHA256SUMS', 'docker-release.json'} if signed else set())
     if set(p.name for p in directory.iterdir()) - allowed:
         raise ValueError('Unexpected release asset')
 
@@ -170,8 +171,92 @@ def check_source(args):
     run('git', 'merge-base', '--is-ancestor', args.source, remote[0])
 
 
+def ensure_draft(version, source):
+    existing, tagged = release_state(version, source)
+    if existing and not existing['draft']:
+        return existing
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp', f'repos/{REPO}/releases?per_page=100'))
+    current = VERSION.fullmatch(version)
+    for release in (r for page in pages for r in page if not r['draft']):
+        other = VERSION.fullmatch(release['tag_name'].removeprefix('v'))
+        if other and (tuple(map(int, other[1].split('.'))), int(other[2])) >= (tuple(map(int, current[1].split('.'))), int(current[2])):
+            raise ValueError('Refusing to publish below an existing release version')
+    tag = 'v' + version
+    if not tagged:
+        api('git/refs', 'POST', {'ref': f'refs/tags/{tag}', 'sha': source})
+    if not existing:
+        existing = api('releases', 'POST', dict(tag_name=tag, target_commitish=source,
+            name=f'TutaBridge {version}', body=f'Built and tested from `{source}`. Includes the patched official Tuta SDK pinned in this commit.', draft=True, prerelease=False, generate_release_notes=True))
+    return existing
+
+
+def load_docker():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('docker_release', Path(__file__).with_name('docker-release.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def parse_checksums(contents: bytes, checksums_sha256: str | None) -> dict[str, str]:
+    """Validate the signer-bound manifest bytes without reading any files."""
+    if not isinstance(checksums_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', checksums_sha256):
+        raise ValueError('Missing or invalid signing-job checksums digest')
+    if hashlib.sha256(contents).hexdigest() != checksums_sha256:
+        raise ValueError('Signed checksums differ from signing-job output')
+    entries = {}
+    for line in contents.decode('utf-8').splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  ([^/\\]+)', line)
+        if not match:
+            raise ValueError('Invalid signed checksums')
+        checksum, name = match.groups()
+        if name in entries or name in ('.', '..', 'SHA256SUMS') or '\0' in name:
+            raise ValueError('Invalid signed checksums')
+        entries[name] = checksum
+    if not entries:
+        raise ValueError('Empty signed checksums')
+    return entries
+
+
+def verify_checksums(directory, checksums_sha256):
+    """Check the downloaded files against a manifest bound to the signing job."""
+    manifest = directory / 'SHA256SUMS'
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError('Invalid signed checksums file')
+    entries = parse_checksums(manifest.read_bytes(), checksums_sha256)
+    actual = {p.name for p in directory.iterdir()} - {'SHA256SUMS'}
+    if set(entries) != actual:
+        raise ValueError('Incomplete or unexpected signed assets')
+    for name, expected in entries.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('Invalid signed asset')
+        with path.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+                raise ValueError('Signed asset checksum mismatch')
+
+
 def publish(args):
     directory = Path(args.directory)
+    verify_checksums(directory, getattr(args, 'checksums_sha256', None))
+    docker = load_docker()
+    require_docker = docker.enabled() or getattr(args, 'require_docker', False)
+    if require_docker:
+        docker.require_enabled()
+        if not getattr(args, 'docker_record', None):
+            raise ValueError('Missing independently verified Docker record')
+        record_bytes = Path(args.docker_record).read_bytes()
+        record = docker.validate_record(json.loads(record_bytes), args.version, args.source)
+        for reader in docker.registries():
+            if not docker.inspect_record(reader, record, args.version):
+                raise ValueError('Docker verification missing before GitHub publication')
+        # Add the separately verified record only after binding desktop bytes.
+        (directory / docker.RECORD).write_bytes(record_bytes)
+        checksums = []
+        for item in sorted(directory.iterdir()):
+            if item.name != 'SHA256SUMS':
+                checksums.append(f'{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}')
+        (directory / 'SHA256SUMS').write_text('\n'.join(checksums) + '\n')
     pubkey = Path(args.pubkey).read_text().strip()
     expected = manifest(directory, args.version, pubkey)
     actual = json.loads((directory / 'latest.json').read_text())
@@ -180,23 +265,14 @@ def publish(args):
     # Publishing from an old main commit supports a new-version rollback.
     check_source(args)
     existing, tagged = release_state(args.version, args.source)
+    if require_docker and (not existing or docker.durable_bytes(existing, SimpleNamespace(run=run, REPO=REPO)) != (directory / docker.RECORD).read_bytes()):
+        raise ValueError('Durable Docker record differs from verified release artifact')
     if existing and not existing['draft']:
         print('Release already published; leaving it unchanged')
         return
-    # Never move the updater latest pointer backwards to an older rc.
-    pages = json.loads(run('gh', 'api', '--paginate', '--slurp', f'repos/{REPO}/releases?per_page=100'))
-    current = VERSION.fullmatch(args.version)
-    for release in (r for page in pages for r in page if not r['draft']):
-        other = VERSION.fullmatch(release['tag_name'].removeprefix('v'))
-        if other and (tuple(map(int, other[1].split('.'))), int(other[2])) >= (tuple(map(int, current[1].split('.'))), int(current[2])):
-            raise ValueError('Refusing to publish below an existing release version')
+    existing = ensure_draft(args.version, args.source)
     tag = 'v' + args.version
-    if not tagged:
-        api('git/refs', 'POST', {'ref': f'refs/tags/{tag}', 'sha': args.source})
-    if not existing:
-        existing = api('releases', 'POST', dict(tag_name=tag, target_commitish=args.source,
-            name=f'TutaBridge {args.version}', body=f'Built and tested from `{args.source}`. Includes the patched official Tuta SDK pinned in this commit.', draft=True, prerelease=False, generate_release_notes=True))
-    run('gh', 'release', 'upload', tag, *[str(p) for p in sorted(directory.iterdir())], '--clobber', '--repo', REPO)
+    run('gh', 'release', 'upload', tag, *[str(p) for p in sorted(directory.iterdir()) if p.name != docker.RECORD], '--clobber', '--repo', REPO)
     uploaded = api(f"releases/{existing['id']}")
     names = {p.name: p.stat().st_size for p in directory.iterdir()}
     remote = {asset['name']: asset['size'] for asset in uploaded['assets']}
@@ -208,6 +284,14 @@ def publish(args):
         for name in names:
             if hashlib.sha256((directory / name).read_bytes()).digest() != hashlib.sha256((Path(downloaded) / name).read_bytes()).digest():
                 raise ValueError('Uploaded asset differs from signed output')
+    # Upload/read-back can take minutes. Recheck source/tag and both image
+    # references immediately before making the GitHub release public.
+    if require_docker:
+        check_source(args)
+        release_state(args.version, args.source)
+        for reader in docker.registries():
+            if not docker.inspect_record(reader, record, args.version):
+                raise ValueError('Docker image unavailable at publication boundary')
     api(f"releases/{existing['id']}", 'PATCH', dict(draft=False, prerelease=False, make_latest='true'))
 
 
@@ -220,6 +304,9 @@ if __name__ == '__main__':
     parser.add_argument('--platform')
     parser.add_argument('--pubkey')
     parser.add_argument('--source')
+    parser.add_argument('--require-docker', action='store_true')
+    parser.add_argument('--docker-record', help='Path to the independently verified Docker record')
+    parser.add_argument('--checksums-sha256', help='SHA256SUMS digest from the trusted signing job (required for publish)')
     args = parser.parse_args()
     app_version(args.version)
     globals()[args.command.replace('-', '_')](args)

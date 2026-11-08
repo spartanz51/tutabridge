@@ -122,6 +122,15 @@ pub(crate) struct AddressHeaders {
     pub reply_to: Vec<(String, String)>,
 }
 
+/// A message's Message-ID, without angle brackets, read from the header
+/// section only: same normalization as [`parse_rfc2822`], without decoding the
+/// body or attachments.
+pub(crate) fn parse_message_id(raw: &str) -> Option<String> {
+    get_header(&parse_headers(header_section(raw)), "message-id")
+        .as_deref()
+        .and_then(first_msg_id)
+}
+
 /// The address-list headers of a rendered message. Reads the header section
 /// only, so it is cheap on a message with a large body.
 pub(crate) fn parse_address_headers(raw: &str) -> AddressHeaders {
@@ -1035,6 +1044,14 @@ mod tests {
         let input = "caf=C3=A9";
         let result = decode_quoted_printable(input);
         assert_eq!(result, "caf\u{e9}");
+    }
+
+    #[test]
+    fn message_id_matches_the_full_parse_and_ignores_the_body() {
+        let raw = "Message-ID: <abc@client>\r\nSubject: Hi\r\n\r\nMessage-ID: <body@x>\r\n";
+        assert_eq!(parse_message_id(raw).as_deref(), Some("abc@client"));
+        assert_eq!(parse_message_id(raw), parse_rfc2822(raw).message_id);
+        assert_eq!(parse_message_id("Subject: none\r\n\r\nbody"), None);
     }
 
     #[test]

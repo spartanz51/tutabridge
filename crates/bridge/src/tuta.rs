@@ -97,6 +97,13 @@ pub trait MailBackend: Send + Sync {
         unread: bool,
     ) -> Result<(), String>;
     async fn trash_mails(&self, mail_ids: Vec<IdTupleGenerated>) -> Result<(), String>;
+    /// Delete mails permanently, as Tuta's "Delete permanently" does in Trash
+    /// and Spam. Only mails that are in `folder` are deleted.
+    async fn delete_mails(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        folder: &FolderInfo,
+    ) -> Result<(), String>;
     /// Move mails into the given target folder.
     async fn move_mails(
         &self,
@@ -104,11 +111,18 @@ pub trait MailBackend: Send + Sync {
         target: &FolderInfo,
     ) -> Result<(), String>;
     async fn send_mail(&self, msg: &ParsedMessage) -> Result<(), String>;
-    /// Create a draft on the server. A draft is the only mail Tuta can create
-    /// that is not a sent message, which is what makes `APPEND` to the Drafts
-    /// folder possible. Returns the new mail's id, so the caller can report its
-    /// UID back to the client.
-    async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String>;
+    /// Save a message as a draft on the server and return its id. A draft is
+    /// the only mail Tuta can create that is not sent, which is what makes an
+    /// IMAP `APPEND` to Drafts possible.
+    async fn create_draft(&self, _msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
+        Err("drafts are not supported by this backend".into())
+    }
+    /// Element id of a mail recently sent through this bridge, by the
+    /// Message-ID its client submitted. Lets IMAP answer the client's "save a
+    /// copy to Sent" with the UID of Tuta's own Sent copy.
+    async fn sent_mail_element_id(&self, _submitted_message_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Canonical IMAP name for a system folder, or `None` for custom/unsupported.
@@ -179,17 +193,19 @@ const SENT_ID_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 /// long-running bridge stays bounded.
 const SENT_ID_CACHE_MAX_ENTRIES: usize = 200;
 
-/// One remembered send: when it happened and the Message-ID the server
-/// assigned to the delivered mail (bare, no angle brackets).
+/// One remembered send: when it happened, the Message-ID the server
+/// assigned to the delivered mail (bare, no angle brackets), and the element
+/// id of the sent mail, which keeps its draft's id when it moves to Sent.
 struct SentIdEntry {
     stored_at: std::time::Instant,
     tuta_message_id: String,
+    element_id: String,
 }
 
-/// A draft the server has saved, plus the keys a later send of it needs.
+/// A draft the server saved, plus the keys a later send of it needs.
 struct CreatedDraft {
     id: IdTupleGenerated,
-    session_key: Vec<u8>,
+    session_key: GenericAesKey,
     attachment_keys: Vec<GenericAesKey>,
 }
 
@@ -273,11 +289,11 @@ impl TutaSession {
             .get_current_sym_group_key(&user_group_id)
             .await
             .map_err(|e| format!("Failed to get user group key: {e}"))?;
-        let derived = blake3_kdf(
+        let derived = zeroize::Zeroizing::new(blake3_kdf(
             &[versioned_key.object.as_bytes()],
             "tutabridge local storage v1",
             AES_256_KEY_SIZE,
-        );
+        ));
         GenericAesKey::from_bytes(&derived).map_err(|e| format!("Key derivation error: {e:?}"))
     }
 
@@ -379,6 +395,16 @@ impl TutaSession {
         if mail.mailDetailsDraft.is_some() {
             match mail_facade.load_mail_details_draft(mail).await {
                 Ok(details) => Ok(Some(details)),
+                // A draft that was just sent or deleted loses its draft
+                // details; callers re-read the mail, so this is not a failure.
+                Err(
+                    e @ ApiCallError::ServerResponseError {
+                        source: tutasdk::rest_error::HttpError::NotFoundError,
+                    },
+                ) => {
+                    log::debug!("Draft details gone (sent or deleted): {e}");
+                    Err(e)
+                }
                 Err(e) => {
                     log::error!("Failed to load mail details draft: {e}");
                     Err(e)
@@ -591,17 +617,21 @@ impl TutaSession {
         }
 
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
-        let created = self.create_draft_impl(msg).await?;
+        let CreatedDraft {
+            id: draft,
+            session_key,
+            attachment_keys,
+        } = self.create_draft_impl(msg, &randomizer).await?;
 
         // To populate `attachmentKeyData[]` we need each File entity's
         // IdTuple — the server allocated those when the draft was created.
         // We load the freshly-saved Mail just to read its `attachments`
         // field (order matches our `addedAttachments`) and zip with the
         // session keys we generated earlier.
-        let attachment_key_data = if created.attachment_keys.is_empty() {
+        let attachment_key_data = if attachment_keys.is_empty() {
             Vec::new()
         } else {
-            self.build_attachment_key_data(&created.id, &created.attachment_keys, &randomizer)
+            self.build_attachment_key_data(&draft, &attachment_keys, &randomizer)
                 .await?
         };
 
@@ -609,16 +639,18 @@ impl TutaSession {
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(randomizer.generate_random_array::<4>()),
         );
+        let draft_element_id = draft.element_id.to_string();
         let send_data = build_send_draft_data(
-            created.session_key,
-            created.id,
+            session_key.as_bytes().to_vec(),
+            draft,
             parameters_id,
             attachment_key_data,
             msg.is_plaintext,
         );
 
-        let executor = self.logged_in.get_service_executor();
-        let send_return = executor
+        let send_return = self
+            .logged_in
+            .get_service_executor()
             .post::<SendDraftService>(send_data, ExtraServiceParams::default())
             .await?;
 
@@ -627,19 +659,21 @@ impl TutaSession {
         // Remember submitted-id → delivered-id so the next patch in a
         // series can thread against what the server actually sent.
         if let Some(submitted_id) = &msg.message_id {
-            self.remember_sent_message_id(submitted_id, &send_return.messageId)
+            self.remember_sent_message_id(submitted_id, &send_return.messageId, &draft_element_id)
                 .await;
         }
         Ok(())
     }
 
-    /// Create the draft that a send submits, or that an IMAP `APPEND` to the
-    /// Drafts folder saves for a client. The returned keys are what a later
-    /// `SendDraftService` call needs; a draft that is never sent does not use
-    /// them.
-    async fn create_draft_impl(&self, msg: &ParsedMessage) -> Result<CreatedDraft, ApiCallError> {
-        let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
-        let session_key: GenericAesKey = Aes256Key::generate(&randomizer).into();
+    /// Create a draft on the server: what a send submits, or what an IMAP
+    /// `APPEND` to Drafts saves. Returns the keys a later `SendDraftService`
+    /// call needs; a draft that is never sent does not use them.
+    async fn create_draft_impl(
+        &self,
+        msg: &ParsedMessage,
+        randomizer: &RandomizerFacade,
+    ) -> Result<CreatedDraft, ApiCallError> {
+        let session_key: GenericAesKey = Aes256Key::generate(randomizer).into();
 
         // Send as the address the submission asked for, when the account
         // is entitled to it. `get_group_id_for_mail_address` is not just a
@@ -664,7 +698,7 @@ impl TutaSession {
 
         let owner_enc_session_key = group_key
             .object
-            .encrypt_key(&session_key, InitializationVector::generate(&randomizer));
+            .encrypt_key(&session_key, InitializationVector::generate(randomizer));
         let owner_key_version = group_key.version as i64;
 
         // Upload every attachment first — the resulting `DraftAttachment`
@@ -678,7 +712,7 @@ impl TutaSession {
                 &mail_group_id,
                 &group_key.object,
                 group_key.version,
-                &randomizer,
+                randomizer,
             )
             .await?;
 
@@ -733,10 +767,9 @@ impl TutaSession {
             .await?;
 
         log::info!("Draft created: {:?}", draft_return.draft);
-
         Ok(CreatedDraft {
             id: draft_return.draft,
-            session_key: session_key.as_bytes().to_vec(),
+            session_key,
             attachment_keys,
         })
     }
@@ -778,7 +811,7 @@ impl TutaSession {
     /// Remember which Message-ID the server assigned to a mail we just
     /// sent, keyed by the id the submitter used. Same soft-eviction shape
     /// as the self-send cache.
-    async fn remember_sent_message_id(&self, submitted_id: &str, tuta_id: &str) {
+    async fn remember_sent_message_id(&self, submitted_id: &str, tuta_id: &str, element_id: &str) {
         let mut cache = self.sent_id_cache.lock().await;
         if cache.len() >= SENT_ID_CACHE_MAX_ENTRIES && !cache.contains_key(submitted_id) {
             if let Some(oldest_key) = cache
@@ -794,6 +827,7 @@ impl TutaSession {
             SentIdEntry {
                 stored_at: std::time::Instant::now(),
                 tuta_message_id: tuta_id.to_string(),
+                element_id: element_id.to_string(),
             },
         );
     }
@@ -1100,6 +1134,21 @@ impl MailBackend for TutaSession {
             .map_err(|e| format!("{e}"))
     }
 
+    async fn delete_mails(
+        &self,
+        mail_ids: Vec<IdTupleGenerated>,
+        folder: &FolderInfo,
+    ) -> Result<(), String> {
+        let folder = IdTupleGenerated::new(
+            tutasdk::GeneratedId(folder.list_id.clone()),
+            tutasdk::GeneratedId(folder.id.clone()),
+        );
+        MailExtensions::new(self.logged_in.clone())
+            .delete_mails(mail_ids, folder)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
     async fn move_mails(
         &self,
         mail_ids: Vec<IdTupleGenerated>,
@@ -1120,10 +1169,19 @@ impl MailBackend for TutaSession {
     }
 
     async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
-        self.create_draft_impl(msg)
+        let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+        self.create_draft_impl(msg, &randomizer)
             .await
             .map(|draft| draft.id)
             .map_err(|e| format!("{e}"))
+    }
+
+    async fn sent_mail_element_id(&self, submitted_message_id: &str) -> Option<String> {
+        let cache = self.sent_id_cache.lock().await;
+        cache
+            .get(submitted_message_id)
+            .filter(|e| e.stored_at.elapsed() <= SENT_ID_CACHE_TTL)
+            .map(|e| e.element_id.clone())
     }
 }
 
@@ -1165,14 +1223,108 @@ pub async fn login(
     cfg: &Config,
     password: &str,
 ) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
-    login_with_2fa(cfg, Some(password), None).await
+    let store = crate::session_store::SessionStore::new(cfg);
+    login_with_2fa(cfg, &store, Some(password), None).await
 }
 
 pub async fn login_with_2fa(
     cfg: &Config,
+    store: &crate::session_store::SessionStore,
     password: Option<&str>,
     totp_callback: Option<TwoFactorCallback>,
 ) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
+    login_with_persistence(
+        cfg,
+        store,
+        password,
+        totp_callback,
+        PersistencePolicy::AllowVolatile,
+    )
+    .await
+}
+
+/// Initialization must fail when fresh credentials cannot be saved. Desktop
+/// logins may keep working in memory, with a visible persistence warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistencePolicy {
+    AllowVolatile,
+    Required,
+    /// Container resume/init keeps rejected bytes until a successful new login.
+    PreserveExistingRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResumeError {
+    #[error("Saved session rejected; explicit initialization is required")]
+    SessionInvalid,
+    #[error("Tuta rejects this version; update the image")]
+    ClientRejected,
+    #[error("Tuta temporarily unavailable; saved session retained")]
+    Transient,
+}
+
+fn accept_session_save(
+    policy: PersistencePolicy,
+    result: Result<(), crate::session_store::SessionStoreError>,
+) -> Result<(), crate::session_store::SessionStoreError> {
+    match (policy, result) {
+        (PersistencePolicy::Required | PersistencePolicy::PreserveExistingRequired, result) => {
+            result
+        }
+        (_, Err(error)) => {
+            log::warn!("Session is available only in memory: {error}");
+            Ok(())
+        }
+        (_, Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod persistence_policy_tests {
+    use super::*;
+
+    #[test]
+    fn initialization_reports_a_save_failure_but_desktop_can_keep_the_session() {
+        let failure = || crate::session_store::SessionStoreError::Write {
+            backend: "pass",
+            message: "encryption failed".into(),
+        };
+        assert!(accept_session_save(PersistencePolicy::Required, Err(failure())).is_err());
+        assert!(
+            accept_session_save(PersistencePolicy::PreserveExistingRequired, Err(failure()))
+                .is_err()
+        );
+        assert!(accept_session_save(PersistencePolicy::AllowVolatile, Err(failure())).is_ok());
+        for policy in [
+            PersistencePolicy::Required,
+            PersistencePolicy::AllowVolatile,
+        ] {
+            assert!(accept_session_save(policy, Ok(())).is_ok());
+        }
+    }
+}
+
+/// Required persistence also rejects a cached session whose earlier save
+/// failed, so reusing an interactive store cannot bypass initialization checks.
+pub async fn login_with_persistence(
+    cfg: &Config,
+    store: &crate::session_store::SessionStore,
+    password: Option<&str>,
+    totp_callback: Option<TwoFactorCallback>,
+    persistence: PersistencePolicy,
+) -> Result<TutaSession, Box<dyn std::error::Error + Send + Sync>> {
+    if !store.matches_config(cfg) {
+        return Err("Session store does not match the configured account and backend".into());
+    }
+    // Only an explicit password login may continue without persistence when
+    // the OS keychain cannot be accessed. Automatic resume remains strict.
+    let credentials = if persistence != PersistencePolicy::AllowVolatile {
+        store.load_persisted(password.is_some()).await?
+    } else if password.is_some() {
+        store.load_interactive().await?
+    } else {
+        store.load().await?
+    };
     let raw_client: Arc<dyn RestClient> =
         Arc::new(tutasdk::net::native_rest_client::NativeRestClient::try_new()?);
     // Route every SDK request through the rate governor (bounded concurrency +
@@ -1183,8 +1335,12 @@ pub async fn login_with_2fa(
     let file_client: Arc<dyn FileClient> = Arc::new(DiskFileClient::new());
     let sdk = Sdk::new_without_suspension(cfg.api_url.clone(), rest_client, file_client);
 
-    if let Some(credentials) = load_credentials(&cfg.email) {
-        log::info!("Resuming saved session...");
+    if let Some(credentials) = credentials {
+        if persistence == PersistencePolicy::PreserveExistingRequired {
+            log::debug!("Resuming saved session...");
+        } else {
+            log::info!("Resuming saved session...");
+        }
         let access_token = credentials.access_token.clone();
         match sdk.login(credentials).await {
             Ok(logged_in) => {
@@ -1197,11 +1353,24 @@ pub async fn login_with_2fa(
                 });
             }
             Err(e) => match classify_resume_failure(&e) {
+                ResumeFailure::SessionInvalid
+                    if persistence == PersistencePolicy::PreserveExistingRequired =>
+                {
+                    if password.is_none() {
+                        return Err(ResumeError::SessionInvalid.into());
+                    }
+                    // Explicit reauthentication may replace it only after success.
+                }
                 ResumeFailure::SessionInvalid => {
                     log::warn!("Saved session is no longer valid, re-authenticating: {e}");
-                    delete_credentials(&cfg.email);
+                    if let Err(error) = store.delete().await {
+                        log::warn!("Could not remove the stale session: {error}");
+                    }
                 }
                 ResumeFailure::ClientRejected => {
+                    if persistence == PersistencePolicy::PreserveExistingRequired {
+                        return Err(ResumeError::ClientRejected.into());
+                    }
                     return Err(format!(
                         "Tuta rejects this version of the bridge ({e}); update the bridge. \
                          The saved session was kept."
@@ -1209,6 +1378,9 @@ pub async fn login_with_2fa(
                     .into());
                 }
                 ResumeFailure::Transient => {
+                    if persistence == PersistencePolicy::PreserveExistingRequired {
+                        return Err(ResumeError::Transient.into());
+                    }
                     return Err(format!(
                         "Could not resume the saved session ({e}); it was kept, try again later."
                     )
@@ -1282,7 +1454,12 @@ pub async fn login_with_2fa(
         Box::<dyn std::error::Error + Send + Sync>::from(format!("Login failed: {e}"))
     })?;
 
-    save_credentials(&cfg.email, &credentials);
+    let saved = if persistence == PersistencePolicy::PreserveExistingRequired {
+        store.save_preserving(&credentials).await
+    } else {
+        store.save(&credentials).await
+    };
+    accept_session_save(persistence, saved)?;
 
     Ok(TutaSession {
         logged_in,
@@ -1292,11 +1469,6 @@ pub async fn login_with_2fa(
         sent_id_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     })
 }
-
-const KEYRING_SERVICE: &str = "tutabridge";
-
-use std::sync::Mutex;
-static CREDENTIALS_CACHE: Mutex<Option<Option<tutasdk::login::Credentials>>> = Mutex::new(None);
 
 /// What a failed resume of a saved session says about that session.
 #[derive(Debug, PartialEq, Eq)]
@@ -1337,86 +1509,6 @@ fn classify_resume_failure(e: &tutasdk::login::LoginError) -> ResumeFailure {
         },
         LoginError::ApiCall { .. } => ResumeFailure::Transient,
     }
-}
-
-pub fn has_saved_session(email: &str) -> bool {
-    load_credentials(email).is_some()
-}
-
-fn save_credentials(email: &str, creds: &tutasdk::login::Credentials) {
-    let data = serde_json::json!({
-        "login": creds.login,
-        "user_id": creds.user_id.0,
-        "access_token": creds.access_token,
-        "encrypted_passphrase_key": base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &creds.encrypted_passphrase_key,
-        ),
-        "credential_type": match creds.credential_type {
-            tutasdk::login::CredentialType::Internal => "Internal",
-            tutasdk::login::CredentialType::External => "External",
-        },
-    });
-
-    match keyring::Entry::new(KEYRING_SERVICE, email) {
-        Ok(entry) => {
-            if let Err(e) = entry.set_password(&data.to_string()) {
-                log::warn!("Failed to save session to keychain: {e}");
-            } else {
-                log::info!("Session saved to keychain");
-            }
-        }
-        Err(e) => log::warn!("Failed to create keychain entry: {e}"),
-    }
-    *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(creds.clone()));
-}
-
-fn load_credentials(email: &str) -> Option<tutasdk::login::Credentials> {
-    let mut cache = CREDENTIALS_CACHE.lock().unwrap();
-    if let Some(cached) = cache.as_ref() {
-        return cached.clone();
-    }
-
-    let result = load_credentials_from_keyring(email);
-    *cache = Some(result.clone());
-    result
-}
-
-fn load_credentials_from_keyring(email: &str) -> Option<tutasdk::login::Credentials> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, email).ok()?;
-
-    let json_str = entry.get_password().ok()?;
-
-    let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-    Some(tutasdk::login::Credentials {
-        login: v["login"].as_str()?.to_string(),
-        user_id: tutasdk::GeneratedId(v["user_id"].as_str()?.to_string()),
-        access_token: v["access_token"].as_str()?.to_string(),
-        encrypted_passphrase_key: base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            v["encrypted_passphrase_key"].as_str()?,
-        )
-        .ok()?,
-        credential_type: match v["credential_type"].as_str()? {
-            "External" => tutasdk::login::CredentialType::External,
-            _ => tutasdk::login::CredentialType::Internal,
-        },
-    })
-}
-
-/// Forget a saved session the server has judged dead. The cache is set to
-/// "loaded, nothing there" rather than "not loaded": the verdict stands for
-/// this process even if the keyring refuses the deletion, so a rejected token
-/// is never read back and retried. A leftover entry is overwritten by the
-/// next successful login.
-fn delete_credentials(email: &str) {
-    match keyring::Entry::new(KEYRING_SERVICE, email).and_then(|e| e.delete_credential()) {
-        Ok(()) | Err(keyring::Error::NoEntry) => {}
-        Err(e) => log::warn!(
-            "Could not remove the stale session from the keyring ({e}); it will be replaced on the next login"
-        ),
-    }
-    *CREDENTIALS_CACHE.lock().unwrap() = Some(None);
 }
 
 /// Map SMTP recipients to `DraftRecipient`, falling back to the address when
@@ -1638,53 +1730,6 @@ mod resume_failure_tests {
         ] {
             assert_eq!(classify_resume_failure(&e), ResumeFailure::Transient, "{e}");
         }
-    }
-}
-
-#[cfg(test)]
-mod forget_session_tests {
-    use super::{delete_credentials, has_saved_session, CREDENTIALS_CACHE};
-
-    fn fake_credentials(email: &str) -> tutasdk::login::Credentials {
-        tutasdk::login::Credentials {
-            login: email.to_string(),
-            user_id: tutasdk::GeneratedId("fakeuser0".to_string()),
-            access_token: "fake-token".to_string(),
-            encrypted_passphrase_key: vec![0; 32],
-            credential_type: tutasdk::login::CredentialType::Internal,
-        }
-    }
-
-    #[test]
-    fn a_forgotten_session_stays_forgotten_whatever_the_keyring_says() {
-        // The CLI decides whether a password prompt makes sense from
-        // `has_saved_session`. After the server judged the token dead, that
-        // must answer "no" from the in-process cache alone: if the keyring
-        // refused the deletion, re-reading it would resurrect the rejected
-        // token and the CLI would exit instead of asking for a password.
-        // The mock store keeps this off the real keyring; its entries start
-        // empty, so the deletion below reports NoEntry.
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-        crate::net::log_capture::install();
-        let email = "nobody@example.invalid";
-        *CREDENTIALS_CACHE.lock().unwrap() = Some(Some(fake_credentials(email)));
-        assert!(
-            has_saved_session(email),
-            "precondition: the session is loaded"
-        );
-
-        delete_credentials(email);
-
-        assert!(
-            matches!(*CREDENTIALS_CACHE.lock().unwrap(), Some(None)),
-            "the cache must say 'nothing there', not 'not loaded yet'"
-        );
-        assert!(!has_saved_session(email));
-        assert!(
-            crate::net::log_capture::lines_containing("Could not remove the stale session")
-                .is_empty(),
-            "a missing entry is not worth a warning"
-        );
     }
 }
 

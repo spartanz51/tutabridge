@@ -28,6 +28,11 @@ axum = "0.7"
 crypto-primitives = { path = "../../sdk/generated/tuta-sdk/rust/crypto-primitives" }
 
 rand = "0.8"
+# Clears secrets the bridge owns (session JSON, passwords, key material) on drop.
+zeroize = { version = "1", features = ["serde"] }
+# Constant-time comparison of the bridge password presented by mail and MCP
+# clients, so a wrong guess is rejected in the same time as a near miss.
+subtle = "2"
 
 thiserror = "2.0"
 base64 = "0.22"
@@ -52,6 +57,8 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# `prctl(PR_SET_DUMPABLE)`: see `util::harden_process`.
+libc = "0.2"
 
 [dev-dependencies]
 tutabridge-tuta = { path = "../tuta", features = ["testing"] }
