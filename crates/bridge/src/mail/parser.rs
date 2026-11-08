@@ -539,11 +539,18 @@ fn extract_param(header: &str, key: &str) -> Option<String> {
 
     let value = if let Some(value) = extended {
         let (charset, text) = split_charset(&value);
-        Some(decode_charset(&percent_decode(text), charset))
+        decode_charset(&percent_decode(text), charset)
     } else if !sections.is_empty() {
         // Only the first section carries the charset; `*` marks the
         // percent-encoded ones.
         sections.sort_by_key(|s| s.0);
+        if sections
+            .iter()
+            .enumerate()
+            .any(|(i, (index, _, _))| *index as usize != i)
+        {
+            return plain.filter(|v| !v.is_empty());
+        }
         let mut charset = "us-ascii";
         let mut bytes = Vec::new();
         for (i, (_, encoded, value)) in sections.iter().enumerate() {
@@ -560,11 +567,13 @@ fn extract_param(header: &str, key: &str) -> Option<String> {
             };
             bytes.extend(percent_decode(text));
         }
-        Some(decode_charset(&bytes, charset))
+        decode_charset(&bytes, charset)
     } else {
-        plain
+        None
     };
-    value.filter(|v| !v.is_empty())
+    value
+        .filter(|v| !v.is_empty())
+        .or(plain.filter(|v| !v.is_empty()))
 }
 
 /// Split a header value at the `;` outside quotes.
@@ -616,11 +625,13 @@ fn percent_decode(text: &str) -> Vec<u8> {
     out
 }
 
-fn decode_charset(bytes: &[u8], charset: &str) -> String {
-    if charset.eq_ignore_ascii_case("iso-8859-1") || charset.eq_ignore_ascii_case("latin1") {
-        bytes.iter().map(|&b| b as char).collect()
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
+fn decode_charset(bytes: &[u8], charset: &str) -> Option<String> {
+    match charset.to_ascii_lowercase().as_str() {
+        "iso-8859-1" | "latin1" => Some(bytes.iter().map(|&b| b as char).collect()),
+        "" | "us-ascii" | "ascii" | "utf-8" | "utf8" => {
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
+        _ => None,
     }
 }
 
@@ -1073,6 +1084,49 @@ mod tests {
         );
         let ct = "text/plain; name*=iso-8859-1'fr'%E9t%E9.txt";
         assert_eq!(extract_param(ct, "name").as_deref(), Some("été.txt"));
+    }
+
+    #[test]
+    fn test_extract_param_keeps_fallback_for_invalid_sections() {
+        for sections in [
+            "filename*1*=utf-8''part.pdf",
+            "filename*0*=utf-8''report; filename*2*=.pdf",
+            "filename*0*=utf-8''report; filename*0*=.pdf",
+        ] {
+            let header = format!("attachment; filename=backup.pdf; {sections}");
+            assert_eq!(
+                extract_param(&header, "filename").as_deref(),
+                Some("backup.pdf")
+            );
+            assert_eq!(
+                extract_param(&format!("attachment; {sections}"), "filename"),
+                None
+            );
+        }
+        // Parameter order is irrelevant when the section numbers are valid.
+        let header = "attachment; filename*1*=.pdf; filename*0*=utf-8''report";
+        assert_eq!(
+            extract_param(header, "filename").as_deref(),
+            Some("report.pdf")
+        );
+    }
+
+    #[test]
+    fn test_extract_param_keeps_fallback_for_unsupported_charset() {
+        for parameter in [
+            "filename*=windows-1252''prix%80.pdf",
+            "filename*0*=windows-1252''prix; filename*1*=%80.pdf",
+        ] {
+            let header = format!("attachment; filename=price.pdf; {parameter}");
+            assert_eq!(
+                extract_param(&header, "filename").as_deref(),
+                Some("price.pdf")
+            );
+            assert_eq!(
+                extract_param(&format!("attachment; {parameter}"), "filename"),
+                None
+            );
+        }
     }
 
     #[test]
