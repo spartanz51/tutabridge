@@ -1,0 +1,34 @@
+name: Bug
+description: Something does not work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TutaBridge version and install (desktop, CLI, Docker, AUR)
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS and mail client
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Remove addresses, subjects and anything personal first.
+      render: text
