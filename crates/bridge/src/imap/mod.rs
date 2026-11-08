@@ -31,7 +31,18 @@ pub async fn serve(
     password_hash: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = crate::net::bind("IMAP", address).await?;
-    serve_listener(listener, store, backend, local_store, tls, password_hash).await
+    // No live view outside the GUI: the events go nowhere.
+    let activity = crate::activity::Activity::new(tokio::sync::broadcast::channel(1).0);
+    serve_listener(
+        listener,
+        store,
+        backend,
+        local_store,
+        tls,
+        password_hash,
+        activity,
+    )
+    .await
 }
 
 /// Serve IMAP on a listener the caller has already bound, so a caller that
@@ -43,6 +54,7 @@ pub async fn serve_listener(
     local_store: Arc<LocalStore>,
     tls: TlsAcceptor,
     password_hash: Option<String>,
+    activity: crate::activity::Activity,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("IMAP server listening on {} (TLS)", listener.local_addr()?);
 
@@ -56,6 +68,7 @@ pub async fn serve_listener(
             let local_store = local_store.clone();
             let tls = tls.clone();
             let pw_hash = password_hash.clone();
+            let activity = activity.clone();
             async move {
                 let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
                 match tokio::time::timeout(crate::net::HANDSHAKE_TIMEOUT, tls.accept(stream)).await
@@ -72,6 +85,7 @@ pub async fn serve_listener(
                             backend,
                             local_store,
                             pw_hash,
+                            (activity, addr),
                         )
                         .await
                         {
@@ -162,12 +176,14 @@ async fn handle_connection(
     backend: Arc<dyn MailBackend>,
     local_store: Arc<LocalStore>,
     password_hash: Option<String>,
+    (activity, peer): (crate::activity::Activity, std::net::SocketAddr),
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut store_watch: watch::Receiver<u64> = store.subscribe();
     let mut session = ImapSession::new(store, backend, password_hash, Some(local_store))
-        .with_session_id(session_id);
+        .with_session_id(session_id)
+        .with_activity(activity, peer);
 
     writer
         .write_all(b"* OK TutaBridge IMAP4rev1 ready\r\n")
