@@ -453,7 +453,10 @@ impl ImapSession {
                     format!("* {} EXISTS\r\n", count),
                     "* 0 RECENT\r\n".to_string(),
                     "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n".to_string(),
-                    "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Limited\r\n".to_string(),
+                    // \Deleted lasts until EXPUNGE in this session only, but
+                    // clients drop flags missing here, so EXPUNGE would find
+                    // nothing marked.
+                    "* OK [PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)] Limited\r\n".to_string(),
                     "* OK [UIDVALIDITY 1] UIDs valid\r\n".to_string(),
                     format!("* OK [UIDNEXT {}] Predicted next UID\r\n", self.uid_next),
                 ];
@@ -2903,6 +2906,9 @@ pub(crate) mod tests {
         let resp = session.handle_command("A003 SELECT INBOX").await;
         assert!(resp.iter().any(|r| r.contains("* 2 EXISTS")));
         assert!(resp.iter().any(|r| r.contains("UIDNEXT")));
+        assert!(resp
+            .iter()
+            .any(|r| r.contains("[PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)]")));
         assert!(resp.last().unwrap().contains("OK"));
 
         // FETCH FLAGS
