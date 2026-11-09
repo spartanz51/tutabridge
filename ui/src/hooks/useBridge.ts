@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Config, BridgeStatus, BridgeStats, UpdateInfo } from "../types";
+import type { ActivityEvent, Config, BridgeStatus, BridgeStats, UpdateInfo } from "../types";
+import { pushFeed, type FeedItem } from "../activity";
 
 const MAX_LOG_LINES = 500;
 
@@ -32,9 +33,25 @@ export function useBridge() {
   const [status, setStatus] = useState<BridgeStatus | null>(null);
   const [stats, setStats] = useState<BridgeStats>({
     uptime_secs: null,
+    started_at_ms: null,
     mails_synced: 0,
     ws_status: "Stopped",
+    clients: [],
   });
+  // Live activity: the feed survives tab switches; the Live view subscribes
+  // to each event for its animation.
+  const [feed, setFeed] = useState<FeedItem[]>([]);
+  const activityListeners = useRef(new Set<(event: ActivityEvent) => void>());
+  const subscribeActivity = useCallback((listener: (event: ActivityEvent) => void) => {
+    activityListeners.current.add(listener);
+    return () => {
+      activityListeners.current.delete(listener);
+    };
+  }, []);
+  const clientsRef = useRef(stats.clients);
+  useEffect(() => {
+    clientsRef.current = stats.clients;
+  }, [stats.clients]);
   // null means unchecked or unreadable, not a confirmed missing session.
   const [hasSavedSession, setHasSavedSession] = useState<boolean | null>(null);
   const [sessionReadError, setSessionReadError] = useState<string | null>(null);
@@ -130,6 +147,20 @@ export function useBridge() {
       unlistenAvailable.then((fn) => fn());
     };
   }, [refresh, readSavedSession, acceptStatus]);
+
+  useEffect(() => {
+    let seq = 0;
+    const listeners = activityListeners.current;
+    const unlisten = listen<ActivityEvent>("bridge://activity", (e) => {
+      seq += 1;
+      const id = seq;
+      setFeed((prev) => pushFeed(prev, e.payload, clientsRef.current, Date.now(), id));
+      listeners.forEach((listener) => listener(e.payload));
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const unlisten = listen<string>("bridge://log", (event) => {
@@ -235,7 +266,6 @@ export function useBridge() {
     }
   }, [refresh, readSavedSession]);
 
-  const clearLogs = useCallback(() => setLogs([]), []);
 
   const checkUpdate = useCallback(() => invoke<UpdateInfo | null>("check_update"), []);
 
@@ -293,6 +323,8 @@ export function useBridge() {
     sessionWarning,
     bridgePassword,
     logs,
+    feed,
+    subscribeActivity,
     loading,
     needsTotp,
     saveConfig,
@@ -300,7 +332,6 @@ export function useBridge() {
     submitTotp,
     stopBridge,
     restartBridge,
-    clearLogs,
     regenerateBridgePassword,
     backupBusy,
     backupProgress,

@@ -11,12 +11,13 @@ use tokio::sync::Mutex;
 use tutabridge_core::bridge::BridgeHandle;
 
 fn main() {
-    // Keep the bridge's own logs at debug but silence the HTTP/2 + TLS transport
-    // firehose (h2/hyper/rustls/mio), which otherwise buries every useful line.
-    // RUST_LOG still overrides this when set.
-    const LOG_FILTER: &str = "info,tutabridge_core=debug,tutabridge_gui=debug,\
-        h2=warn,hyper=warn,hyper_util=warn,rustls=warn,mio=warn,tokio_util=warn,want=warn";
+    // Info by default, with the HTTP/2 + TLS transport firehose
+    // (h2/hyper/rustls/mio) silenced. Debug logs are opt-in through RUST_LOG:
+    // they show protocol commands, more than an always-on log should keep.
+    const LOG_FILTER: &str =
+        "info,h2=warn,hyper=warn,hyper_util=warn,rustls=warn,mio=warn,tokio_util=warn,want=warn";
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER)).init();
+    tutabridge_core::util::harden_process();
 
     tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default()
@@ -25,6 +26,7 @@ fn main() {
     let handle = BridgeHandle::new();
     let log_rx = handle.subscribe_logs();
     let stats_rx = handle.subscribe_stats();
+    let activity_rx = handle.subscribe_activity();
     let shared = Arc::new(Mutex::new(handle));
 
     tauri::Builder::default()
@@ -67,6 +69,11 @@ fn main() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 stream_logs(app_handle, log_rx).await;
+            });
+
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                stream_activity(app_handle, activity_rx).await;
             });
 
             tauri::async_runtime::spawn(update::run(app.handle().clone()));
@@ -175,6 +182,24 @@ async fn stream_logs(app: tauri::AppHandle, mut rx: tokio::sync::broadcast::Rece
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 let _ = app.emit("bridge://log", &format!("... skipped {n} log lines"));
             }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Forwards live activity (mail synced, received, sent...) to the UI. Missed
+/// events are simply skipped: the view is a live feed, not a record.
+async fn stream_activity(
+    app: tauri::AppHandle,
+    mut rx: tokio::sync::broadcast::Receiver<tutabridge_core::activity::ActivityEvent>,
+) {
+    use tauri::Emitter;
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let _ = app.emit("bridge://activity", &event);
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }

@@ -10,7 +10,7 @@ session encrypted on its data volume.
 | Docker Hub | `docker.io/spartanz51/tutabridge` |
 
 Both registries hold the same images for `linux/amd64` and `linux/arm64`.
-Each release is tagged with its version (for example `0.1.0-rc.17`), and
+Each release is tagged with its version (for example `0.2.0-rc.1`), and
 `latest` follows the newest release. Pin a version tag if you want to choose
 when to upgrade.
 

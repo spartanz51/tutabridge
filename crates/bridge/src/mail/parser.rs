@@ -122,6 +122,15 @@ pub(crate) struct AddressHeaders {
     pub reply_to: Vec<(String, String)>,
 }
 
+/// A message's Message-ID, without angle brackets, read from the header
+/// section only: same normalization as [`parse_rfc2822`], without decoding the
+/// body or attachments.
+pub(crate) fn parse_message_id(raw: &str) -> Option<String> {
+    get_header(&parse_headers(header_section(raw)), "message-id")
+        .as_deref()
+        .and_then(first_msg_id)
+}
+
 /// The address-list headers of a rendered message. Reads the header section
 /// only, so it is cheap on a message with a large body.
 pub(crate) fn parse_address_headers(raw: &str) -> AddressHeaders {
@@ -497,25 +506,132 @@ fn extract_multipart_body_and_attachments(
     }
 }
 
-/// Pull a `key=value` parameter out of a header value such as a Content-Type
-/// (`text/plain; charset="UTF-8"; name="doc.pdf"`). Handles both quoted and
-/// unquoted forms; returns `None` if the parameter is absent.
+/// Pull a parameter out of a header value such as a Content-Type
+/// (`text/plain; charset="UTF-8"; name="doc.pdf"`), quoted or not. The
+/// RFC 2231 form (`name*=utf-8''r%C3%A9.pdf`, or split as `name*0*=`,
+/// `name*1*=`) wins over the plain one: Thunderbird sends non-ASCII names
+/// that way. Returns `None` if the parameter is absent.
 fn extract_param(header: &str, key: &str) -> Option<String> {
-    let lower = header.to_lowercase();
-    let needle = format!("{}=", key.to_lowercase());
-    let pos = lower.find(&needle)?;
-    let rest = &header[pos + needle.len()..];
-    let value = if rest.starts_with('"') {
-        rest[1..].split('"').next().unwrap_or("")
+    let key = key.to_lowercase();
+    let star = format!("{key}*");
+    let (mut plain, mut extended) = (None, None);
+    let mut sections: Vec<(u32, bool, String)> = Vec::new();
+    for item in split_params(header) {
+        let Some((name, value)) = item.split_once('=') else {
+            continue;
+        };
+        let name = name.trim().to_lowercase();
+        let value = unquote(value.trim());
+        if name == key {
+            plain = Some(value);
+        } else if name == star {
+            extended = Some(value);
+        } else if let Some(rest) = name.strip_prefix(&star) {
+            let (index, encoded) = match rest.strip_suffix('*') {
+                Some(index) => (index, true),
+                None => (rest, false),
+            };
+            if let Ok(index) = index.parse() {
+                sections.push((index, encoded, value));
+            }
+        }
+    }
+
+    let value = if let Some(value) = extended {
+        let (charset, text) = split_charset(&value);
+        decode_charset(&percent_decode(text), charset)
+    } else if !sections.is_empty() {
+        // Only the first section carries the charset; `*` marks the
+        // percent-encoded ones.
+        sections.sort_by_key(|s| s.0);
+        if sections
+            .iter()
+            .enumerate()
+            .any(|(i, (index, _, _))| *index as usize != i)
+        {
+            return plain.filter(|v| !v.is_empty());
+        }
+        let mut charset = "us-ascii";
+        let mut bytes = Vec::new();
+        for (i, (_, encoded, value)) in sections.iter().enumerate() {
+            if !*encoded {
+                bytes.extend_from_slice(value.as_bytes());
+                continue;
+            }
+            let text = if i == 0 {
+                let (c, text) = split_charset(value);
+                charset = c;
+                text
+            } else {
+                value
+            };
+            bytes.extend(percent_decode(text));
+        }
+        decode_charset(&bytes, charset)
     } else {
-        rest.split(|c: char| c == ';' || c.is_whitespace())
-            .next()
-            .unwrap_or("")
-    };
-    if value.is_empty() {
         None
-    } else {
-        Some(value.to_owned())
+    };
+    value
+        .filter(|v| !v.is_empty())
+        .or(plain.filter(|v| !v.is_empty()))
+}
+
+/// Split a header value at the `;` outside quotes.
+fn split_params(header: &str) -> Vec<String> {
+    let (mut items, mut current) = (Vec::new(), String::new());
+    let (mut in_quotes, mut escaped) = (false, false);
+    for ch in header.chars() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            ';' if !in_quotes => {
+                items.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    items.push(current);
+    items
+}
+
+/// `utf-8'en'text` → (`utf-8`, `text`); no charset means ASCII.
+fn split_charset(value: &str) -> (&str, &str) {
+    let mut parts = value.splitn(3, '\'');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(charset), Some(_lang), Some(text)) => (charset, text),
+        _ => ("us-ascii", value),
+    }
+}
+
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn decode_charset(bytes: &[u8], charset: &str) -> Option<String> {
+    match charset.to_ascii_lowercase().as_str() {
+        "iso-8859-1" | "latin1" => Some(bytes.iter().map(|&b| b as char).collect()),
+        "" | "us-ascii" | "ascii" | "utf-8" | "utf8" => {
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
+        _ => None,
     }
 }
 
@@ -936,6 +1052,94 @@ mod tests {
         assert_eq!(msg.attachments[0].data, b"PNGHEADER");
     }
 
+    /// #101: Thunderbird sends a non-ASCII name in the RFC 2231 form.
+    #[test]
+    fn test_attachment_name_in_rfc2231_form_is_kept() {
+        let raw = "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nContent-Type: multipart/mixed; boundary=\"zz\"\r\n\r\n--zz\r\nContent-Type: text/plain\r\n\r\nbody\r\n--zz\r\nContent-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment;\r\n filename*=utf-8''rapport%20%C3%A9t%C3%A9.pdf\r\n\r\nUERG\r\n--zz--";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "rapport été.pdf");
+        assert_eq!(msg.attachments[0].data, b"PDF");
+    }
+
+    #[test]
+    fn test_extract_param_reads_rfc2231_forms() {
+        let cd = "attachment; filename*=utf-8''rapport%20%C3%A9t%C3%A9.pdf";
+        assert_eq!(
+            extract_param(cd, "filename").as_deref(),
+            Some("rapport été.pdf")
+        );
+        // Split over sections, the first one carrying the charset.
+        let cd =
+            "attachment; filename*0*=utf-8''rapport%20; filename*1*=%C3%A9t%C3%A9; filename*2=.pdf";
+        assert_eq!(
+            extract_param(cd, "filename").as_deref(),
+            Some("rapport été.pdf")
+        );
+        // The RFC 2231 form wins over the plain fallback.
+        let cd = "attachment; filename=\"rapport ete.pdf\"; filename*=utf-8''rapport%20%C3%A9t%C3%A9.pdf";
+        assert_eq!(
+            extract_param(cd, "filename").as_deref(),
+            Some("rapport été.pdf")
+        );
+        let ct = "text/plain; name*=iso-8859-1'fr'%E9t%E9.txt";
+        assert_eq!(extract_param(ct, "name").as_deref(), Some("été.txt"));
+    }
+
+    #[test]
+    fn test_extract_param_keeps_fallback_for_invalid_sections() {
+        for sections in [
+            "filename*1*=utf-8''part.pdf",
+            "filename*0*=utf-8''report; filename*2*=.pdf",
+            "filename*0*=utf-8''report; filename*0*=.pdf",
+        ] {
+            let header = format!("attachment; filename=backup.pdf; {sections}");
+            assert_eq!(
+                extract_param(&header, "filename").as_deref(),
+                Some("backup.pdf")
+            );
+            assert_eq!(
+                extract_param(&format!("attachment; {sections}"), "filename"),
+                None
+            );
+        }
+        // Parameter order is irrelevant when the section numbers are valid.
+        let header = "attachment; filename*1*=.pdf; filename*0*=utf-8''report";
+        assert_eq!(
+            extract_param(header, "filename").as_deref(),
+            Some("report.pdf")
+        );
+    }
+
+    #[test]
+    fn test_extract_param_keeps_fallback_for_unsupported_charset() {
+        for parameter in [
+            "filename*=windows-1252''prix%80.pdf",
+            "filename*0*=windows-1252''prix; filename*1*=%80.pdf",
+        ] {
+            let header = format!("attachment; filename=price.pdf; {parameter}");
+            assert_eq!(
+                extract_param(&header, "filename").as_deref(),
+                Some("price.pdf")
+            );
+            assert_eq!(
+                extract_param(&format!("attachment; {parameter}"), "filename"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_param_matches_whole_names_only() {
+        let cd = "attachment; filename=\"a;b.pdf\"";
+        assert_eq!(extract_param(cd, "filename").as_deref(), Some("a;b.pdf"));
+        assert_eq!(extract_param(cd, "name"), None);
+        assert_eq!(
+            extract_param("image/png; name=avatar.png", "name").as_deref(),
+            Some("avatar.png")
+        );
+    }
+
     #[test]
     fn test_multipart_alternative_ignores_alternative_parts_as_attachments() {
         let raw = "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nContent-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n--alt\r\nContent-Type: text/plain\r\n\r\nplain body\r\n--alt\r\nContent-Type: text/html\r\n\r\n<p>HTML body</p>\r\n--alt--";
@@ -1035,6 +1239,14 @@ mod tests {
         let input = "caf=C3=A9";
         let result = decode_quoted_printable(input);
         assert_eq!(result, "caf\u{e9}");
+    }
+
+    #[test]
+    fn message_id_matches_the_full_parse_and_ignores_the_body() {
+        let raw = "Message-ID: <abc@client>\r\nSubject: Hi\r\n\r\nMessage-ID: <body@x>\r\n";
+        assert_eq!(parse_message_id(raw).as_deref(), Some("abc@client"));
+        assert_eq!(parse_message_id(raw), parse_rfc2822(raw).message_id);
+        assert_eq!(parse_message_id("Subject: none\r\n\r\nbody"), None);
     }
 
     #[test]

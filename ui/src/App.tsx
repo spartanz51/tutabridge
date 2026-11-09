@@ -39,42 +39,41 @@ function App() {
       : status && isError(status)
         ? "var(--red)"
         : "var(--gray)";
+  const [stopping, setStopping] = useState(false);
+  const stop = async () => {
+    setStopping(true);
+    try {
+      await bridge.stopBridge();
+    } finally {
+      setStopping(false);
+    }
+  };
 
   return (
     <div className="app">
       <header className="app-header">
         <div className="header-left">
-          <img src={logo} alt="" className="app-logo" width={24} height={24} />
-          <h1>TutaBridge</h1>
-          {bridge.appVersion && <span className="app-version">{bridge.appVersion}</span>}
-          <div
-            className="header-status"
-            title={status && isError(status) ? status.Error : undefined}
-          >
-            <span className="status-dot" style={{ background: statusColor }} />
-            <span className="header-status-text">
-              {status ? statusLabel(status) : "Loading..."}
-            </span>
-          </div>
+          <img src={logo} alt="" className="app-logo" width={26} height={26} />
+          <h1 title={bridge.appVersion || undefined}>TutaBridge</h1>
         </div>
-        <nav className="tabs">
+        <nav className="tabs" aria-label="Sections">
           <button
             className={tab === "dashboard" ? "active" : ""}
             onClick={() => setTab("dashboard")}
           >
-            Dashboard
+            Live
           </button>
           <button
             className={tab === "connection" ? "active" : ""}
             onClick={() => setTab("connection")}
           >
-            Connection
+            Connect
           </button>
           <button
             className={tab === "config" ? "active" : ""}
             onClick={() => setTab("config")}
           >
-            Config
+            Settings
           </button>
           <button
             className={tab === "backup" ? "active" : ""}
@@ -83,6 +82,25 @@ function App() {
             Backup
           </button>
         </nav>
+        <div className="header-right">
+          <div
+            className="header-status"
+            title={status && isError(status) ? status.Error : undefined}
+          >
+            <span
+              className={isRunning ? "status-dot live" : "status-dot"}
+              style={{ background: statusColor }}
+            />
+            <span className="header-status-text">
+              {status ? statusLabel(status) : "Loading..."}
+            </span>
+          </div>
+          {(isRunning || isStarting) && (
+            <button className="ghost small" onClick={stop} disabled={stopping}>
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          )}
+        </div>
       </header>
       {bridge.updateReady && !updateDismissed && (
         <div className="update-banner">
@@ -121,11 +139,11 @@ function App() {
             sessionWarning={bridge.sessionWarning}
             loading={bridge.loading}
             logs={bridge.logs}
+            feed={bridge.feed}
+            subscribeActivity={bridge.subscribeActivity}
             needsTotp={bridge.needsTotp}
             onStart={bridge.startBridge}
             onSubmitTotp={bridge.submitTotp}
-            onStop={bridge.stopBridge}
-            onClearLogs={bridge.clearLogs}
           />
         )}
         {tab === "connection" && (

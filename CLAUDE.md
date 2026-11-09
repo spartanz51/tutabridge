@@ -1,5 +1,7 @@
 # TutaBridge
 
+@AGENTS.md
+
 ## Architecture
 
 TutaBridge is an IMAP/SMTP bridge for Tuta encrypted email. It exposes a local IMAP+SMTP server that mail clients (Thunderbird, etc.) connect to.

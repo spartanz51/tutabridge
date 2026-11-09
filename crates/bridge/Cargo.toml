@@ -28,6 +28,11 @@ axum = "0.7"
 crypto-primitives = { path = "../../sdk/generated/tuta-sdk/rust/crypto-primitives" }
 
 rand = "0.8"
+# Clears secrets the bridge owns (session JSON, passwords, key material) on drop.
+zeroize = { version = "1", features = ["serde"] }
+# Constant-time comparison of the bridge password presented by mail and MCP
+# clients, so a wrong guess is rejected in the same time as a near miss.
+subtle = "2"
 
 thiserror = "2.0"
 base64 = "0.22"
@@ -39,6 +44,9 @@ rand_core = "0.6"
 # package self-contained.
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 hex = "0.4"
+# WHATWG HTML tokenizer for the text/plain body: no unsafe code, and no
+# dependencies without its default `jetscii` feature (SIMD, unsafe).
+html5gum = { version = "0.8.4", default-features = false }
 
 # OS keychain backend — one per platform so the CLI builds (and packages,
 # e.g. on the AUR) on Linux/Windows, not just macOS. Linux uses the
@@ -52,6 +60,8 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# `prctl(PR_SET_DUMPABLE)`: see `util::harden_process`.
+libc = "0.2"
 
 [dev-dependencies]
 tutabridge-tuta = { path = "../tuta", features = ["testing"] }

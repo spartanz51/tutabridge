@@ -942,6 +942,8 @@ mod tests {
         let imap_port = imap_listener.local_addr().unwrap().port();
         let smtp_port = smtp_listener.local_addr().unwrap().port();
         let backend = Arc::new(NoopBackend);
+        let activity =
+            tutabridge_core::activity::Activity::new(tokio::sync::broadcast::channel(1).0);
         let imap_task = tokio::spawn(imap::serve_listener(
             imap_listener,
             MailStore::new(),
@@ -949,12 +951,14 @@ mod tests {
             local,
             acceptor.clone(),
             Some("unusable-test-hash".into()),
+            activity.clone(),
         ));
         let smtp_task = tokio::spawn(smtp::serve_listener(
             smtp_listener,
             backend,
             acceptor,
             Some("unusable-test-hash".into()),
+            activity,
         ));
         let wrong_pem = tls().1;
         assert!(probe(address, imap_port, smtp_port, &wrong_pem)

@@ -1,20 +1,21 @@
-use super::{KeyringUnavailableKind, SessionStoreError};
+use super::{KeyringUnavailableKind, SecretBytes, SessionStoreError};
+use zeroize::Zeroizing;
 
 const SERVICE: &str = "tutabridge";
 
-pub(super) fn read(email: &str) -> Result<Option<Vec<u8>>, SessionStoreError> {
+pub(super) fn read(email: &str) -> Result<Option<SecretBytes>, SessionStoreError> {
     classify_read_result(keyring::Entry::new(SERVICE, email).and_then(|entry| entry.get_password()))
 }
 
 fn classify_read_result(
     result: keyring::Result<String>,
-) -> Result<Option<Vec<u8>>, SessionStoreError> {
+) -> Result<Option<SecretBytes>, SessionStoreError> {
     match result {
-        Ok(secret) => Ok(Some(secret.into_bytes())),
+        Ok(secret) => Ok(Some(Zeroizing::new(secret.into_bytes()))),
         // The keyring read succeeded even if its bytes were not UTF-8. Pass
         // those bytes to the shared codec so all backends classify corrupt
         // sessions alike, without confusing corruption with denied access.
-        Err(keyring::Error::BadEncoding(bytes)) => Ok(Some(bytes)),
+        Err(keyring::Error::BadEncoding(bytes)) => Ok(Some(Zeroizing::new(bytes))),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => {
             let message = diagnostic(&error);
@@ -71,7 +72,8 @@ mod tests {
         assert_eq!(
             classify_read_result(Ok("session".into()))
                 .unwrap()
-                .as_deref(),
+                .as_deref()
+                .map(Vec::as_slice),
             Some(b"session".as_slice())
         );
         for error in [
@@ -89,7 +91,7 @@ mod tests {
         for bytes in [vec![0xff, 0xfe], Vec::new()] {
             let result =
                 classify_read_result(Err(keyring::Error::BadEncoding(bytes.clone()))).unwrap();
-            assert_eq!(result, Some(bytes));
+            assert_eq!(result.as_deref(), Some(&bytes));
         }
     }
 

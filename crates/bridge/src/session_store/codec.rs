@@ -2,34 +2,64 @@
 //! keyring and password-store entries.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use serde::{Deserialize, Serialize};
 use tutasdk::login::{CredentialType, Credentials};
+use zeroize::Zeroizing;
 
-pub(super) fn encode(credentials: &Credentials) -> String {
-    serde_json::json!({
-        "login": credentials.login,
-        "user_id": credentials.user_id.0,
-        "access_token": credentials.access_token,
-        "encrypted_passphrase_key": STANDARD.encode(&credentials.encrypted_passphrase_key),
-        "credential_type": match credentials.credential_type {
+/// The stored document, borrowing from the credentials. Fields stay in the
+/// alphabetical order the previous `serde_json::Value` serialization produced.
+#[derive(Serialize)]
+struct StoredRef<'a> {
+    access_token: &'a str,
+    credential_type: &'static str,
+    encrypted_passphrase_key: &'a str,
+    login: &'a str,
+    user_id: &'a str,
+}
+
+/// The stored document as read back. Secret fields are parsed straight into
+/// wiping buffers, so every exit path (a parse error included) clears them.
+#[derive(Deserialize)]
+struct Stored {
+    login: String,
+    user_id: String,
+    access_token: Zeroizing<String>,
+    encrypted_passphrase_key: Zeroizing<String>,
+    credential_type: String,
+}
+
+/// The session as stored in the keyring or pass, wiped when dropped.
+pub(super) fn encode(credentials: &Credentials) -> Zeroizing<String> {
+    let key = Zeroizing::new(STANDARD.encode(&credentials.encrypted_passphrase_key));
+    let stored = StoredRef {
+        access_token: &credentials.access_token,
+        credential_type: match credentials.credential_type {
             CredentialType::Internal => "Internal",
             CredentialType::External => "External",
         },
-    })
-    .to_string()
+        encrypted_passphrase_key: &key,
+        login: &credentials.login,
+        user_id: &credentials.user_id.0,
+    };
+    // Serializing borrowed strings into a String cannot fail.
+    Zeroizing::new(serde_json::to_string(&stored).expect("session serializes"))
 }
 
 pub(super) fn decode(json: impl AsRef<[u8]>) -> Option<Credentials> {
-    let value: serde_json::Value = serde_json::from_slice(json.as_ref()).ok()?;
+    let mut stored: Stored = serde_json::from_slice(json.as_ref()).ok()?;
+    let encrypted_passphrase_key = STANDARD
+        .decode(stored.encrypted_passphrase_key.as_bytes())
+        .ok()?;
     Some(Credentials {
-        login: value["login"].as_str()?.to_owned(),
-        user_id: tutasdk::GeneratedId(value["user_id"].as_str()?.to_owned()),
-        access_token: value["access_token"].as_str()?.to_owned(),
-        encrypted_passphrase_key: STANDARD
-            .decode(value["encrypted_passphrase_key"].as_str()?)
-            .ok()?,
+        // Moved out last, once nothing can fail: the SDK's Credentials owns
+        // the token from here.
+        access_token: std::mem::take(&mut *stored.access_token),
+        login: stored.login,
+        user_id: tutasdk::GeneratedId(stored.user_id),
+        encrypted_passphrase_key,
         // Older entries treat unknown credential types as Internal. Preserve
         // that behavior while moving storage out of the login implementation.
-        credential_type: match value["credential_type"].as_str()? {
+        credential_type: match stored.credential_type.as_str() {
             "External" => CredentialType::External,
             _ => CredentialType::Internal,
         },

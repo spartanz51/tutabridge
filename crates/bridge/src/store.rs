@@ -60,20 +60,46 @@ fn fts_match_expr(term: &str) -> String {
 }
 
 impl LocalStore {
+    /// Open the application's cache, protecting its dedicated data directory
+    /// before SQLite can open the database or its WAL/shared-memory files.
+    pub fn open_default(storage_key: GenericAesKey) -> Result<Self, StoreError> {
+        Self::open_in_data_dir(&crate::config::data_dir(), storage_key)
+    }
+
+    // Only pass the application's dedicated directory here, never a shared
+    // parent supplied to the general-purpose `open` API.
+    fn open_in_data_dir(data_dir: &Path, storage_key: GenericAesKey) -> Result<Self, StoreError> {
+        crate::fs_private::create_dir_all_private(data_dir)?;
+        crate::fs_private::tighten_dir(data_dir)?;
+        Self::open(
+            &data_dir.join("store.db"),
+            &data_dir.join("mails"),
+            storage_key,
+        )
+    }
+
     pub fn open(
         db_path: &Path,
         mails_dir: &Path,
         storage_key: GenericAesKey,
     ) -> Result<Self, StoreError> {
-        std::fs::create_dir_all(mails_dir)?;
+        // Bodies and metadata are encrypted at rest, but file names, sizes
+        // and mtimes still say how much mail there is and when it arrived,
+        // so keep the cache private to the owner. The directory is tightened
+        // on every open to heal installs created before this hardening.
+        crate::fs_private::create_dir_all_private(mails_dir)?;
+        crate::fs_private::tighten_dir(mails_dir)?;
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::fs_private::create_dir_all_private(parent)?;
         }
 
         let conn = Connection::open(db_path)?;
+        crate::fs_private::tighten(db_path);
 
-        let hex_key = hex::encode(storage_key.as_bytes());
-        conn.pragma_update(None, "key", format!("x'{hex_key}'"))?;
+        // Our copies of the key are wiped once SQLCipher has it.
+        let hex_key = zeroize::Zeroizing::new(hex::encode(storage_key.as_bytes()));
+        let key_pragma = zeroize::Zeroizing::new(format!("x'{}'", hex_key.as_str()));
+        conn.pragma_update(None, "key", key_pragma.as_str())?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
         // Migrate: if the stored schema version differs, drop the cache tables.
@@ -391,7 +417,7 @@ impl LocalStore {
 
         let final_path = self.mails_dir.join(format!("{element_id}.eml.enc"));
         let tmp_path = self.mails_dir.join(format!("{element_id}.eml.enc.tmp"));
-        std::fs::write(&tmp_path, &encrypted)?;
+        crate::fs_private::write_private(&tmp_path, &encrypted)?;
         std::fs::rename(&tmp_path, &final_path)?;
         Ok(())
     }
@@ -645,6 +671,118 @@ mod tests {
             has_details: false,
             uid: 0,
             mail_json: "{}".into(),
+        }
+    }
+
+    #[cfg(unix)]
+    mod cache_permissions {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Fixture(PathBuf);
+
+        impl Fixture {
+            fn new() -> Self {
+                let root = std::env::temp_dir()
+                    .join(format!("tutabridge_permissions_{}", rand::random::<u64>()));
+                std::fs::create_dir_all(&root).unwrap();
+                chmod(&root, 0o755);
+                Self(root)
+            }
+
+            fn data_dir(&self) -> PathBuf {
+                self.0.join("tutabridge")
+            }
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn chmod(path: &Path, mode: u32) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        fn mode(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn opening_app_cache_heals_legacy_directory_without_losing_data() {
+            let fixture = Fixture::new();
+            let data_dir = fixture.data_dir();
+            let db_path = data_dir.join("store.db");
+            let mails_dir = data_dir.join("mails");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            chmod(&data_dir, 0o755);
+            let key = test_key();
+            let store = LocalStore::open(&db_path, &mails_dir, key.clone()).unwrap();
+            // The general-purpose API must not chmod an arbitrary DB parent.
+            assert_eq!(mode(&data_dir), 0o755);
+            store
+                .upsert_mail_metadata(&meta("legacy", "inbox", 1234))
+                .unwrap();
+            store.set_meta("last_sync", "keep-me").unwrap();
+            store
+                .write_eml("legacy", "Subject: preserved\r\n\r\nbody")
+                .unwrap();
+            drop(store);
+
+            let body_path = mails_dir.join("legacy.eml.enc");
+            let encrypted_body = std::fs::read(&body_path).unwrap();
+            chmod(&db_path, 0o644);
+            chmod(&mails_dir, 0o755);
+            chmod(&body_path, 0o644);
+
+            let store = LocalStore::open_in_data_dir(&data_dir, key).unwrap();
+            assert_eq!(mode(&data_dir), 0o700);
+            assert_eq!(mode(&mails_dir), 0o700);
+            assert_eq!(mode(&db_path), 0o600);
+            assert_eq!(mode(&fixture.0), 0o755);
+            assert!(store.verify_key());
+            let loaded = store.load_folder_metadata("inbox").unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].element_id, "legacy");
+            assert_eq!(store.get_meta("last_sync").as_deref(), Some("keep-me"));
+            assert_eq!(
+                store.read_eml("legacy").unwrap().as_deref(),
+                Some("Subject: preserved\r\n\r\nbody")
+            );
+            assert_eq!(std::fs::read(body_path).unwrap(), encrypted_body);
+        }
+
+        #[test]
+        fn new_app_cache_is_private_including_sqlite_sidecars() {
+            let fixture = Fixture::new();
+            let data_dir = fixture.data_dir();
+            let store = LocalStore::open_in_data_dir(&data_dir, test_key()).unwrap();
+            store.write_eml("new", "new mail").unwrap();
+            assert_eq!(mode(&data_dir), 0o700);
+            assert_eq!(mode(&data_dir.join("mails")), 0o700);
+            for file in [
+                "store.db",
+                "store.db-wal",
+                "store.db-shm",
+                "mails/new.eml.enc",
+            ] {
+                assert_eq!(mode(&data_dir.join(file)), 0o600, "{file}");
+            }
+            assert_eq!(mode(&fixture.0), 0o755);
+        }
+
+        #[test]
+        fn app_cache_reports_directory_preparation_failure() {
+            let fixture = Fixture::new();
+            let data_dir = fixture.data_dir();
+            std::fs::write(&data_dir, "existing file").unwrap();
+            assert!(matches!(
+                LocalStore::open_in_data_dir(&data_dir, test_key()),
+                Err(StoreError::Io(_))
+            ));
+            assert_eq!(std::fs::read_to_string(&data_dir).unwrap(), "existing file");
+            assert_eq!(mode(&fixture.0), 0o755);
         }
     }
 

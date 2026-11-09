@@ -34,6 +34,7 @@ async fn run() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Failed to install TLS crypto provider"))?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    tutabridge_core::util::harden_process();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse(&args).map_err(anyhow::Error::msg)?;
@@ -279,12 +280,7 @@ async fn serve_bridge(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     info!("Storage encryption key derived");
 
-    let local_store = LocalStore::open(
-        &config::store_db_path(),
-        &config::store_mails_dir(),
-        storage_key,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let local_store = LocalStore::open_default(storage_key).map_err(|e| anyhow::anyhow!("{e}"))?;
     if !local_store.verify_key() {
         info!("Storage key changed — resetting local cache");
         let _ = local_store.reset();
@@ -405,6 +401,7 @@ async fn serve_bridge(
         event_rx,
         startup_done_rx,
         shutdown_rx.clone(),
+        None,
     ));
     let imap_server = imap::serve(
         cfg.imap_addr(),
@@ -522,13 +519,22 @@ async fn login_session(cfg: &config::Config, mode: LoginMode) -> anyhow::Result<
         Err(e) if store.load().await?.is_some() => return Err(anyhow::anyhow!("{e}")),
         Err(_) => {}
     }
-    let password = rpassword::prompt_password(format!("Password for {}: ", cfg.email)).context(
-        "Could not read the Tuta password; an interactive terminal is required \
-         (Docker: `docker compose run --rm tutabridge init`)",
-    )?;
-    tuta::login_with_persistence(cfg, &store, Some(&password), Some(make_totp_cb()), policy)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    // Wiped from memory once the login is over.
+    let password = zeroize::Zeroizing::new(
+        rpassword::prompt_password(format!("Password for {}: ", cfg.email)).context(
+            "Could not read the Tuta password; an interactive terminal is required \
+             (Docker: `docker compose run --rm tutabridge init`)",
+        )?,
+    );
+    tuta::login_with_persistence(
+        cfg,
+        &store,
+        Some(password.as_str()),
+        Some(make_totp_cb()),
+        policy,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// `tutabridge backup <dir>` — export every mail of every folder to a tree of
@@ -554,12 +560,7 @@ async fn run_backup(output: &str) -> anyhow::Result<()> {
     // Open the cache without the reset-on-mismatch the bridge uses: a wrong
     // key just makes `read_eml` miss and fall through to a server fetch,
     // which is safe; wiping the cache during a backup would be destructive.
-    let local_store = LocalStore::open(
-        &config::store_db_path(),
-        &config::store_mails_dir(),
-        storage_key,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let local_store = LocalStore::open_default(storage_key).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let output_path = std::path::Path::new(output);
     info!("Backing up all mail to {} ...", output_path.display());

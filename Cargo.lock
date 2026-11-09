@@ -2195,6 +2195,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "html5gum"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "428502d3ec1742c35e015871aef742bc4722a9acfcb616b8ff79b519922e1c36"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6156,6 +6162,7 @@ dependencies = [
  "tuta-sdk",
  "tutabridge-core",
  "tutabridge-tuta",
+ "zeroize",
 ]
 
 [[package]]
@@ -6169,7 +6176,9 @@ dependencies = [
  "crypto-primitives",
  "dirs",
  "hex",
+ "html5gum",
  "keyring",
+ "libc",
  "log 0.4.29",
  "rand 0.8.6",
  "rand_core 0.6.4",
@@ -6179,12 +6188,14 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "toml 0.8.2",
  "tuta-sdk",
  "tutabridge-tuta",
+ "zeroize",
 ]
 
 [[package]]
@@ -7717,6 +7728,7 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

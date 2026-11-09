@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, watch};
 use tutabridge_tuta::event_bus::{
     EntityUpdateBatch, EntityUpdateEvent, EventBusMessage, Operation,
 };
+use tutabridge_tuta::folder_system::MailSetKind;
 use tutabridge_tuta::mail_set_entry_id;
 use tutasdk::CustomId;
 
@@ -43,6 +44,8 @@ const MAIL_SET_ENTRY_TYPE_ID: i64 = 1450;
 /// renamed / deleted by mutating MailSet entries).
 const MAIL_SET_TYPE_ID: i64 = 429;
 
+// Each argument is a separate channel or shared handle the bridge owns.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_event_handler(
     store: Arc<MailStore>,
     local_store: Arc<LocalStore>,
@@ -51,6 +54,7 @@ pub async fn run_event_handler(
     mut rx: mpsc::Receiver<EventBusMessage>,
     mut startup_done: watch::Receiver<bool>,
     mut shutdown: watch::Receiver<bool>,
+    activity: Option<crate::activity::Activity>,
 ) {
     info!("Event handler started");
     // Hold events until the syncer has loaded the cache (and run its full
@@ -73,7 +77,12 @@ pub async fn run_event_handler(
             _ = shutdown.changed() => break,
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
-                process(&store, &local_store, &*backend, &last_batch_ids, msg).await;
+                let new_mail = process(&store, &local_store, &*backend, &last_batch_ids, msg).await;
+                if let Some(activity) = &activity {
+                    for folder in new_mail {
+                        activity.emit(crate::activity::ActivityEvent::NewMail { folder });
+                    }
+                }
             }
         }
     }
@@ -86,19 +95,19 @@ async fn process(
     backend: &dyn MailBackend,
     last_batch_ids: &Mutex<HashMap<String, String>>,
     msg: EventBusMessage,
-) {
+) -> Vec<String> {
     let batch = match msg {
         EventBusMessage::EntityUpdate(b) => b,
         EventBusMessage::InitialSyncDone => {
             info!("Event bus initial sync done");
-            return;
+            return Vec::new();
         }
         // Counter / leader / op-status / phishing / work-estimate / unknown:
         // nothing to do at this layer.
-        _ => return,
+        _ => return Vec::new(),
     };
 
-    apply_batch(store, local_store, backend, &batch).await;
+    let new_mail = apply_batch(store, local_store, backend, &batch).await;
 
     // Advance the in-memory catch-up state and persist it. The two must stay
     // in sync — the in-memory map drives the next reconnect's query string,
@@ -113,6 +122,7 @@ async fn process(
             batch.group_id, e
         );
     }
+    new_mail
 }
 
 /// Bucketed view of the mail-relevant entity updates inside a batch. Pure;
@@ -182,7 +192,7 @@ async fn apply_batch(
     local_store: &LocalStore,
     backend: &dyn MailBackend,
     batch: &EntityUpdateBatch,
-) {
+) -> Vec<String> {
     let Bucketed {
         mail_set_entry_creates,
         mail_set_entry_deletes,
@@ -221,8 +231,10 @@ async fn apply_batch(
     // deletes lets a MOVE clone the already-decrypted Mail straight from
     // the source folder (still present in the cache at this point) — no
     // REST round-trip.
+    // Folders that received a new mail, for the live view.
+    let mut new_mail = Vec::new();
     for ev in &mail_set_entry_creates {
-        apply_mail_set_entry_create(
+        let arrived = apply_mail_set_entry_create(
             store,
             local_store,
             backend,
@@ -232,6 +244,7 @@ async fn apply_batch(
             ev,
         )
         .await;
+        new_mail.extend(arrived);
     }
 
     // 2) MailSetEntry DELETEs. Per Tuta's wire model these arrive paired
@@ -266,6 +279,7 @@ async fn apply_batch(
             );
         }
     }
+    new_mail
 }
 
 async fn refresh_folder_list(
@@ -304,7 +318,7 @@ async fn apply_mail_set_entry_create(
     fallback_folders: &mut HashSet<String>,
     pending: &mut HashMap<String, PendingMail>,
     ev: &EntityUpdateEvent,
-) {
+) -> Option<String> {
     let custom = CustomId(ev.instance_id.clone());
     let mail_eid = match mail_set_entry_id::deconstruct(&custom) {
         Ok((_date, mail_id)) => mail_id.0,
@@ -314,7 +328,7 @@ async fn apply_mail_set_entry_create(
                 ev.instance_id
             );
             fallback_folders.insert(ev.instance_list_id.clone());
-            return;
+            return None;
         }
     };
     let Some(target_folder) = folder_by_entries.get(ev.instance_list_id.as_str()).copied() else {
@@ -322,7 +336,7 @@ async fn apply_mail_set_entry_create(
         // `MailSet` event we have not yet processed. Falling back ensures
         // we discover it via `list_folders` on the next batch.
         fallback_folders.insert(ev.instance_list_id.clone());
-        return;
+        return None;
     };
 
     // HIT path: the mail already lives in another cached folder (typical
@@ -334,7 +348,7 @@ async fn apply_mail_set_entry_create(
             mail_eid, source_folder, target_folder.imap_path
         );
         assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
-        return;
+        return None;
     }
 
     // HIT-FROM-BATCH path: a matching Mail CREATE rode in the same batch
@@ -390,7 +404,7 @@ async fn apply_mail_set_entry_create(
             );
         }
         assign_uid_and_upsert(store, local_store, target_folder, &mail_eid, &mut stored).await;
-        return;
+        return arrived_in(target_folder);
     }
 
     // MISS path: never seen this mail. The MailSetEntry payload is
@@ -403,7 +417,7 @@ async fn apply_mail_set_entry_create(
         // Inline decode failed AND we have no cached mail to clone — the
         // folder will be brought up-to-date by the safety-net sync below.
         fallback_folders.insert(ev.instance_list_id.clone());
-        return;
+        return None;
     };
     let list_id = mail_tuple.list_id.to_string();
     let elem_id = mail_tuple.element_id.to_string();
@@ -420,9 +434,11 @@ async fn apply_mail_set_entry_create(
                 attachments_pending: false,
             };
             assign_uid_and_upsert(store, local_store, target_folder, &elem_id, &mut stored).await;
+            arrived_in(target_folder)
         }
         Ok(None) => {
             debug!("MailSetEntry CREATE: mail {} not found on server", elem_id);
+            None
         }
         Err(e) => {
             warn!(
@@ -430,7 +446,17 @@ async fn apply_mail_set_entry_create(
                 list_id, elem_id
             );
             fallback_folders.insert(ev.instance_list_id.clone());
+            None
         }
+    }
+}
+
+/// The folder to announce a mail in, for the live view: not Sent or Drafts,
+/// where the user's own mail lands.
+fn arrived_in(folder: &FolderInfo) -> Option<String> {
+    match folder.kind {
+        MailSetKind::Sent | MailSetKind::Draft => None,
+        _ => Some(folder.imap_path.clone()),
     }
 }
 
@@ -1086,6 +1112,7 @@ mod startup_tests {
             event_rx,
             startup_rx,
             shutdown_rx,
+            None,
         ));
 
         let t = Instant::now();
@@ -1150,6 +1177,7 @@ mod startup_tests {
             event_rx,
             startup_rx,
             shutdown_rx,
+            None,
         ));
 
         drop(startup_tx);
