@@ -23,7 +23,7 @@ ALLOWED = {'sdk/BASE', 'sdk/EXPECTED', 'tuta-repo', 'release-plan.json', 'Cargo.
 LOCK_ENCODED_LIMIT = 64 * 1024
 LOCK_DIFF_LIMIT = 1024 * 1024
 TAG = re.compile(r'tutanota-release-(\d+)\.(\d{6})\.(\d+)\Z')
-VERSION = re.compile(r'0\.1\.0-rc\.(\d+)\Z')
+VERSION = re.compile(r'(\d+)\.(\d+)\.(\d+)-rc\.(\d+)\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 
 
@@ -77,17 +77,23 @@ def base_at(ref):
     return dict(line.split('=', 1) for line in git('show', f'{ref}:sdk/BASE').splitlines() if '=' in line and not line.startswith('#'))
 
 
+def version_key(version):
+    return tuple(map(int, VERSION.fullmatch(version.removeprefix('v')).groups()))
+
+
 def next_version(tags, drafts):
-    numbers = []
+    # The next rc of the newest series: a maintainer opens a series (for
+    # example 0.2.0-rc.1) by hand, and SDK bumps continue it.
+    keys = []
     for tag in set(tags) | set(drafts):
-        match = VERSION.fullmatch(tag.removeprefix('v'))
-        if match:
-            numbers.append(int(match[1]))
+        if VERSION.fullmatch(tag.removeprefix('v')):
+            keys.append(version_key(tag))
         elif re.fullmatch(r'v?\d+\.\d+\.\d+(?:-rc\.\d+)?', tag):
             raise ValueError(f'Release series needs an explicit policy change: {tag}')
-    if not numbers:
+    if not keys:
         raise ValueError('No existing rc release series')
-    return f'0.1.0-rc.{max(numbers) + 1}'
+    major, minor, patch, rc = max(keys)
+    return f'{major}.{minor}.{patch}-rc.{rc + 1}'
 
 
 def lock_bytes(ref):
@@ -281,7 +287,7 @@ def detect(args):
         if docker.enabled():
             public = [r for r in available if not r['draft'] and VERSION.fullmatch(r['tag_name'].removeprefix('v'))]
             if public:
-                newest = max(public, key=lambda r: int(VERSION.fullmatch(r['tag_name'].removeprefix('v'))[1]))
+                newest = max(public, key=lambda r: version_key(r['tag_name']))
                 if docker.promotion_pending(newest, docker.load_script('release-assets')):
                     version = newest['tag_name'].removeprefix('v')
                     source = git('rev-parse', f'refs/tags/v{version}^{{commit}}')

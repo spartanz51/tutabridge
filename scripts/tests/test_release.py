@@ -51,6 +51,9 @@ class CalendarAndVersions(unittest.TestCase):
 
     def test_allocate_from_tags_and_drafts(self):
         self.assertEqual(sdk.next_version(['v0.1.0-rc.9', 'v0.1.0-rc.10'], ['v0.1.0-rc.12']), '0.1.0-rc.13')
+        # A series opened by hand is continued, even below older rc numbers.
+        self.assertEqual(sdk.next_version(['v0.1.0-rc.16', 'v0.2.0-rc.1'], ['v0.1.0-rc.30']), '0.2.0-rc.2')
+        self.assertEqual(sdk.next_version(['v0.10.0-rc.1', 'v0.9.0-rc.5'], []), '0.10.0-rc.2')
         with self.assertRaises(ValueError):
             sdk.next_version(['v0.1.0'], [])
 
