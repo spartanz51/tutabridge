@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod logfile;
 mod tray;
 mod update;
 
@@ -16,7 +17,7 @@ fn main() {
     // they show protocol commands, more than an always-on log should keep.
     const LOG_FILTER: &str =
         "info,h2=warn,hyper=warn,hyper_util=warn,rustls=warn,mio=warn,tokio_util=warn,want=warn";
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER)).init();
+    logfile::init(LOG_FILTER);
     tutabridge_core::util::harden_process();
 
     tokio_rustls::rustls::crypto::ring::default_provider()
@@ -53,6 +54,7 @@ fn main() {
             commands::regenerate_bridge_password,
             commands::export_mails,
             commands::get_mcp_client_config,
+            commands::log_frontend_error,
             update::check_update,
             update::install_update,
             update::get_app_version,
@@ -61,6 +63,9 @@ fn main() {
         ])
         .setup(|app| {
             log::info!("TutaBridge {} starting", tutabridge_core::VERSION);
+            if let Some(path) = logfile::path() {
+                log::info!("Logging to {}", path.display());
+            }
             create_main_window(app)?;
             if let Err(error) = tray::setup(app) {
                 log::warn!("Tray unavailable; closing the window will exit: {error}");

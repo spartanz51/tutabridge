@@ -226,3 +226,12 @@ pub async fn export_mails(
     );
     Ok(stats)
 }
+
+/// Errors the window could not show, reported by the handler in
+/// `ui/index.html` so they reach the log file. Capped: the page decides what
+/// it sends.
+#[tauri::command]
+pub fn log_frontend_error(message: String) {
+    let message: String = message.chars().take(4000).collect();
+    log::error!("Window error: {message}");
+}

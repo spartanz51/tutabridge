@@ -26,6 +26,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         false,
         None::<&str>,
     )?;
+    let logs = MenuItem::with_id(app, "tray-logs", "Show logs", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "tray-quit", "Quit TutaBridge", true, None::<&str>)?;
     let after_version = PredefinedMenuItem::separator(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -38,6 +39,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
             &hide,
             &restart,
             &separator,
+            &logs,
             &quit,
         ],
     )?;
@@ -66,6 +68,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
             // Explicit Quit (and the native macOS Quit command) still exits.
             "tray-quit" => app.exit(0),
             "tray-restart" => app.restart(),
+            "tray-logs" => crate::logfile::reveal(),
             _ => {}
         })
         .build(app)?;
