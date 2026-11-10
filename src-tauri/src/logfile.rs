@@ -116,7 +116,9 @@ impl Write for RotatingFile {
             self.file = open_append(&self.path)?;
             self.written = 0;
         }
-        let n = self.file.write(buf)?;
+        // A record can exceed the cap on its own. Return a partial write so
+        // write_all continues in the next file through the normal rotation.
+        let n = self.file.write(&buf[..buf.len().min(MAX_BYTES as usize)])?;
         self.written += n as u64;
         Ok(n)
     }
@@ -127,6 +129,11 @@ impl Write for RotatingFile {
 }
 
 fn rotate(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
     let mut previous = path.as_os_str().to_owned();
     previous.push(".1");
     fs::rename(path, previous)
@@ -141,7 +148,14 @@ fn open_append(path: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // OpenOptions::mode only applies when creating a file.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// Show the log file in the system file manager, selected where the platform
@@ -237,5 +251,46 @@ mod tests {
         RotatingFile::open(path.clone()).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+    #[test]
+    fn a_large_write_stays_within_the_file_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut file = RotatingFile::open(path.clone()).unwrap();
+        let mut record = vec![b'x'; MAX_BYTES as usize * 2];
+        record.extend_from_slice(b"latest\n");
+        file.write_all(&record).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 7);
+        assert_eq!(fs::read(&path).unwrap(), b"latest\n");
+        assert_eq!(
+            fs::metadata(dir.path().join(format!("{FILE_NAME}.1")))
+                .unwrap()
+                .len(),
+            MAX_BYTES
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_logs_are_private_even_when_rotated_at_startup() {
+        use std::os::unix::fs::PermissionsExt;
+        for size in [1, MAX_BYTES as usize] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            fs::write(&path, vec![b'x'; size]).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            RotatingFile::open(path.clone()).unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            if size == MAX_BYTES as usize {
+                let previous = dir.path().join(format!("{FILE_NAME}.1"));
+                assert_eq!(
+                    fs::metadata(previous).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
     }
 }

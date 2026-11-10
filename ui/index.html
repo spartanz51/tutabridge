@@ -21,7 +21,9 @@
         }
         function show(message) {
           // Only when nothing is on screen: a glitch in a working window
-          // stays in the log.
+          // stays in the log. Checked after a pause, so an error raised
+          // before the app's first render cannot cover a window that then
+          // renders fine; a window that failed is still empty by then.
           setTimeout(function () {
             var root = document.getElementById("root");
             if (shown || !root || root.childNodes.length > 0) return;
@@ -44,7 +46,7 @@
             box.appendChild(hint);
             box.appendChild(details);
             document.body.appendChild(box);
-          }, 0);
+          }, 1500);
         }
         window.addEventListener("error", function (event) {
           // WebKit's stack leaves out the message, so put it first.
@@ -61,6 +63,7 @@
           var message = "Unhandled rejection: " + String(reason);
           if (reason && reason.stack) message += "\n" + reason.stack;
           report(message);
+          show(message);
         });
       })();
     </script>
