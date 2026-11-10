@@ -1242,16 +1242,14 @@ fn build_fetch_response(
     format!("* {} FETCH ({})\r\n", seq, parts.join(" "))
 }
 /// The reference and mailbox pattern of a LIST or LSUB command, each a quoted
-/// string or an atom. LIST-EXTENDED selection options before them and return
-/// options after them are skipped (the extension is not advertised).
+/// string or an atom. Reject LIST-EXTENDED options: they are not supported.
 fn parse_list_args(args: &str) -> Option<(String, String)> {
-    let mut rest = args.trim_start();
-    if rest.starts_with('(') {
-        rest = rest[rest.find(')')? + 1..].trim_start();
+    let (reference, rest) = next_astring(args.trim_start())?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
     }
-    let (reference, rest) = next_astring(rest)?;
-    let (pattern, _) = next_astring(rest.trim_start())?;
-    Some((reference, pattern))
+    let (pattern, rest) = next_astring(rest.trim_start())?;
+    rest.trim().is_empty().then_some((reference, pattern))
 }
 
 /// One quoted string or atom at the start of `input`, and what follows it.
@@ -1269,7 +1267,11 @@ fn next_astring(input: &str) -> Option<(String, &str)> {
         return None;
     }
     let end = input.find(char::is_whitespace).unwrap_or(input.len());
-    if end == 0 {
+    if end == 0
+        || input[..end]
+            .bytes()
+            .any(|b| b.is_ascii_control() || matches!(b, b'(' | b')' | b'{' | b'"' | b'\\'))
+    {
         return None;
     }
     Some((input[..end].to_string(), &input[end..]))
@@ -1280,7 +1282,7 @@ fn next_astring(input: &str) -> Option<(String, &str)> {
 fn normalize_inbox(name: &str) -> String {
     let bytes = name.as_bytes();
     if bytes.len() >= 5
-        && name[..5].eq_ignore_ascii_case("INBOX")
+        && bytes[..5].eq_ignore_ascii_case(b"INBOX")
         && matches!(bytes.get(5), None | Some(b'/') | Some(b'%') | Some(b'*'))
     {
         format!("INBOX{}", &name[5..])
@@ -3691,6 +3693,41 @@ pub(crate) mod tests {
         assert_eq!(resp, vec!["* LSUB () \"/\" \"Work/Projects\"\r\n"]);
     }
 
+    #[tokio::test]
+    async fn list_rejects_unsupported_or_extra_arguments() {
+        let mut session = list_session().await;
+        for command in ["LIST", "LSUB"] {
+            for args in [
+                r#"(SUBSCRIBED) "" "*""#,
+                r#""" "*" RETURN (CHILDREN)"#,
+                r#""" ("*" "%")"#,
+                r#""" "*" garbage"#,
+                r#""""*""#,
+            ] {
+                let response = session
+                    .handle_command(&format!("A002 {command} {args}"))
+                    .await;
+                assert_eq!(
+                    response,
+                    vec![format!("A002 BAD Invalid {command} arguments\r\n")],
+                    "{command} {args}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_handles_raw_utf8_without_panicking() {
+        let mut session = list_session().await;
+        for command in ["LIST", "LSUB"] {
+            for args in [r#""" "日本語""#, r#""" "ééé""#, r#""日本語/" "%""#] {
+                assert!(list(&mut session, &format!("A002 {command} {args}"))
+                    .await
+                    .is_empty());
+            }
+        }
+    }
+
     #[test]
     fn list_wildcards() {
         let m = |p: &str, n: &str| list_pattern_matches(p.as_bytes(), n.as_bytes());
@@ -3716,10 +3753,6 @@ pub(crate) mod tests {
         assert_eq!(p("\"\" %"), Some(("".into(), "%".into())));
         assert_eq!(p("Work/ \"%\""), Some(("Work/".into(), "%".into())));
         assert_eq!(p("\"\" \"a\\\"b\""), Some(("".into(), "a\"b".into())));
-        assert_eq!(
-            p("(SUBSCRIBED) \"\" \"*\" RETURN (CHILDREN)"),
-            Some(("".into(), "*".into()))
-        );
         assert_eq!(p("\"\""), None);
         assert_eq!(p("\"unterminated"), None);
         assert_eq!(p(""), None);
