@@ -917,7 +917,7 @@ impl TutaSession {
         // calls (one for the Sent copy, one for the Inbox copy) and both
         // need to render multipart. The TTL handles eviction.
         let attachments = entry.attachments.clone();
-        log::info!(
+        log::debug!(
             "Self-send cache hit for {:?} ({} attachment(s))",
             mail.subject,
             attachments.len()
