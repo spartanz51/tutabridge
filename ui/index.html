@@ -5,6 +5,68 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TutaBridge</title>
+    <script>
+      // Plain ES5 on purpose: this has to run on engines the app bundle does
+      // not, so a window that cannot start says why instead of staying blank.
+      // Every error also reaches the log file (tray menu > Show logs).
+      (function () {
+        var shown = false;
+        function report(message) {
+          try {
+            var tauri = window.__TAURI_INTERNALS__;
+            if (tauri && tauri.invoke) {
+              tauri.invoke("log_frontend_error", { message: message })["catch"](function () {});
+            }
+          } catch (e) {}
+        }
+        function show(message) {
+          // Only when nothing is on screen: a glitch in a working window
+          // stays in the log. Checked after a pause, so an error raised
+          // before the app's first render cannot cover a window that then
+          // renders fine; a window that failed is still empty by then.
+          setTimeout(function () {
+            var root = document.getElementById("root");
+            if (shown || !root || root.childNodes.length > 0) return;
+            shown = true;
+            var box = document.createElement("div");
+            box.style.cssText = "position:fixed;inset:0;top:0;left:0;right:0;bottom:0;" +
+              "overflow:auto;padding:24px;background:#121014;color:#F3EEEA;" +
+              "font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+            var title = document.createElement("p");
+            title.style.cssText = "margin:0 0 8px;font-size:15px;font-weight:600";
+            title.textContent = "TutaBridge could not open its window.";
+            var hint = document.createElement("p");
+            hint.style.cssText = "margin:0 0 16px;color:#A79FA3";
+            hint.textContent = "This error is also in the log file: tray icon > Show logs.";
+            var details = document.createElement("pre");
+            details.style.cssText = "margin:0;white-space:pre-wrap;word-break:break-word;" +
+              "font:12px/1.4 ui-monospace,Menlo,monospace;color:#FF8A80";
+            details.textContent = message;
+            box.appendChild(title);
+            box.appendChild(hint);
+            box.appendChild(details);
+            document.body.appendChild(box);
+          }, 1500);
+        }
+        window.addEventListener("error", function (event) {
+          // WebKit's stack leaves out the message, so put it first.
+          var message = event.message || String(event.error) || "Unknown error";
+          if (event.error && event.error.stack) message += "\n" + event.error.stack;
+          if (event.filename) {
+            message += "\n    at " + event.filename + ":" + event.lineno + ":" + event.colno;
+          }
+          report(message);
+          show(message);
+        });
+        window.addEventListener("unhandledrejection", function (event) {
+          var reason = event.reason;
+          var message = "Unhandled rejection: " + String(reason);
+          if (reason && reason.stack) message += "\n" + reason.stack;
+          report(message);
+          show(message);
+        });
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

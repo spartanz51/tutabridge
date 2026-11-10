@@ -6203,6 +6203,7 @@ name = "tutabridge-gui"
 version = "0.1.0"
 dependencies = [
  "dbus",
+ "dirs",
  "env_logger",
  "log 0.4.29",
  "serde",

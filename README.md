@@ -263,6 +263,14 @@ mails/<id>.eml.enc   per-mail encrypted bodies
 mailbox is always listed and metadata-searchable regardless. Set it to `0` (or
 tick "keep every message body offline" in the GUI) to download everything.
 
+### Logs
+
+The desktop app writes its log to `~/Library/Logs/TutaBridge/` on macOS,
+`~/.local/share/tutabridge/logs/` on Linux and
+`%LOCALAPPDATA%\tutabridge\logs\` on Windows. **Show logs** in the tray menu
+opens it, even when the window does not. It names your folders and address,
+so look it over before sharing it.
+
 ### Keeping the session in pass
 
 By default the login session is saved to your OS keychain (on Linux, a Secret
