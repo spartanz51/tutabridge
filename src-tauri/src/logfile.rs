@@ -213,6 +213,8 @@ mod tests {
         assert!(written.contains("INFO"), "{written}");
         assert!(written.contains("bridge started"), "{written}");
         assert!(!written.contains("filtered out"), "{written}");
+        // The file is plain text: no terminal colour codes.
+        assert!(!written.contains('\u{1b}'), "{written:?}");
     }
 
     #[test]
