@@ -758,7 +758,12 @@ button.big {
   color: var(--on-surface-variant);
 }
 
-.chip:hover .chip-tip,
+.chip:hover .chip-tip {
+  display: flex;
+}
+
+/* Its own rule: before Safari 15.4 `:focus-visible` is unknown, and an
+   unknown selector drops every selector listed with it. */
 .chip:focus-visible .chip-tip {
   display: flex;
 }
