@@ -288,8 +288,8 @@ impl ImapSession {
                     vec![format!("{} NO Unsupported mechanism\r\n", tag)]
                 }
             }
-            "LIST" => self.cmd_list(&tag, args).await,
-            "LSUB" => self.cmd_list(&tag, args).await,
+            "LIST" => self.cmd_list(&tag, args, "LIST").await,
+            "LSUB" => self.cmd_list(&tag, args, "LSUB").await,
             "SELECT" => self.cmd_select(&tag, args).await,
             "EXAMINE" => self.cmd_select(&tag, args).await,
             "STATUS" => self.cmd_status(&tag, args).await,
@@ -387,7 +387,8 @@ impl ImapSession {
 
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
         vec![
-            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE ID\r\n".to_string(),
+            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE ID CHILDREN\r\n"
+                .to_string(),
             format!("{} OK CAPABILITY completed\r\n", tag),
         ]
     }
@@ -432,28 +433,55 @@ impl ImapSession {
         vec![format!("{} OK LOGIN completed\r\n", tag)]
     }
 
-    async fn cmd_list(&self, tag: &str, args: &str) -> Vec<String> {
+    /// LIST and LSUB (RFC 3501 6.3.8 and 6.3.9). Only the mailboxes matching
+    /// the reference and pattern are returned: clients that walk the tree a
+    /// level at a time (Geary and its forks send `LIST "" "INBOX/%"` for each
+    /// folder) loop forever when every LIST returns every folder.
+    async fn cmd_list(&self, tag: &str, args: &str, command: &str) -> Vec<String> {
         if self.state == State::NotAuthenticated {
             return vec![format!("{} NO Not authenticated\r\n", tag)];
         }
+        let Some((reference, pattern)) = parse_list_args(args) else {
+            return vec![format!("{} BAD Invalid {} arguments\r\n", tag, command)];
+        };
 
         let mut responses = Vec::new();
-
-        if args.trim() == "\"\" \"\"" || args.trim().is_empty() {
-            responses.push("* LIST (\\Noselect) \"/\" \"\"\r\n".to_string());
-            responses.push(format!("{} OK LIST completed\r\n", tag));
+        if pattern.is_empty() {
+            // An empty pattern asks for the hierarchy delimiter and the root.
+            responses.push(format!("* {} (\\Noselect) \"/\" \"\"\r\n", command));
+            responses.push(format!("{} OK {} completed\r\n", tag, command));
             return responses;
         }
 
-        for folder in self.store.list_folders().await {
-            let flags = folder.special_use.as_deref().unwrap_or("");
+        // Names go out in modified UTF-7, so match the pattern against that.
+        let canonical = normalize_inbox(&format!("{}{}", reference, pattern));
+        let folders = self.store.list_folders().await;
+        for folder in &folders {
+            let name = super::utf7::encode(&folder.imap_path);
+            if !list_pattern_matches(canonical.as_bytes(), normalize_inbox(&name).as_bytes()) {
+                continue;
+            }
+            let mut attrs: Vec<&str> = Vec::new();
+            if command == "LIST" {
+                let prefix = format!("{}/", folder.imap_path);
+                let has_children = folders.iter().any(|f| f.imap_path.starts_with(&prefix));
+                attrs.push(if has_children {
+                    "\\HasChildren"
+                } else {
+                    "\\HasNoChildren"
+                });
+            }
+            if let Some(special) = folder.special_use.as_deref() {
+                attrs.push(special);
+            }
             responses.push(format!(
-                "* LIST ({}) \"/\" \"{}\"\r\n",
-                flags,
-                super::utf7::encode(&folder.imap_path)
+                "* {} ({}) \"/\" \"{}\"\r\n",
+                command,
+                attrs.join(" "),
+                name.replace('\\', "\\\\").replace('"', "\\\"")
             ));
         }
-        responses.push(format!("{} OK LIST completed\r\n", tag));
+        responses.push(format!("{} OK {} completed\r\n", tag, command));
 
         responses
     }
@@ -1212,6 +1240,82 @@ fn build_fetch_response(
     }
 
     format!("* {} FETCH ({})\r\n", seq, parts.join(" "))
+}
+/// The reference and mailbox pattern of a LIST or LSUB command, each a quoted
+/// string or an atom. Reject LIST-EXTENDED options: they are not supported.
+fn parse_list_args(args: &str) -> Option<(String, String)> {
+    let (reference, rest) = next_astring(args.trim_start())?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (pattern, rest) = next_astring(rest.trim_start())?;
+    rest.trim().is_empty().then_some((reference, pattern))
+}
+
+/// One quoted string or atom at the start of `input`, and what follows it.
+fn next_astring(input: &str) -> Option<(String, &str)> {
+    if let Some(quoted) = input.strip_prefix('"') {
+        let mut value = String::new();
+        let mut chars = quoted.char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => value.push(chars.next()?.1),
+                '"' => return Some((value, &quoted[i + 1..])),
+                _ => value.push(c),
+            }
+        }
+        return None;
+    }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    if end == 0
+        || input[..end]
+            .bytes()
+            .any(|b| b.is_ascii_control() || matches!(b, b'(' | b')' | b'{' | b'"' | b'\\'))
+    {
+        return None;
+    }
+    Some((input[..end].to_string(), &input[end..]))
+}
+
+/// INBOX is case-insensitive (RFC 3501 5.1): spell its first segment
+/// `INBOX` so `inbox/%` and `INBOX/%` match the same names.
+fn normalize_inbox(name: &str) -> String {
+    let bytes = name.as_bytes();
+    if bytes.len() >= 5
+        && bytes[..5].eq_ignore_ascii_case(b"INBOX")
+        && matches!(bytes.get(5), None | Some(b'/') | Some(b'%') | Some(b'*'))
+    {
+        format!("INBOX{}", &name[5..])
+    } else {
+        name.to_string()
+    }
+}
+
+/// LIST wildcards: `*` matches anything, `%` anything but the `/` delimiter.
+/// Dynamic programming over (pattern, name) prefixes, so no pattern can make
+/// it backtrack exponentially.
+fn list_pattern_matches(pattern: &[u8], name: &[u8]) -> bool {
+    // row[j]: the pattern so far matches the first j bytes of the name.
+    let mut row = vec![false; name.len() + 1];
+    row[0] = true;
+    for &p in pattern {
+        let mut next = vec![false; name.len() + 1];
+        match p {
+            b'*' | b'%' => {
+                for j in 0..=name.len() {
+                    next[j] =
+                        row[j] || (j > 0 && next[j - 1] && (p == b'*' || name[j - 1] != b'/'));
+                }
+            }
+            _ => {
+                for j in 1..=name.len() {
+                    next[j] = row[j - 1] && name[j - 1] == p;
+                }
+            }
+        }
+        row = next;
+    }
+    row[name.len()]
 }
 
 /// Parse `HEADER.FIELDS (...)` / `HEADER.FIELDS.NOT (...)` out of a FETCH item
@@ -3457,6 +3561,201 @@ pub(crate) mod tests {
 
         let resp = session.handle_command("A001 LIST \"\" \"*\"").await;
         assert!(resp[0].contains("NO Not authenticated"));
+    }
+
+    fn folder(id: &str, path: &str, special_use: Option<&str>) -> FolderInfo {
+        FolderInfo {
+            id: id.to_string(),
+            list_id: "folders".to_string(),
+            entries_list_id: format!("{}_entries", id),
+            kind: MailSetKind::Custom,
+            imap_path: path.to_string(),
+            special_use: special_use.map(str::to_string),
+        }
+    }
+
+    /// A logged-in session over a small tree: three system folders, a nested
+    /// custom folder and one with a non-ASCII name.
+    async fn list_session() -> ImapSession {
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![
+                inbox_folder(),
+                folder("drafts", "Drafts", Some("\\Drafts")),
+                folder("sent", "Sent", Some("\\Sent")),
+                folder("work", "Work", None),
+                folder("projects", "Work/Projects", None),
+                folder("y2026", "Work/Projects/2026", None),
+                folder("ecole", "École", None),
+            ])
+            .await;
+        let mut session = ImapSession::new(store, Arc::new(MockBackend::new()), None, None);
+        session.handle_command("A001 LOGIN user pass").await;
+        session
+    }
+
+    async fn list(session: &mut ImapSession, command: &str) -> Vec<String> {
+        let resp = session.handle_command(command).await;
+        assert!(resp.last().unwrap().contains(" OK "), "{:?}", resp);
+        resp[..resp.len() - 1].to_vec()
+    }
+
+    #[tokio::test]
+    async fn list_star_returns_every_folder_with_child_attributes() {
+        let mut session = list_session().await;
+        let resp = list(&mut session, "A002 LIST \"\" \"*\"").await;
+        assert_eq!(
+            resp,
+            vec![
+                "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                "* LIST (\\HasNoChildren \\Drafts) \"/\" \"Drafts\"\r\n",
+                "* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent\"\r\n",
+                "* LIST (\\HasChildren) \"/\" \"Work\"\r\n",
+                "* LIST (\\HasChildren) \"/\" \"Work/Projects\"\r\n",
+                "* LIST (\\HasNoChildren) \"/\" \"Work/Projects/2026\"\r\n",
+                "* LIST (\\HasNoChildren) \"/\" \"&AMk-cole\"\r\n",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_percent_stays_on_one_level() {
+        let mut session = list_session().await;
+        let names = |resp: Vec<String>| {
+            resp.iter()
+                .map(|r| r.rsplit(' ').next().unwrap().trim().to_string())
+                .collect::<Vec<_>>()
+        };
+        let root = list(&mut session, "A002 LIST \"\" \"%\"").await;
+        assert_eq!(
+            names(root),
+            [
+                "\"INBOX\"",
+                "\"Drafts\"",
+                "\"Sent\"",
+                "\"Work\"",
+                "\"&AMk-cole\""
+            ]
+        );
+        let work = list(&mut session, "A003 LIST \"\" \"Work/%\"").await;
+        assert_eq!(names(work), ["\"Work/Projects\""]);
+        let deep = list(&mut session, "A004 LIST \"\" Work/*").await;
+        assert_eq!(names(deep), ["\"Work/Projects\"", "\"Work/Projects/2026\""]);
+        let by_reference = list(&mut session, "A005 LIST \"Work/\" \"%\"").await;
+        assert_eq!(names(by_reference), ["\"Work/Projects\""]);
+    }
+
+    /// Geary (and Convey, its fork) walks the tree with `LIST "" "<folder>/%"`
+    /// for every folder that might have children. When every LIST returned
+    /// every folder, each one looked like a child of the others and the walk
+    /// never ended.
+    #[tokio::test]
+    async fn list_children_of_a_leaf_is_empty() {
+        let mut session = list_session().await;
+        assert!(list(&mut session, "A002 LIST \"\" \"INBOX/%\"")
+            .await
+            .is_empty());
+        assert!(list(&mut session, "A003 LIST \"\" \"Drafts/%\"")
+            .await
+            .is_empty());
+        assert!(list(&mut session, "A004 LIST \"\" \"Nope\"")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_inbox_is_case_insensitive() {
+        let mut session = list_session().await;
+        for pattern in ["INBOX", "inbox", "\"Inbox\""] {
+            let resp = list(&mut session, &format!("A002 LIST \"\" {}", pattern)).await;
+            assert_eq!(resp, vec!["* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn list_empty_pattern_returns_the_delimiter() {
+        let mut session = list_session().await;
+        let resp = list(&mut session, "A002 LIST \"\" \"\"").await;
+        assert_eq!(resp, vec!["* LIST (\\Noselect) \"/\" \"\"\r\n"]);
+    }
+
+    #[tokio::test]
+    async fn list_without_a_pattern_is_bad() {
+        let mut session = list_session().await;
+        let resp = session.handle_command("A002 LIST \"\"").await;
+        assert_eq!(resp, vec!["A002 BAD Invalid LIST arguments\r\n"]);
+    }
+
+    #[tokio::test]
+    async fn lsub_answers_with_lsub_lines_and_filters() {
+        let mut session = list_session().await;
+        let resp = list(&mut session, "A002 LSUB \"\" \"Work/%\"").await;
+        assert_eq!(resp, vec!["* LSUB () \"/\" \"Work/Projects\"\r\n"]);
+    }
+
+    #[tokio::test]
+    async fn list_rejects_unsupported_or_extra_arguments() {
+        let mut session = list_session().await;
+        for command in ["LIST", "LSUB"] {
+            for args in [
+                r#"(SUBSCRIBED) "" "*""#,
+                r#""" "*" RETURN (CHILDREN)"#,
+                r#""" ("*" "%")"#,
+                r#""" "*" garbage"#,
+                r#""""*""#,
+            ] {
+                let response = session
+                    .handle_command(&format!("A002 {command} {args}"))
+                    .await;
+                assert_eq!(
+                    response,
+                    vec![format!("A002 BAD Invalid {command} arguments\r\n")],
+                    "{command} {args}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_handles_raw_utf8_without_panicking() {
+        let mut session = list_session().await;
+        for command in ["LIST", "LSUB"] {
+            for args in [r#""" "日本語""#, r#""" "ééé""#, r#""日本語/" "%""#] {
+                assert!(list(&mut session, &format!("A002 {command} {args}"))
+                    .await
+                    .is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn list_wildcards() {
+        let m = |p: &str, n: &str| list_pattern_matches(p.as_bytes(), n.as_bytes());
+        assert!(m("*", ""));
+        assert!(m("*", "a/b/c"));
+        assert!(m("%", "abc"));
+        assert!(!m("%", "a/b"));
+        assert!(m("a/%", "a/b"));
+        assert!(!m("a/%", "a/b/c"));
+        assert!(m("a/%/c", "a/b/c"));
+        assert!(m("a*c", "a/b/c"));
+        assert!(!m("a%c", "a/b/c"));
+        assert!(m("%b%", "abc"));
+        assert!(!m("abc", "ab"));
+        // Many stars against a long miss still answers at once.
+        assert!(!m(&"*a".repeat(40), &"a".repeat(39)));
+    }
+
+    #[test]
+    fn list_args_parsing() {
+        let p = |a: &str| parse_list_args(a);
+        assert_eq!(p("\"\" \"*\""), Some(("".into(), "*".into())));
+        assert_eq!(p("\"\" %"), Some(("".into(), "%".into())));
+        assert_eq!(p("Work/ \"%\""), Some(("Work/".into(), "%".into())));
+        assert_eq!(p("\"\" \"a\\\"b\""), Some(("".into(), "a\"b".into())));
+        assert_eq!(p("\"\""), None);
+        assert_eq!(p("\"unterminated"), None);
+        assert_eq!(p(""), None);
     }
 
     #[tokio::test]
