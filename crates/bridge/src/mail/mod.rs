@@ -1,4 +1,5 @@
 pub(crate) mod bodystructure;
+pub(crate) mod mime;
 pub(crate) mod parser;
 pub(crate) mod rfc2822;
 
