@@ -507,48 +507,45 @@ fn parse_seqset(s: &str) -> SeqSet {
     SeqSet { ranges }
 }
 
-/// Parse an IMAP date (`dd-Mon-yyyy`, e.g. `1-Feb-2020`) into a day number.
+/// Parse an IMAP date (`dd-Mon-yyyy`, e.g. `1-Feb-2020`) into a day number:
+/// days since 1970-01-01. `None` for a date that does not exist.
 fn parse_imap_date(s: &str) -> Option<i64> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let day: i64 = parts[0].parse().ok()?;
-    let month = match parts[1].to_lowercase().as_str() {
-        "jan" => 1,
-        "feb" => 2,
-        "mar" => 3,
-        "apr" => 4,
-        "may" => 5,
-        "jun" => 6,
-        "jul" => 7,
-        "aug" => 8,
-        "sep" => 9,
-        "oct" => 10,
-        "nov" => 11,
-        "dec" => 12,
-        _ => return None,
-    };
-    let year: i64 = parts[2].parse().ok()?;
-    Some(days_from_civil(year, month, day))
-}
-
-/// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+    let format = time::macros::format_description!(
+        "[day padding:none]-[month repr:short case_sensitive:false]-[year]"
+    );
+    let date = time::Date::parse(s, format).ok()?;
+    Some(i64::from(
+        date.to_julian_day() - time::OffsetDateTime::UNIX_EPOCH.to_julian_day(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn day(y: i64, m: i64, d: i64) -> i64 {
-        days_from_civil(y, m, d)
+    fn day(y: i32, m: u8, d: u8) -> i64 {
+        let month = time::Month::try_from(m).unwrap();
+        let date = time::Date::from_calendar_date(y, month, d).unwrap();
+        i64::from(date.to_julian_day() - time::OffsetDateTime::UNIX_EPOCH.to_julian_day())
+    }
+
+    #[test]
+    fn imap_dates_are_day_numbers_and_impossible_ones_are_rejected() {
+        assert_eq!(parse_imap_date("1-Jan-1970"), Some(0));
+        assert_eq!(parse_imap_date("01-jan-1970"), Some(0));
+        assert_eq!(parse_imap_date("25-DEC-2024"), Some(20082));
+        assert_eq!(parse_imap_date("29-Feb-2000"), Some(11016));
+        for bad in [
+            "31-Feb-2020",
+            "29-Feb-2023",
+            "0-Jan-2020",
+            "1-Foo-2020",
+            "1-Jan",
+            "",
+            "1-Jan-20x0",
+        ] {
+            assert_eq!(parse_imap_date(bad), None, "{bad}");
+        }
     }
 
     fn view() -> MsgView<'static> {

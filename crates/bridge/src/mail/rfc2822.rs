@@ -1,4 +1,6 @@
 use base64::Engine;
+use time::macros::format_description;
+use time::OffsetDateTime;
 use tutasdk::entities::generated::tutanota::{Mail, MailAddress, MailDetails, TutanotaFile};
 
 /// One decrypted attachment as it lands in the RFC 2822 we serve over IMAP:
@@ -373,65 +375,31 @@ pub(crate) fn encode_header_value(s: &str) -> String {
     }
 }
 
+/// The UTC date and time of a Tuta timestamp. Tuta dates are always in
+/// range; one that is not falls back to the epoch rather than failing.
+pub(crate) fn utc_datetime(millis: u64) -> OffsetDateTime {
+    i64::try_from(millis / 1000)
+        .ok()
+        .and_then(|secs| OffsetDateTime::from_unix_timestamp(secs).ok())
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+/// `Wed, 25 Dec 2024 12:37:25 +0000`, the `Date:` header form.
 pub(crate) fn format_rfc2822_date(millis: u64) -> String {
-    let secs = millis / 1000;
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    let weekday = ((days + 4) % 7) as usize; // 0=Sun, epoch was Thursday
-    let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-    let (year, month, day) = days_to_ymd(days);
-    let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-
-    let month_idx = month.saturating_sub(1).min(11) as usize;
-
-    format!(
-        "{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
-        weekdays[weekday], day, months[month_idx], year, hours, minutes, seconds
-    )
+    utc_datetime(millis)
+        .format(format_description!(
+            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] +0000"
+        ))
+        .unwrap_or_default()
 }
 
-/// Howard Hinnant's civil_from_days algorithm
-/// Returns (year, month 1-12, day 1-31)
-pub(crate) fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
-
+/// `25-Dec-2024 12:37:25 +0000`, the IMAP `INTERNALDATE` form.
 pub(crate) fn format_internal_date(millis: u64) -> String {
-    let secs = millis / 1000;
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let h = tod / 3600;
-    let m = (tod % 3600) / 60;
-    let s = tod % 60;
-
-    let (year, month, day) = days_to_ymd(days);
-    let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-
-    let month_idx = month.saturating_sub(1).min(11) as usize;
-
-    format!(
-        "{:02}-{}-{:04} {:02}:{:02}:{:02} +0000",
-        day, months[month_idx], year, h, m, s
-    )
+    utc_datetime(millis)
+        .format(format_description!(
+            "[day]-[month repr:short]-[year] [hour]:[minute]:[second] +0000"
+        ))
+        .unwrap_or_default()
 }
 
 pub(crate) fn base64_encode_body(data: &[u8]) -> String {
@@ -557,11 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn test_days_to_ymd_epoch() {
-        assert_eq!(days_to_ymd(0), (1970, 1, 1));
-    }
-
-    #[test]
     fn strip_html_drops_tags_and_decodes_entities() {
         let html = "<p>Hello&nbsp;<b>World</b> &amp; goodbye</p>";
         assert_eq!(strip_html(html), "Hello World & goodbye");
@@ -593,16 +556,6 @@ mod tests {
              --BND\r\nContent-Type: application/pdf\r\n\r\nIGNOREDATTACHMENT\r\n--BND--\r\n"
         );
         assert_eq!(extract_body_text(&rfc), "Body words here");
-    }
-
-    #[test]
-    fn test_days_to_ymd_known_dates() {
-        // 2024-01-01 = day 19723 since epoch
-        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
-        // 2000-02-29 (leap year) = day 11016
-        assert_eq!(days_to_ymd(11016), (2000, 2, 29));
-        // 2026-05-20 = day 20593
-        assert_eq!(days_to_ymd(20593), (2026, 5, 20));
     }
 
     #[test]
