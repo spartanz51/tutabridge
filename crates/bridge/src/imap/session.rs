@@ -1474,16 +1474,14 @@ fn parse_seq_num(s: &str, max: u32) -> u32 {
 }
 
 fn parse_fetch_args(args: &str) -> (String, String) {
-    if let Some(paren_start) = args.find('(') {
-        let seq = args[..paren_start].trim().to_string();
-        let items = args[paren_start..].trim().to_string();
-        (seq, items)
-    } else {
-        let parts: Vec<&str> = args.splitn(2, ' ').collect();
-        let seq = parts.first().unwrap_or(&"").to_string();
-        let items = parts.get(1).unwrap_or(&"").to_string();
-        (seq, items)
-    }
+    // A sequence set holds no space or parenthesis, so it ends at the first
+    // one. Searching the whole line for `(` would split a bare
+    // `BODY.PEEK[HEADER.FIELDS (...)]` item inside its field list.
+    let args = args.trim_start();
+    let end = args
+        .find(|c: char| c.is_whitespace() || c == '(')
+        .unwrap_or(args.len());
+    (args[..end].to_string(), args[end..].trim().to_string())
 }
 
 fn parse_store_args(args: &str) -> (String, String) {
@@ -2075,6 +2073,23 @@ pub(crate) mod tests {
     // --- needs_body ---
 
     #[test]
+    fn fetch_args_split_at_the_end_of_the_sequence_set() {
+        // Geary and Convey send a lone item without the surrounding list.
+        assert_eq!(
+            parse_fetch_args("1:2 body.peek[header.fields (references)]"),
+            (
+                "1:2".to_string(),
+                "body.peek[header.fields (references)]".to_string()
+            )
+        );
+        assert_eq!(
+            parse_fetch_args("1:*(FLAGS)"),
+            ("1:*".to_string(), "(FLAGS)".to_string())
+        );
+        assert_eq!(parse_fetch_args("7"), ("7".to_string(), String::new()));
+    }
+
+    #[test]
     fn test_needs_body() {
         assert!(needs_body("(BODY[])"));
         assert!(needs_body("(BODY.PEEK[])"));
@@ -2533,6 +2548,54 @@ pub(crate) mod tests {
             writer,
             b"* 1 FETCH (UID 1 BODY[TEXT]<2> {1}\r\n\xa9)\r\ne OK UID FETCH completed\r\n"
         );
+    }
+
+    /// The commands Geary and Convey send to list and open a message (#118):
+    /// one item per FETCH, lowercase, without the surrounding list.
+    #[tokio::test]
+    async fn lone_fetch_items_without_a_list_are_answered() {
+        let mails = vec![
+            make_mail("one", "First", true),
+            make_mail("two", "Second", true),
+        ];
+        let backend = Arc::new(MockBackend::with_mails(mails.clone()));
+        backend.add_details("one", make_details("<p>Synthetic body</p>"));
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        let stored = mails
+            .into_iter()
+            .zip(1..)
+            .map(|(mail, uid)| StoredMail {
+                mail,
+                body_loaded: false,
+                uid,
+                attachments_pending: false,
+            })
+            .collect();
+        store.set_folder("inbox", stored).await;
+        let mut session = ImapSession::new(store, backend.clone(), None, None);
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+
+        let response = session
+            .handle_command("c uid fetch 1:2 body.peek[header.fields (date from subject)]")
+            .await;
+        assert_eq!(response.len(), 3, "{response:?}");
+        assert!(
+            response[0].starts_with("* 1 FETCH (UID 1 BODY[header.fields (date from subject)] {")
+        );
+        assert!(response[0].contains("Subject: First\r\n"));
+        assert!(response[1].starts_with("* 2 FETCH (UID 2 "));
+        assert!(response[1].contains("Subject: Second\r\n"));
+        assert_eq!(response[2], "c OK UID FETCH completed\r\n");
+        // Listing headers downloads no body.
+        assert_eq!(*backend.details_calls.lock().unwrap(), 0);
+
+        let response = session
+            .handle_command("d uid fetch 1 body.peek[text]")
+            .await;
+        assert!(response[0].starts_with("* 1 FETCH (UID 1 BODY[text] {"));
+        assert_eq!(*backend.details_calls.lock().unwrap(), 1);
     }
 
     // =================================================================
