@@ -1,4 +1,5 @@
 use log::{debug, info};
+use std::borrow::Cow;
 use std::sync::Arc;
 use tutasdk::entities::generated::tutanota::{Mail, MailAddress, TutanotaFile};
 
@@ -572,6 +573,12 @@ impl ImapSession {
         }
 
         let (seq_set, items) = parse_fetch_args(args);
+        if body_sections(&items).is_none() {
+            return vec![format!(
+                "{} BAD Unsupported or malformed BODY section\r\n",
+                tag
+            )];
+        }
         let indices = self.resolve_sequence_set(&seq_set, uid_mode);
 
         let mut responses = Vec::new();
@@ -1203,30 +1210,35 @@ fn build_fetch_response(
         parts.push(format!("BODYSTRUCTURE {}", bs));
     }
 
-    if items_upper.contains("BODY[]") || items_upper.contains("BODY.PEEK[]") {
+    for section in body_sections(items).unwrap_or_default() {
         if let Some(rfc) = rfc {
-            parts.push(format!("BODY[] {{{}}}\r\n{}", rfc.len(), rfc));
-        }
-    } else if let Some((section, fields, negate)) = parse_header_fields_section(items) {
-        if let Some(rfc) = rfc {
-            let headers = filter_header_fields(rfc, &fields, negate);
+            let content = match section.to_ascii_uppercase().as_str() {
+                "" => Cow::Borrowed(rfc),
+                "TEXT" => Cow::Borrowed(rfc.split_once("\r\n\r\n").map_or("", |(_, body)| body)),
+                "HEADER" => Cow::Owned(extract_headers(rfc)),
+                _ => match parse_header_fields_section(section) {
+                    Some((_, fields, negate)) => {
+                        Cow::Owned(filter_header_fields(rfc, &fields, negate))
+                    }
+                    None => continue,
+                },
+            };
             parts.push(format!(
                 "BODY[{}] {{{}}}\r\n{}",
                 section,
+                content.len(),
+                content
+            ));
+        }
+    }
+    if items_upper.contains("RFC822.HEADER") {
+        if let Some(rfc) = rfc {
+            let headers = extract_headers(rfc);
+            parts.push(format!(
+                "RFC822.HEADER {{{}}}\r\n{}",
                 headers.len(),
                 headers
             ));
-        }
-    } else if items_upper.contains("HEADER") {
-        // Bare BODY[HEADER] / BODY.PEEK[HEADER] / RFC822.HEADER.
-        if let Some(rfc) = rfc {
-            let headers = extract_headers(rfc);
-            let item = if items_upper.contains("RFC822.HEADER") {
-                "RFC822.HEADER"
-            } else {
-                "BODY[HEADER]"
-            };
-            parts.push(format!("{} {{{}}}\r\n{}", item, headers.len(), headers));
         }
     }
 
@@ -1471,31 +1483,40 @@ fn parse_store_args(args: &str) -> (String, String) {
     (seq, rest)
 }
 
-/// Whether a FETCH item list requires the real message body to be loaded.
-///
-/// Only full-body content does: `BODY[]` / `BODY.PEEK[]`, a numbered MIME part
-/// (`BODY[1]`), `BODY[TEXT]`, or a standalone `RFC822` / `RFC822.TEXT`. Items the
-/// bridge answers from metadata alone must NOT trigger an on-demand fetch:
-/// `ENVELOPE`, `BODY[HEADER...]`, `BODYSTRUCTURE`, `RFC822.SIZE`, `FLAGS`, etc.
-/// Treating header/envelope requests as body requests made the client's
-/// list-building (one such fetch per message) download the entire mailbox.
-/// Whether a FETCH item list requires the real message body to be loaded.
-///
-/// The bridge serves the full message for `BODY[]` / `BODY.PEEK[]` and a
-/// standalone `RFC822`; only those need the body. Envelope, header, size and
-/// structure items (`ENVELOPE`, `BODY[HEADER...]`, `RFC822.SIZE`,
-/// `BODYSTRUCTURE`, `FLAGS`, ...) are answered from metadata and must NOT
-/// trigger an on-demand fetch. Treating header/envelope requests as body
-/// requests made the client's list-building (one such fetch per message)
-/// download the entire mailbox.
+/// Top-level BODY sections. Partial fetches need byte responses, not strings.
+fn body_sections(items: &str) -> Option<Vec<&str>> {
+    let mut sections = Vec::new();
+    let mut rest = items;
+    while let Some(open) = rest.find('[') {
+        let name = rest[..open]
+            .rsplit(|c: char| c.is_whitespace() || c == '(')
+            .next()?;
+        let tail = &rest[open + 1..];
+        let close = tail.find(']')?;
+        if name.eq_ignore_ascii_case("BODY") || name.eq_ignore_ascii_case("BODY.PEEK") {
+            if tail[close + 1..].starts_with('<') {
+                return None;
+            }
+            sections.push(&tail[..close]);
+        }
+        rest = &tail[close + 1..];
+    }
+    Some(sections)
+}
+
+/// Only full-message and TEXT requests need an on-demand body download.
+/// Header and metadata requests must not download the whole mailbox.
 fn needs_body(items: &str) -> bool {
-    let u = items.to_ascii_uppercase();
-    if u.contains("BODY[]") || u.contains("BODY.PEEK[]") {
+    if body_sections(items)
+        .unwrap_or_default()
+        .iter()
+        .any(|s| s.is_empty() || s.eq_ignore_ascii_case("TEXT"))
+    {
         return true;
     }
-    // Standalone RFC822 (a full message), but not RFC822.SIZE / .HEADER / .TEXT.
-    u.split(|c: char| c == '(' || c == ')' || c.is_whitespace())
-        .any(|token| token == "RFC822")
+    items
+        .split(|c: char| c == '(' || c == ')' || c.is_whitespace())
+        .any(|token| token.eq_ignore_ascii_case("RFC822"))
 }
 
 /// The `(field value ...)` list of an ID command as pairs; `NIL` (no list)
@@ -2292,6 +2313,96 @@ pub(crate) mod tests {
         assert!(needs_body("(RFC822)"));
         assert!(needs_body("(FLAGS BODY.PEEK[])"));
         assert!(needs_body("BODY[]"));
+    }
+
+    #[test]
+    fn text_fetch_preserves_body_bytes_and_combines_sections() {
+        let cached = make_test_mail(1, "Test", true);
+        let content = "--boundary\r\nContent-Type: text/plain\r\n\r\nété\r\n--boundary--\r\n";
+        let body = crate::body_cache::BodyEntry {
+            details: None,
+            rfc2822: format!("Subject: Test\r\nFrom: sender@example.test\r\n\r\n{content}"),
+        };
+        for request in ["BODY.PEEK[TEXT]", "body.peek[text]", "BODY[TEXT]"] {
+            let section = request.split_once('[').unwrap().1;
+            let response = build_fetch_response(1, &cached, request, false, Some(&body));
+            assert_eq!(
+                response,
+                format!(
+                    "* 1 FETCH (BODY[{section} {{{}}}\r\n{content})\r\n",
+                    content.len()
+                )
+            );
+            assert!(needs_body(request));
+        }
+        let response = build_fetch_response(1, &cached,
+            "(BODY.PEEK[HEADER.FIELDS (subject)] BODY.PEEK[TEXT] BODY.PEEK[HEADER.FIELDS (from)] RFC822.HEADER)",
+            true, Some(&body));
+        assert_eq!(response, format!(
+            "* 1 FETCH (UID 1 BODY[HEADER.FIELDS (subject)] {{17}}\r\nSubject: Test\r\n\r\n BODY[TEXT] {{{}}}\r\n{content} BODY[HEADER.FIELDS (from)] {{29}}\r\nFrom: sender@example.test\r\n\r\n RFC822.HEADER {{44}}\r\nSubject: Test\r\nFrom: sender@example.test\r\n\r\n)\r\n",
+            content.len()));
+    }
+
+    #[test]
+    fn body_sections_handles_unicode_and_rejects_partial_fetches() {
+        assert_eq!(
+            body_sections("(é BODY.PEEK[TEXT] BODY[HEADER])"),
+            Some(vec!["TEXT", "HEADER"])
+        );
+        assert_eq!(body_sections("(NOTBODY[TEXT])"), Some(vec![]));
+        for request in ["BODY.PEEK[TEXT", "BODY.PEEK[TEXT]<0.10>", "BODY[]<1.2>"] {
+            assert!(body_sections(request).is_none(), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn text_fetch_loads_cold_body_once_and_keeps_peek_unread() {
+        let mail = make_mail("text", "Test", true);
+        let details = make_details("<p>Synthetic body</p>");
+        let expected = mail_to_rfc2822(&mail, Some(&details), &[]);
+        let content = expected.split_once("\r\n\r\n").unwrap().1;
+        let backend = Arc::new(MockBackend::with_mails(vec![mail.clone()]));
+        backend.add_details("text", details);
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store
+            .set_folder(
+                "inbox",
+                vec![StoredMail {
+                    mail,
+                    body_loaded: false,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
+            )
+            .await;
+        let mut session = ImapSession::new(store, backend.clone(), None, None);
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+        let response = session
+            .handle_command("c UID FETCH 1 (BODY.PEEK[HEADER.FIELDS (subject)])")
+            .await;
+        assert!(response[0].contains("Subject: Test"));
+        let response = session
+            .handle_command("c UID FETCH 1 (BODY.PEEK[TEXT]<0.10>)")
+            .await;
+        assert!(response[0].starts_with("c BAD "));
+        assert_eq!(*backend.details_calls.lock().unwrap(), 0);
+        for _ in 0..2 {
+            let response = session
+                .handle_command(
+                    "d UID FETCH 1 (BODY.PEEK[TEXT] BODY.PEEK[HEADER.FIELDS (subject)])",
+                )
+                .await;
+            assert!(response[0].contains(&format!("BODY[TEXT] {{{}}}\r\n{content}", content.len())));
+            assert!(
+                response[0].contains("BODY[HEADER.FIELDS (subject)] {17}\r\nSubject: Test\r\n\r\n")
+            );
+            assert_eq!(response.last().unwrap(), "d OK UID FETCH completed\r\n");
+        }
+        assert_eq!(*backend.details_calls.lock().unwrap(), 1);
+        assert!(backend.unread_calls.lock().unwrap().is_empty());
+        assert!(session.mails[0].mail.unread);
     }
 
     // =================================================================
