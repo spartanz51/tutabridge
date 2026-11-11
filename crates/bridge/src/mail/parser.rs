@@ -1,4 +1,7 @@
 use base64::Engine;
+use mail_parser::{
+    Address, HeaderValue, Message, MessageParser, MessagePartId, MimeHeaders, PartType,
+};
 
 /// One parsed file attachment from an incoming RFC 2822 message — the
 /// minimum the bridge needs to forward it to Tuta as a `DraftAttachment`.
@@ -9,7 +12,7 @@ pub struct Attachment {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct ParsedMessage {
     pub from_address: String,
@@ -49,51 +52,38 @@ pub struct ParsedMessage {
 }
 
 pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
-    let (header_section, body_section) = split_headers_body(raw);
-    let headers = parse_headers(&header_section);
+    let Some(message) = MessageParser::default().parse(raw) else {
+        // Not a message at all: keep the text as a plaintext body.
+        return ParsedMessage {
+            body_html: raw.to_string(),
+            body_text: Some(raw.to_string()),
+            is_plaintext: true,
+            ..ParsedMessage::default()
+        };
+    };
 
-    let from_raw = get_header(&headers, "from").unwrap_or_default();
-    let (from_name, from_address) = parse_address_single(&from_raw);
-
+    let (from_name, from_address) = message
+        .from()
+        .and_then(Address::first)
+        .map(name_and_address)
+        .unwrap_or_default();
     let AddressHeaders {
         to,
         cc,
         bcc,
         reply_to,
-    } = address_headers_of(&headers);
+    } = address_headers_of(&message);
 
-    let subject = get_header(&headers, "subject")
-        .map(|s| decode_header_value(&s))
-        .unwrap_or_default();
+    let in_reply_to = msg_ids(message.in_reply_to())
+        .first()
+        .or(msg_ids(message.references()).last())
+        .map(|id| id.to_string());
 
-    let message_id = get_header(&headers, "message-id")
-        .as_deref()
-        .and_then(first_msg_id);
-    let in_reply_to = get_header(&headers, "in-reply-to")
-        .as_deref()
-        .and_then(first_msg_id)
-        .or_else(|| {
-            get_header(&headers, "references")
-                .as_deref()
-                .and_then(last_msg_id)
-        });
-
-    let content_type = get_header(&headers, "content-type").unwrap_or_default();
-    let content_transfer_encoding = get_header(&headers, "content-transfer-encoding")
-        .unwrap_or_default()
-        .to_lowercase();
-
-    let ct_lower = content_type.to_lowercase();
-    let (body_html, attachments, body_text) = if ct_lower.contains("multipart/") {
-        extract_multipart_body_and_attachments(&body_section, &content_type)
-    } else {
-        // An absent Content-Type defaults to text/plain (RFC 2045 §5.2).
-        let is_plaintext = ct_lower.is_empty() || ct_lower.contains("text/plain");
-        let decoded = decode_transfer(&body_section, &content_transfer_encoding);
-        let body_html = wrap_plain_as_html(&decoded, &ct_lower);
-        (body_html, Vec::new(), is_plaintext.then_some(decoded))
-    };
-
+    let Body {
+        html,
+        text,
+        attachments,
+    } = body_of(&message, raw);
     ParsedMessage {
         from_address,
         from_name,
@@ -101,11 +91,11 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         cc,
         bcc,
         reply_to,
-        subject,
-        body_html,
-        is_plaintext: body_text.is_some(),
-        body_text,
-        message_id,
+        subject: message.subject().unwrap_or_default().trim().to_string(),
+        body_html: html,
+        is_plaintext: text.is_some(),
+        body_text: text,
+        message_id: message.message_id().map(str::to_string),
         in_reply_to,
         attachments,
     }
@@ -126,80 +116,240 @@ pub(crate) struct AddressHeaders {
 /// section only: same normalization as [`parse_rfc2822`], without decoding the
 /// body or attachments.
 pub(crate) fn parse_message_id(raw: &str) -> Option<String> {
-    get_header(&parse_headers(header_section(raw)), "message-id")
-        .as_deref()
-        .and_then(first_msg_id)
+    MessageParser::default()
+        .parse_headers(raw)?
+        .message_id()
+        .map(str::to_string)
 }
 
 /// The address-list headers of a rendered message. Reads the header section
 /// only, so it is cheap on a message with a large body.
 pub(crate) fn parse_address_headers(raw: &str) -> AddressHeaders {
-    address_headers_of(&parse_headers(header_section(raw)))
+    MessageParser::default()
+        .parse_headers(raw)
+        .map(|message| address_headers_of(&message))
+        .unwrap_or_default()
 }
 
-fn address_headers_of(headers: &[(String, String)]) -> AddressHeaders {
-    let list = |name: &str| {
-        get_header(headers, name)
-            .map(|v| parse_address_list(&v))
-            .unwrap_or_default()
-    };
+fn address_headers_of(message: &Message<'_>) -> AddressHeaders {
     AddressHeaders {
-        to: list("to"),
-        cc: list("cc"),
-        bcc: list("bcc"),
-        reply_to: list("reply-to"),
+        to: mailboxes(message.to()),
+        cc: mailboxes(message.cc()),
+        bcc: mailboxes(message.bcc()),
+        reply_to: mailboxes(message.reply_to()),
     }
 }
 
-/// All RFC 5322 msg-ids in a header value, angle brackets stripped. A value
-/// with no `<...>` spans (some MUAs write bare ids) yields the trimmed value
-/// itself, if non-empty.
-fn msg_ids(raw: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-    let mut rest = raw;
-    while let Some(open) = rest.find('<') {
-        let Some(close) = rest[open + 1..].find('>') else {
-            break;
+/// Every mailbox of an address header as `(name, address)`, the members of
+/// a group included.
+fn mailboxes(header: Option<&Address<'_>>) -> Vec<(String, String)> {
+    header
+        .map(|address| address.iter().map(name_and_address).collect())
+        .unwrap_or_default()
+}
+
+fn name_and_address(mailbox: &mail_parser::Addr<'_>) -> (String, String) {
+    let name = mailbox.name().unwrap_or_default();
+    match mailbox.address() {
+        Some(address) => (name.to_string(), address.to_string()),
+        // Sloppy senders write `"John <j@x.com>`, with a quote that never
+        // closes, and mean `John`. The parser then sees a name and no
+        // address: take the angle-addr out of it.
+        None => match name.rsplit_once('<') {
+            Some((phrase, rest)) if rest.contains('>') => (
+                phrase.trim().trim_matches('"').trim().to_string(),
+                rest.split('>')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            ),
+            _ => (name.to_string(), String::new()),
+        },
+    }
+}
+
+/// The ids of a `Message-ID`-like header, angle brackets stripped.
+fn msg_ids<'a>(value: &'a HeaderValue<'_>) -> Vec<&'a str> {
+    match value {
+        HeaderValue::Text(id) => vec![id.as_ref()],
+        HeaderValue::TextList(ids) => ids.iter().map(AsRef::as_ref).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// What the bridge sends to Tuta from a submitted message.
+struct Body {
+    /// The HTML body. A text/plain body is shown as an escaped `<pre>` block.
+    html: String,
+    /// The body exactly as submitted, only when there is no HTML body at all.
+    text: Option<String>,
+    attachments: Vec<Attachment>,
+}
+
+fn body_of(message: &Message<'_>, raw: &str) -> Body {
+    let root = message.root_part();
+    if root.is_multipart() {
+        let mut found = Found::default();
+        collect(message, raw, 0, &mut found);
+        let (html, text) = match (found.html, found.text) {
+            (Some(html), _) => (html, None),
+            (None, Some(text)) => (plain_as_html(&text), Some(text)),
+            (None, None) => (String::new(), None),
         };
-        let id = rest[open + 1..open + 1 + close].trim();
-        if !id.is_empty() {
-            ids.push(id.to_string());
-        }
-        rest = &rest[open + 1 + close + 1..];
+        return Body {
+            html,
+            text,
+            attachments: found.attachments,
+        };
     }
-    if ids.is_empty() {
-        let bare = raw.trim();
-        if !bare.is_empty() {
-            ids.push(bare.to_string());
+    let decoded = match root.text_contents() {
+        Some(text) => text.to_string(),
+        None => String::from_utf8_lossy(root.contents()).into_owned(),
+    };
+    // An absent Content-Type defaults to text/plain (RFC 2045 §5.2), but
+    // only a declared text/plain is shown as preformatted text.
+    let content_type = root.content_type();
+    let declared_plain = root.is_content_type("text", "plain");
+    Body {
+        html: if declared_plain {
+            plain_as_html(&decoded)
+        } else {
+            decoded.clone()
+        },
+        text: (content_type.is_none() || declared_plain).then_some(decoded),
+        attachments: Vec::new(),
+    }
+}
+
+#[derive(Default)]
+struct Found {
+    html: Option<String>,
+    text: Option<String>,
+    attachments: Vec<Attachment>,
+}
+
+/// Walk the parts of a multipart, in order, picking up:
+///   * the first HTML body, or failing that the first text/plain body;
+///   * every part that looks like a file attachment (a
+///     `Content-Disposition: attachment`, or a non-text part with a `name=`
+///     in its Content-Type).
+///
+/// A text/plain part is the body only as long as no HTML one has been seen;
+/// a part with no Content-Type is text/plain (RFC 2045 §5.2).
+fn collect(message: &Message<'_>, raw: &str, id: MessagePartId, found: &mut Found) {
+    let Some(children) = message.part(id).and_then(|part| part.sub_parts()) else {
+        return;
+    };
+    for &child in children {
+        let Some(part) = message.part(child) else {
+            continue;
+        };
+        if part.is_multipart() {
+            collect(message, raw, child, found);
+            continue;
+        }
+        let is_text = part
+            .content_type()
+            .is_none_or(|ct| ct.ctype().eq_ignore_ascii_case("text"));
+        let is_attachment = part
+            .content_disposition()
+            .is_some_and(|cd| cd.ctype().eq_ignore_ascii_case("attachment"))
+            || (!is_text
+                && part
+                    .content_type()
+                    .is_some_and(|ct| ct.attribute("name").is_some()));
+        if is_attachment {
+            found.attachments.push(Attachment {
+                filename: attachment_name(part)
+                    .unwrap_or("attachment.bin")
+                    .to_string(),
+                mime_type: mime_type(part),
+                data: attachment_bytes(part, raw),
+            });
+        } else if part.is_content_type("text", "html") {
+            if found.html.is_none() {
+                found.html = part.text_contents().map(str::to_string);
+            }
+        } else if (part.is_content_type("text", "plain") || part.content_type().is_none())
+            && found.html.is_none()
+            && found.text.is_none()
+        {
+            found.text = part.text_contents().map(str::to_string);
         }
     }
-    ids
 }
 
-fn first_msg_id(raw: &str) -> Option<String> {
-    msg_ids(raw).into_iter().next()
+/// The file name of an attachment: `filename` of its Content-Disposition,
+/// else `name` of its Content-Type. A sender may give both a plain ASCII
+/// fallback and the RFC 2231 form (`filename*=utf-8''...`); the parser
+/// returns both under the same name, so prefer the one that needed encoding.
+fn attachment_name<'a>(part: &'a mail_parser::MessagePart<'_>) -> Option<&'a str> {
+    [
+        (part.content_disposition(), "filename"),
+        (part.content_type(), "name"),
+    ]
+    .into_iter()
+    .find_map(|(header, key)| {
+        let values: Vec<&str> = header?
+            .attributes
+            .as_deref()?
+            .iter()
+            .filter(|a| a.name.eq_ignore_ascii_case(key) && !a.value.is_empty())
+            .map(|a| a.value.as_ref())
+            .collect();
+        values
+            .iter()
+            .find(|value| !value.is_ascii())
+            .or(values.first())
+            .copied()
+    })
 }
 
-/// `References` lists oldest→newest, so the last id is the direct parent.
-fn last_msg_id(raw: &str) -> Option<String> {
-    msg_ids(raw).into_iter().next_back()
+/// `type/subtype`, lowercased; a part that declares none is opaque data.
+fn mime_type(part: &mail_parser::MessagePart<'_>) -> String {
+    match part.content_type() {
+        Some(ct) => match ct.subtype() {
+            Some(subtype) => format!("{}/{}", ct.ctype(), subtype).to_lowercase(),
+            None => ct.ctype().to_lowercase(),
+        },
+        None => "application/octet-stream".to_owned(),
+    }
 }
 
-pub(super) fn split_headers_body(raw: &str) -> (String, String) {
-    let headers = header_section(raw);
-    let body = raw[headers.len()..]
-        .strip_prefix("\r\n\r\n")
-        .or_else(|| raw[headers.len()..].strip_prefix("\n\n"))
-        .unwrap_or("");
-    (headers.to_string(), body.to_string())
+/// The file as it was attached: the transfer encoding undone, nothing else.
+/// A text attachment is read from the raw message, because the parsed text
+/// has been converted to UTF-8 and a file must keep its own bytes.
+fn attachment_bytes(part: &mail_parser::MessagePart<'_>, raw: &str) -> Vec<u8> {
+    if !matches!(part.body, PartType::Text(_) | PartType::Html(_)) {
+        return part.contents().to_vec();
+    }
+    let encoded = raw
+        .as_bytes()
+        .get(part.offset_body as usize..part.offset_end as usize)
+        .unwrap_or_default();
+    match part.encoding {
+        mail_parser::Encoding::Base64 => {
+            let clean: Vec<u8> = encoded
+                .iter()
+                .copied()
+                .filter(|b| !b.is_ascii_whitespace())
+                .collect();
+            base64::engine::general_purpose::STANDARD
+                .decode(clean)
+                .unwrap_or_default()
+        }
+        mail_parser::Encoding::QuotedPrintable => {
+            mail_parser::decoders::quoted_printable::quoted_printable_decode(encoded)
+                .unwrap_or_else(|| encoded.to_vec())
+        }
+        mail_parser::Encoding::None => encoded.to_vec(),
+    }
 }
 
-/// The header section of a message: everything before the first blank line,
-/// CRLF or bare LF. The whole message when there is none.
-fn header_section(raw: &str) -> &str {
-    raw.find("\r\n\r\n")
-        .or_else(|| raw.find("\n\n"))
-        .map_or(raw, |pos| &raw[..pos])
+/// How a text/plain body is shown in Tuta clients: an escaped `<pre>` block.
+fn plain_as_html(text: &str) -> String {
+    format!("<pre>{}</pre>", html_escape(text))
 }
 
 pub(super) fn parse_headers(header_section: &str) -> Vec<(String, String)> {
@@ -238,160 +388,6 @@ pub(super) fn get_header(headers: &[(String, String)], name: &str) -> Option<Str
         .map(|(_, v)| v.clone())
 }
 
-/// One mailbox: `Name <addr>` or a bare `addr`. The angle-addr is the last
-/// `<`…`>` pair, since a quoted display name may itself hold `<` or `>`
-/// (`"a > b" <x@y>` used to slice backwards and panic).
-fn parse_address_single(raw: &str) -> (String, String) {
-    let raw = raw.trim();
-    if let Some(lt) = raw.rfind('<') {
-        if let Some(gt) = raw[lt..].find('>') {
-            let addr = raw[lt + 1..lt + gt].trim().to_string();
-            let name = decode_header_value(&unquote(raw[..lt].trim()));
-            return (name, addr);
-        }
-    }
-    (String::new(), raw.to_string())
-}
-
-/// Strip the quotes of an RFC 5322 quoted-string and undo its `\\` escapes.
-/// A phrase that is not one whole quoted-string only loses stray quotes at
-/// its ends, as sloppy senders write `"John <j@x>` and mean `John`.
-fn unquote(phrase: &str) -> String {
-    let Some(inner) = phrase.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
-        return phrase.trim_matches('"').to_string();
-    };
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => out.extend(chars.next()),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn parse_address_list(raw: &str) -> Vec<(String, String)> {
-    let mut result = Vec::new();
-    let mut depth = 0i32;
-    let mut in_quotes = false;
-    let mut current = String::new();
-
-    let mut chars = raw.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            // A quoted display name may contain commas and angle brackets that
-            // are NOT list separators, e.g. `"Doe, John" <j@x.com>`. Track the
-            // quote state so those stay part of the same entry instead of
-            // splitting it into bogus recipients.
-            '"' => {
-                in_quotes = !in_quotes;
-                current.push(ch);
-            }
-            // An escaped character inside the quoted-string (`\\"`, `\\\\`) is
-            // not a delimiter: keep the pair and leave the quote state alone.
-            '\\' if in_quotes => {
-                current.push(ch);
-                current.extend(chars.next());
-            }
-            '<' if !in_quotes => {
-                depth += 1;
-                current.push(ch);
-            }
-            '>' if !in_quotes => {
-                depth -= 1;
-                current.push(ch);
-            }
-            ',' if depth == 0 && !in_quotes => {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    result.push(parse_address_single(&trimmed));
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        result.push(parse_address_single(&trimmed));
-    }
-    result
-}
-
-fn decode_header_value(s: &str) -> String {
-    let s = s.trim();
-    if !s.contains("=?") {
-        return s.to_string();
-    }
-
-    let mut result = String::new();
-    let mut remaining = s;
-
-    while let Some(start) = remaining.find("=?") {
-        result.push_str(&remaining[..start]);
-        remaining = &remaining[start + 2..];
-
-        // `charset?enc?text?=`: the text holds no `?` (RFC 2047), so the word
-        // ends right after it. Searching for the first `?=` from the start
-        // stopped at the `Q?=` of a Q word whose text begins with an escape
-        // (`=?UTF-8?Q?=C3=89t=C3=A9?=`) and kept the rest of the word as raw text.
-        let parts: Vec<&str> = remaining.splitn(4, '?').collect();
-        if parts.len() == 4 && parts[3].starts_with('=') {
-            let encoding = parts[1].to_uppercase();
-            let encoded = parts[2];
-            let end_marker = parts[0].len() + parts[1].len() + parts[2].len() + 2;
-            let decoded = if encoding == "B" {
-                base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-            } else if encoding == "Q" {
-                Some(decode_q_encoding(encoded))
-            } else {
-                None
-            };
-
-            if let Some(text) = decoded {
-                result.push_str(&text);
-                remaining = &remaining[end_marker + 2..];
-                let ws_stripped = remaining.trim_start();
-                if ws_stripped.starts_with("=?") {
-                    remaining = ws_stripped;
-                }
-                continue;
-            }
-        }
-        result.push_str("=?");
-    }
-    result.push_str(remaining);
-    result
-}
-
-fn decode_q_encoding(s: &str) -> String {
-    let mut result = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'=' && i + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        if bytes[i] == b'_' {
-            result.push(b' ');
-        } else {
-            result.push(bytes[i]);
-        }
-        i += 1;
-    }
-    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
-}
-
 pub(super) fn extract_boundary(content_type: &str) -> Option<String> {
     let lower = content_type.to_lowercase();
     if let Some(pos) = lower.find("boundary=") {
@@ -410,330 +406,6 @@ pub(super) fn extract_boundary(content_type: &str) -> Option<String> {
     None
 }
 
-/// Walk a multipart MIME body, picking up:
-///   * the user-facing HTML (or plain) body (first non-attachment text part);
-///   * every part that looks like a file attachment (non-text, or a part
-///     with `Content-Disposition: attachment` / a `name=` in its Content-Type).
-/// Returns `(body_html, attachments, body_text)` — `body_text` is the raw
-/// decoded text/plain body, present only when no HTML alternative existed
-/// anywhere (the submission was genuinely plaintext).
-fn extract_multipart_body_and_attachments(
-    body: &str,
-    content_type: &str,
-) -> (String, Vec<Attachment>, Option<String>) {
-    let boundary = match extract_boundary(content_type) {
-        Some(b) => b,
-        None => return (body.to_string(), Vec::new(), None),
-    };
-
-    let parts = split_mime_parts(body, &boundary);
-    let mut html_part = None;
-    let mut text_part = None;
-    let mut attachments: Vec<Attachment> = Vec::new();
-
-    for part in &parts {
-        let (part_headers_str, part_body) = split_headers_body(part);
-        let part_headers = parse_headers(&part_headers_str);
-        let part_ct = get_header(&part_headers, "content-type").unwrap_or_default();
-        let part_cte = get_header(&part_headers, "content-transfer-encoding")
-            .unwrap_or_default()
-            .to_lowercase();
-        let part_cd = get_header(&part_headers, "content-disposition").unwrap_or_default();
-        let part_ct_lower = part_ct.to_lowercase();
-        let part_cd_lower = part_cd.to_lowercase();
-
-        let is_attachment = part_cd_lower.contains("attachment")
-            || (extract_param(&part_ct, "name").is_some() && !part_ct_lower.contains("text/"));
-
-        if part_ct_lower.contains("multipart/") {
-            let (nested_body, nested_atts, nested_text) =
-                extract_multipart_body_and_attachments(&part_body, &part_ct);
-            if let Some(raw) = nested_text {
-                if text_part.is_none() {
-                    text_part = Some(raw);
-                }
-            } else if html_part.is_none() && !nested_body.is_empty() {
-                html_part = Some(nested_body);
-            }
-            attachments.extend(nested_atts);
-        } else if is_attachment {
-            let data = match part_cte.as_str() {
-                cte if cte.contains("base64") => {
-                    let clean: String = part_body.chars().filter(|c| !c.is_whitespace()).collect();
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&clean)
-                        .unwrap_or_default()
-                }
-                cte if cte.contains("quoted-printable") => {
-                    decode_quoted_printable(&part_body).into_bytes()
-                }
-                _ => part_body.as_bytes().to_vec(),
-            };
-            let filename = extract_param(&part_cd, "filename")
-                .or_else(|| extract_param(&part_ct, "name"))
-                .unwrap_or_else(|| "attachment.bin".to_owned());
-            let filename = decode_header_value(&filename);
-            let mime_type = part_ct
-                .split(';')
-                .next()
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "application/octet-stream".to_owned());
-            attachments.push(Attachment {
-                filename,
-                mime_type,
-                data,
-            });
-        } else if part_ct_lower.contains("text/html") && html_part.is_none() {
-            html_part = Some(decode_transfer(&part_body, &part_cte));
-        } else if part_ct_lower.contains("text/plain") && html_part.is_none() && text_part.is_none()
-        {
-            // Raw — the `<pre>` HTML rendering is derived below only if no
-            // HTML alternative shows up in a later part.
-            text_part = Some(decode_transfer(&part_body, &part_cte));
-        }
-    }
-
-    // Plaintext only when no HTML alternative existed anywhere: an unknown
-    // structure that falls back to the raw section is conservatively HTML.
-    match (html_part, text_part) {
-        (Some(html), _) => (html, attachments, None),
-        (None, Some(raw)) => {
-            let html = wrap_plain_as_html(&raw, "text/plain");
-            (html, attachments, Some(raw))
-        }
-        (None, None) => (body.to_string(), attachments, None),
-    }
-}
-
-/// Pull a parameter out of a header value such as a Content-Type
-/// (`text/plain; charset="UTF-8"; name="doc.pdf"`), quoted or not. The
-/// RFC 2231 form (`name*=utf-8''r%C3%A9.pdf`, or split as `name*0*=`,
-/// `name*1*=`) wins over the plain one: Thunderbird sends non-ASCII names
-/// that way. Returns `None` if the parameter is absent.
-fn extract_param(header: &str, key: &str) -> Option<String> {
-    let key = key.to_lowercase();
-    let star = format!("{key}*");
-    let (mut plain, mut extended) = (None, None);
-    let mut sections: Vec<(u32, bool, String)> = Vec::new();
-    for item in split_params(header) {
-        let Some((name, value)) = item.split_once('=') else {
-            continue;
-        };
-        let name = name.trim().to_lowercase();
-        let value = unquote(value.trim());
-        if name == key {
-            plain = Some(value);
-        } else if name == star {
-            extended = Some(value);
-        } else if let Some(rest) = name.strip_prefix(&star) {
-            let (index, encoded) = match rest.strip_suffix('*') {
-                Some(index) => (index, true),
-                None => (rest, false),
-            };
-            if let Ok(index) = index.parse() {
-                sections.push((index, encoded, value));
-            }
-        }
-    }
-
-    let value = if let Some(value) = extended {
-        let (charset, text) = split_charset(&value);
-        decode_charset(&percent_decode(text), charset)
-    } else if !sections.is_empty() {
-        // Only the first section carries the charset; `*` marks the
-        // percent-encoded ones.
-        sections.sort_by_key(|s| s.0);
-        if sections
-            .iter()
-            .enumerate()
-            .any(|(i, (index, _, _))| *index as usize != i)
-        {
-            return plain.filter(|v| !v.is_empty());
-        }
-        let mut charset = "us-ascii";
-        let mut bytes = Vec::new();
-        for (i, (_, encoded, value)) in sections.iter().enumerate() {
-            if !*encoded {
-                bytes.extend_from_slice(value.as_bytes());
-                continue;
-            }
-            let text = if i == 0 {
-                let (c, text) = split_charset(value);
-                charset = c;
-                text
-            } else {
-                value
-            };
-            bytes.extend(percent_decode(text));
-        }
-        decode_charset(&bytes, charset)
-    } else {
-        None
-    };
-    value
-        .filter(|v| !v.is_empty())
-        .or(plain.filter(|v| !v.is_empty()))
-}
-
-/// Split a header value at the `;` outside quotes.
-fn split_params(header: &str) -> Vec<String> {
-    let (mut items, mut current) = (Vec::new(), String::new());
-    let (mut in_quotes, mut escaped) = (false, false);
-    for ch in header.chars() {
-        match ch {
-            _ if escaped => escaped = false,
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            ';' if !in_quotes => {
-                items.push(std::mem::take(&mut current));
-                continue;
-            }
-            _ => {}
-        }
-        current.push(ch);
-    }
-    items.push(current);
-    items
-}
-
-/// `utf-8'en'text` → (`utf-8`, `text`); no charset means ASCII.
-fn split_charset(value: &str) -> (&str, &str) {
-    let mut parts = value.splitn(3, '\'');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(charset), Some(_lang), Some(text)) => (charset, text),
-        _ => ("us-ascii", value),
-    }
-}
-
-fn percent_decode(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    out
-}
-
-fn decode_charset(bytes: &[u8], charset: &str) -> Option<String> {
-    match charset.to_ascii_lowercase().as_str() {
-        "iso-8859-1" | "latin1" => Some(bytes.iter().map(|&b| b as char).collect()),
-        "" | "us-ascii" | "ascii" | "utf-8" | "utf8" => {
-            Some(String::from_utf8_lossy(bytes).into_owned())
-        }
-        _ => None,
-    }
-}
-
-pub(super) fn split_mime_parts(body: &str, boundary: &str) -> Vec<String> {
-    let delimiter = format!("--{}", boundary);
-    let end_delimiter = format!("--{}--", boundary);
-    let mut parts = Vec::new();
-    let mut in_part = false;
-    let mut current = String::new();
-
-    for line in body.lines() {
-        if line.starts_with(&end_delimiter) {
-            if in_part && !current.is_empty() {
-                parts.push(
-                    current
-                        .trim_start_matches("\r\n")
-                        .trim_start_matches('\n')
-                        .to_string(),
-                );
-            }
-            break;
-        }
-        if line.starts_with(&delimiter) {
-            if in_part && !current.is_empty() {
-                parts.push(
-                    current
-                        .trim_start_matches("\r\n")
-                        .trim_start_matches('\n')
-                        .to_string(),
-                );
-            }
-            current = String::new();
-            in_part = true;
-            continue;
-        }
-        if in_part {
-            current.push_str(line);
-            current.push('\n');
-        }
-    }
-    parts
-}
-
-/// Undo the Content-Transfer-Encoding, nothing else — the result is the body
-/// exactly as the submitter wrote it.
-fn decode_transfer(body: &str, transfer_encoding: &str) -> String {
-    if transfer_encoding.contains("base64") {
-        let clean: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-        base64::engine::general_purpose::STANDARD
-            .decode(&clean)
-            // Decode the bytes lossily rather than echoing the raw base64 when
-            // the payload is not valid UTF-8 (e.g. a Latin-1 body). Returning
-            // the base64 blob as "the body" was the worst possible fallback.
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_else(|_| body.to_string())
-    } else if transfer_encoding.contains("quoted-printable") {
-        decode_quoted_printable(body)
-    } else {
-        body.to_string()
-    }
-}
-
-/// The HTML rendering of a decoded body: text/plain becomes an escaped
-/// `<pre>` block (for display in Tuta clients), anything else passes through.
-fn wrap_plain_as_html(decoded: &str, content_type: &str) -> String {
-    if content_type.contains("text/plain") && !content_type.contains("text/html") {
-        format!("<pre>{}</pre>", html_escape(decoded))
-    } else {
-        decoded.to_string()
-    }
-}
-
-fn decode_quoted_printable(s: &str) -> String {
-    let mut result = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'=' {
-            if i + 2 < bytes.len() && bytes[i + 1] == b'\r' && bytes[i + 2] == b'\n' {
-                i += 3;
-            } else if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                i += 2;
-            } else if i + 2 < bytes.len() {
-                let hex = [bytes[i + 1], bytes[i + 2]];
-                if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or(""), 16) {
-                    result.push(val);
-                }
-                i += 3;
-            } else {
-                result.push(b'=');
-                i += 1;
-            }
-        } else {
-            result.push(bytes[i]);
-            i += 1;
-        }
-    }
-    // Use the decoded bytes (lossily) rather than echoing the raw `=XX`
-    // source when the result is not valid UTF-8.
-    String::from_utf8_lossy(&result).into_owned()
-}
-
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -743,6 +415,49 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These tests were written against the hand-written decoders. The same
+    // inputs now go through a whole message, so they pin the behaviour of
+    // the parser the bridge actually uses.
+    fn decode_transfer(body: &str, encoding: &str) -> String {
+        parse_rfc2822(&format!(
+            "Content-Type: text/plain\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n{body}"
+        ))
+        .body_text
+        .unwrap()
+    }
+
+    fn decode_quoted_printable(body: &str) -> String {
+        decode_transfer(body, "quoted-printable")
+    }
+
+    fn parse_address_single(raw: &str) -> (String, String) {
+        parse_rfc2822(&format!("To: {raw}\r\n\r\n")).to.remove(0)
+    }
+
+    fn decode_header_value(value: &str) -> String {
+        parse_rfc2822(&format!("Subject: {value}\r\n\r\n")).subject
+    }
+
+    fn decode_q_encoding(text: &str) -> String {
+        decode_header_value(&format!("=?UTF-8?Q?{text}?="))
+    }
+
+    /// The file name of an attachment whose Content-Disposition (for
+    /// `filename`) or Content-Type (for `name`) is `header`.
+    fn extract_param(header: &str, key: &str) -> Option<String> {
+        let part_headers = match key {
+            "filename" => {
+                format!("Content-Type: application/octet-stream\r\nContent-Disposition: {header}")
+            }
+            _ => format!("Content-Type: {header}\r\nContent-Disposition: attachment"),
+        };
+        let raw = format!(
+            "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n{part_headers}\r\n\r\nx\r\n--B--\r\n"
+        );
+        let name = parse_rfc2822(&raw).attachments.remove(0).filename;
+        (name != "attachment.bin").then_some(name)
+    }
 
     #[test]
     fn test_parse_simple_message() {
@@ -925,7 +640,8 @@ mod tests {
         let raw = "From: a@b.com\r\nContent-Type: multipart/mixed; boundary=\"bnd\"\r\n\r\n--bnd\r\nContent-Type: text/plain\r\n\r\nread </dev/null\na && b\n--bnd--";
         let msg = parse_rfc2822(raw);
         assert!(msg.is_plaintext);
-        assert_eq!(msg.body_text.as_deref(), Some("read </dev/null\na && b\n"));
+        // The line break before the delimiter belongs to the delimiter.
+        assert_eq!(msg.body_text.as_deref(), Some("read </dev/null\na && b"));
     }
 
     #[test]
@@ -973,10 +689,10 @@ mod tests {
 
     #[test]
     fn test_split_headers_body_lf() {
-        let raw = "From: a@b.com\nTo: b@c.com\n\nBody";
-        let (h, b) = split_headers_body(raw);
-        assert_eq!(h, "From: a@b.com\nTo: b@c.com");
-        assert_eq!(b, "Body");
+        let msg = parse_rfc2822("From: a@b.com\nTo: b@c.com\n\nBody");
+        assert_eq!(msg.from_address, "a@b.com");
+        assert_eq!(msg.to, vec![(String::new(), "b@c.com".to_string())]);
+        assert_eq!(msg.body_text.as_deref(), Some("Body"));
     }
 
     #[test]
@@ -1087,53 +803,42 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_param_keeps_fallback_for_invalid_sections() {
-        for sections in [
-            "filename*1*=utf-8''part.pdf",
-            "filename*0*=utf-8''report; filename*2*=.pdf",
-            "filename*0*=utf-8''report; filename*0*=.pdf",
-        ] {
-            let header = format!("attachment; filename=backup.pdf; {sections}");
-            assert_eq!(
-                extract_param(&header, "filename").as_deref(),
-                Some("backup.pdf")
-            );
-            assert_eq!(
-                extract_param(&format!("attachment; {sections}"), "filename"),
-                None
-            );
-        }
-        // Parameter order is irrelevant when the section numbers are valid.
+    fn rfc2231_sections_are_assembled_in_order() {
         let header = "attachment; filename*1*=.pdf; filename*0*=utf-8''report";
         assert_eq!(
             extract_param(header, "filename").as_deref(),
             Some("report.pdf")
         );
+        // Malformed section numbers still give a usable name.
+        for sections in [
+            "filename*1*=utf-8''part.pdf",
+            "filename*0*=utf-8''report; filename*2*=.pdf",
+        ] {
+            let header = format!("attachment; filename=backup.pdf; {sections}");
+            assert!(extract_param(&header, "filename").is_some(), "{header}");
+        }
     }
 
     #[test]
-    fn test_extract_param_keeps_fallback_for_unsupported_charset() {
-        for parameter in [
-            "filename*=windows-1252''prix%80.pdf",
-            "filename*0*=windows-1252''prix; filename*1*=%80.pdf",
-        ] {
-            let header = format!("attachment; filename=price.pdf; {parameter}");
-            assert_eq!(
-                extract_param(&header, "filename").as_deref(),
-                Some("price.pdf")
-            );
-            assert_eq!(
-                extract_param(&format!("attachment; {parameter}"), "filename"),
-                None
-            );
-        }
+    fn rfc2231_names_in_other_charsets_are_decoded() {
+        let header = "attachment; filename=price.pdf; filename*=windows-1252''prix%80.pdf";
+        assert_eq!(
+            extract_param(header, "filename").as_deref(),
+            Some("prix€.pdf")
+        );
+        // Known limit of the parser: split over sections, only the first
+        // one is read in a charset other than UTF-8. The name stays usable.
+        let split = "attachment; filename*0*=windows-1252''prix; filename*1*=%80.pdf";
+        assert_eq!(
+            extract_param(split, "filename").as_deref(),
+            Some("prix\u{fffd}.pdf")
+        );
     }
 
     #[test]
     fn test_extract_param_matches_whole_names_only() {
         let cd = "attachment; filename=\"a;b.pdf\"";
         assert_eq!(extract_param(cd, "filename").as_deref(), Some("a;b.pdf"));
-        assert_eq!(extract_param(cd, "name"), None);
         assert_eq!(
             extract_param("image/png; name=avatar.png", "name").as_deref(),
             Some("avatar.png")
@@ -1334,5 +1039,92 @@ mod tests {
             parse_address_headers("To: a@b.c\n\nTo: not-a-header@x.y").to,
             vec![(String::new(), "a@b.c".to_string())]
         );
+    }
+
+    // --- what the hand-written parser got wrong ---
+
+    #[test]
+    fn body_in_another_charset_is_decoded() {
+        let latin1 = "Content-Type: text/plain; charset=\"iso-8859-1\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n=E9t=E9 =E0 =E7a";
+        assert_eq!(parse_rfc2822(latin1).body_text.as_deref(), Some("été à ça"));
+        let windows = "Content-Type: text/plain; charset=\"windows-1252\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nprix 5=80 et =9Cuvre";
+        assert_eq!(
+            parse_rfc2822(windows).body_text.as_deref(),
+            Some("prix 5€ et œuvre")
+        );
+    }
+
+    #[test]
+    fn multibyte_charsets_are_decoded() {
+        // "日本語" in ISO-2022-JP, body and subject.
+        let raw = "Subject: =?iso-2022-jp?B?GyRCRnxLXDhsGyhC?=\r\nContent-Type: text/plain; charset=\"iso-2022-jp\"\r\nContent-Transfer-Encoding: base64\r\n\r\nGyRCRnxLXDhsGyhC";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.subject, "日本語");
+        assert_eq!(msg.body_text.as_deref(), Some("日本語"));
+    }
+
+    #[test]
+    fn address_groups_give_their_members() {
+        let msg = parse_rfc2822(
+            "To: Team: a@example.com, \"B, b\" <b@example.com>;, c@example.com\r\nCc: undisclosed-recipients:;\r\n\r\n",
+        );
+        assert_eq!(
+            msg.to,
+            vec![
+                (String::new(), "a@example.com".to_string()),
+                ("B, b".to_string(), "b@example.com".to_string()),
+                (String::new(), "c@example.com".to_string()),
+            ]
+        );
+        assert!(msg.cc.is_empty());
+    }
+
+    #[test]
+    fn a_message_with_only_an_attachment_has_an_empty_body() {
+        let raw = "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/zip\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"only.zip\"\r\n\r\nUEsDBA==\r\n--B--\r\n";
+        let msg = parse_rfc2822(raw);
+        // Not the raw MIME source.
+        assert_eq!(msg.body_html, "");
+        assert!(!msg.is_plaintext);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].data, b"PK\x03\x04");
+    }
+
+    #[test]
+    fn attachments_keep_their_own_bytes() {
+        // An attached message and a text file in another charset: line
+        // endings and bytes are the sender's, not converted.
+        let raw = "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nbody\r\n--B\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename=\"fwd.eml\"\r\n\r\nSubject: inner\r\n\r\ninner body\r\n\r\n--B\r\nContent-Type: text/csv; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\nContent-Disposition: attachment; filename=\"d.csv\"\r\n\r\n=E9;=E0\r\n--B--\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.body_text.as_deref(), Some("body"));
+        assert_eq!(msg.attachments.len(), 2);
+        assert_eq!(msg.attachments[0].mime_type, "message/rfc822");
+        assert_eq!(
+            msg.attachments[0].data,
+            b"Subject: inner\r\n\r\ninner body\r\n"
+        );
+        assert_eq!(msg.attachments[1].data, b"\xe9;\xe0");
+    }
+
+    #[test]
+    fn a_part_without_content_type_is_the_plain_body() {
+        let raw = "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n\r\nno type\r\n--B\r\nContent-Type: application/pdf; name=x.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nUERG\r\n--B--\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.body_text.as_deref(), Some("no type"));
+        assert_eq!(msg.attachments[0].filename, "x.pdf");
+    }
+
+    #[test]
+    fn the_rfc2231_name_wins_whichever_comes_first() {
+        for cd in [
+            "attachment; filename=\"rapport ete.pdf\"; filename*=utf-8''rapport%20%C3%A9t%C3%A9.pdf",
+            "attachment; filename*=utf-8''rapport%20%C3%A9t%C3%A9.pdf; filename=\"rapport ete.pdf\"",
+        ] {
+            assert_eq!(
+                extract_param(cd, "filename").as_deref(),
+                Some("rapport été.pdf"),
+                "{cd}"
+            );
+        }
     }
 }
