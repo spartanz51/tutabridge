@@ -49,6 +49,7 @@ hex = "0.4"
 html5gum = { version = "0.8.4", default-features = false }
 # MIME structure of rendered messages: part boundaries and their offsets.
 mail-parser = { version = "0.11", default-features = false }
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing", "macros"] }
 
 # OS keychain backend — one per platform so the CLI builds (and packages,
 # e.g. on the AUR) on Linux/Windows, not just macOS. Linux uses the

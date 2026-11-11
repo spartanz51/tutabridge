@@ -219,14 +219,11 @@ fn sanitize_segment(s: &str) -> String {
 /// Compact, sortable `YYYYMMDD-HHMMSS` stamp from an epoch-millis value, used
 /// as a filename prefix so a folder listing sorts chronologically.
 fn date_stamp(millis: u64) -> String {
-    let secs = millis / 1000;
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let (y, m, d) = crate::mail::rfc2822::days_to_ymd(days);
-    let h = tod / 3600;
-    let mi = (tod % 3600) / 60;
-    let s = tod % 60;
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, h, mi, s)
+    crate::mail::rfc2822::utc_datetime(millis)
+        .format(time::macros::format_description!(
+            "[year][month][day]-[hour][minute][second]"
+        ))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
