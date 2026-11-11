@@ -670,6 +670,10 @@ impl ImapSession {
                 Some(eid) if needs_body(&items) && self.mails[idx].body_loaded => {
                     self.store.get_body(eid).await
                 }
+                // A numbered part is served from a body the bridge already
+                // holds, on disk included, and never downloads one: clients
+                // ask for part 1 of every listed message to build previews.
+                Some(eid) if wants_body_part(&items) => self.store.get_body(eid).await,
                 Some(eid) if fetch_items_use_content(&items) => self.store.bodies().cached(eid),
                 _ => None,
             };
@@ -1216,16 +1220,9 @@ fn build_fetch_response(
     } in body_sections(items).unwrap_or_default()
     {
         if let Some(rfc) = rfc {
-            let content = match section.to_ascii_uppercase().as_str() {
-                "" => Cow::Borrowed(rfc),
-                "TEXT" => Cow::Borrowed(rfc.split_once("\r\n\r\n").map_or("", |(_, body)| body)),
-                "HEADER" => Cow::Owned(extract_headers(rfc)),
-                _ => match parse_header_fields_section(section) {
-                    Some((_, fields, negate)) => {
-                        Cow::Owned(filter_header_fields(rfc, &fields, negate))
-                    }
-                    None => continue,
-                },
+            let real = body.map(|b| b.rfc2822.as_str());
+            let Some(content) = section_content(rfc, real, section) else {
+                continue;
             };
             let bytes = content.as_bytes();
             let (content, origin) = match partial {
@@ -1489,6 +1486,34 @@ fn parse_store_args(args: &str) -> (String, String) {
     let seq = parts.first().unwrap_or(&"").to_string();
     let rest = parts.get(1).unwrap_or(&"").to_string();
     (seq, rest)
+}
+
+/// The octets of one BODY section, `None` for a section that cannot be
+/// served. `rfc` is the message as rendered for this FETCH, which is a
+/// placeholder with a stub body when `real`, the downloaded message, is
+/// absent: enough for header sections, never for a numbered part.
+fn section_content<'a>(rfc: &'a str, real: Option<&'a str>, section: &str) -> Option<Cow<'a, str>> {
+    let upper = section.to_ascii_uppercase();
+    match upper.as_str() {
+        "" => Some(Cow::Borrowed(rfc)),
+        "TEXT" => Some(Cow::Borrowed(
+            rfc.split_once("\r\n\r\n").map_or("", |(_, body)| body),
+        )),
+        "HEADER" => Some(Cow::Owned(extract_headers(rfc))),
+        _ if upper.starts_with("HEADER.FIELDS") => {
+            let (_, fields, negate) = parse_header_fields_section(section)?;
+            Some(Cow::Owned(filter_header_fields(rfc, &fields, negate)))
+        }
+        _ => crate::mail::mime::section(real?, section),
+    }
+}
+
+/// Whether a FETCH asks for a numbered MIME part (`BODY[1]`, `BODY[2.MIME]`).
+fn wants_body_part(items: &str) -> bool {
+    body_sections(items)
+        .unwrap_or_default()
+        .iter()
+        .any(|s| s.name.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 #[derive(Debug, PartialEq)]
@@ -2548,6 +2573,100 @@ pub(crate) mod tests {
             writer,
             b"* 1 FETCH (UID 1 BODY[TEXT]<2> {1}\r\n\xa9)\r\ne OK UID FETCH completed\r\n"
         );
+    }
+
+    /// Geary and Convey build each list preview from the first 256 octets of
+    /// part 1 and its MIME header (#118).
+    #[tokio::test]
+    async fn numbered_parts_are_served_from_a_held_body_without_downloading() {
+        let mail = make_mail("text", "Test", true);
+        let details = make_details("<p>Synthetic body</p>");
+        let rfc = mail_to_rfc2822(&mail, Some(&details), &[]);
+        let backend = Arc::new(MockBackend::with_mails(vec![mail.clone()]));
+        backend.add_details("text", details);
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store
+            .set_folder(
+                "inbox",
+                vec![StoredMail {
+                    mail,
+                    body_loaded: false,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
+            )
+            .await;
+        let mut session = ImapSession::new(store, backend.clone(), None, None);
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+
+        // Not downloaded yet: no data, and the preview does not fetch it.
+        for command in [
+            "c uid fetch 1 body.peek[1]<0.256>",
+            "c uid fetch 1 body.peek[1.mime]",
+            "c UID FETCH 1 (BODY[1])",
+        ] {
+            assert_eq!(
+                session.handle_command(command).await,
+                ["* 1 FETCH (UID 1)\r\n", "c OK UID FETCH completed\r\n"],
+                "{command}"
+            );
+        }
+        assert_eq!(*backend.details_calls.lock().unwrap(), 0);
+
+        session.store.bodies().insert(
+            "text",
+            crate::body_cache::BodyEntry {
+                details: None,
+                rfc2822: rfc,
+            },
+        );
+        let plain = base64::engine::general_purpose::STANDARD.encode("Synthetic body\n");
+        assert_eq!(
+            session
+                .handle_command("d uid fetch 1 body.peek[1]<0.256>")
+                .await[0],
+            format!(
+                "* 1 FETCH (UID 1 BODY[1]<0> {{{}}}\r\n{plain})\r\n",
+                plain.len()
+            )
+        );
+        assert_eq!(
+            session.handle_command("e uid fetch 1 body.peek[1.mime]").await[0],
+            "* 1 FETCH (UID 1 BODY[1.mime] {78}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n)\r\n"
+        );
+        // The size BODYSTRUCTURE announces for part 1 is what BODY[1] returns.
+        let response = session
+            .handle_command("f UID FETCH 1 (BODYSTRUCTURE BODY.PEEK[1] BODY.PEEK[3])")
+            .await;
+        assert!(response[0].contains(&format!("\"BASE64\" {} 1)", plain.len())));
+        assert!(response[0].ends_with(&format!(" BODY[1] {{{}}}\r\n{plain})\r\n", plain.len())));
+        assert_eq!(*backend.details_calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn numbered_parts_never_come_from_the_placeholder() {
+        let cached = make_test_mail(1, "Test", true);
+        // Without the downloaded body the message is a stub: its header
+        // sections are real, its parts are not.
+        let response = build_fetch_response(
+            1,
+            &cached,
+            "(BODY.PEEK[1] BODY.PEEK[1.MIME] BODY.PEEK[HEADER.FIELDS (Subject)])",
+            false,
+            None,
+        );
+        assert_eq!(
+            response,
+            "* 1 FETCH (BODY[HEADER.FIELDS (Subject)] {17}\r\nSubject: Test\r\n\r\n)\r\n"
+        );
+        assert!(wants_body_part("(UID BODY.PEEK[1]<0.256>)"));
+        assert!(wants_body_part("body.peek[2.mime]"));
+        assert!(!wants_body_part(
+            "(BODY.PEEK[TEXT] BODY[] BODY[HEADER] RFC822.SIZE)"
+        ));
+        assert!(!needs_body("(BODY.PEEK[1] BODY.PEEK[1.MIME])"));
     }
 
     /// The commands Geary and Convey send to list and open a message (#118):

@@ -1279,6 +1279,29 @@ mod tests {
         let alt_pos = bs.find("\"ALTERNATIVE\"").unwrap();
         let pdf_pos = bs.find("\"PDF\"").unwrap();
         assert!(alt_pos < pdf_pos);
+
+        // The parts a client fetches by number are the ones the structure
+        // announces, octet for octet.
+        let part = |spec| crate::mail::mime::section(&rfc, spec).unwrap();
+        assert_eq!(part("1.2"), body_b64);
+        assert_eq!(part("2"), pdf_b64);
+        assert_eq!(
+            part("1.MIME"),
+            "Content-Type: multipart/alternative; boundary=\"=_TutaBridgeAlt_list_att_elem_att\"\r\n\r\n"
+        );
+        let sizes: Vec<String> = ["1.1", "1.2", "2"]
+            .iter()
+            .map(|spec| format!("\"BASE64\" {}", part(spec).len()))
+            .collect();
+        let found: Vec<&str> = bs
+            .match_indices("\"BASE64\" ")
+            .map(|(i, _)| {
+                let end = i + 9 + bs[i + 9..].find([' ', ')']).unwrap();
+                &bs[i..end]
+            })
+            .collect();
+        assert_eq!(found, sizes);
+        assert!(crate::mail::mime::section(&rfc, "3").is_none());
     }
 
     #[test]
