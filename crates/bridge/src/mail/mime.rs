@@ -4,86 +4,56 @@
 //! numbers and sizes a client learns from the first always match the octets
 //! it gets from the second.
 
-use super::parser::{extract_boundary, get_header, parse_headers};
+use mail_parser::{MessageParser, MessagePartId, PartType};
 use std::borrow::Cow;
+
+/// A message parsed into its MIME parts. Parsing and part boundaries are
+/// `mail-parser`'s; this only maps its offsets back onto the raw message.
+pub(crate) struct Tree<'a> {
+    raw: &'a str,
+    message: mail_parser::Message<'a>,
+}
 
 /// A message or one of its body parts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Entity<'a> {
     /// The header block, with the blank line that ends it.
     pub head: &'a str,
+    /// The body. The line break before a MIME delimiter belongs to the
+    /// delimiter (RFC 2046 §5.1.1), not to the part it ends.
     pub body: &'a str,
 }
 
-impl<'a> Entity<'a> {
-    pub fn parse(raw: &'a str) -> Self {
-        // A part may have no header at all: it then starts with the blank line.
-        let blank = ["\r\n", "\n"].into_iter().find(|eol| raw.starts_with(eol));
-        let split = match blank {
-            Some(eol) => eol.len(),
-            None => match raw
-                .find("\r\n\r\n")
-                .map(|pos| pos + 4)
-                .or_else(|| raw.find("\n\n").map(|pos| pos + 2))
-            {
-                Some(end) => end,
-                None => raw.len(),
-            },
-        };
-        Self {
-            head: &raw[..split],
-            body: &raw[split..],
-        }
+impl<'a> Tree<'a> {
+    /// `None` for input that holds no message at all.
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        let message = MessageParser::default().parse(raw)?;
+        (!message.parts.is_empty()).then_some(Self { raw, message })
     }
 
-    /// Header fields, names lowercased.
-    pub fn headers(&self) -> Vec<(String, String)> {
-        parse_headers(self.head.trim_end_matches(['\r', '\n']))
+    /// The message itself.
+    pub const ROOT: MessagePartId = 0;
+
+    pub fn entity(&self, id: MessagePartId) -> Option<Entity<'a>> {
+        let part = self.message.parts.get(id as usize)?;
+        Some(Entity {
+            head: self
+                .raw
+                .get(part.offset_header as usize..part.offset_body as usize)?,
+            body: self
+                .raw
+                .get(part.offset_body as usize..part.offset_end as usize)?,
+        })
     }
 
-    /// The parts of a multipart entity with a usable boundary; `None` for
-    /// anything else, which is then a single part.
-    pub fn children(&self) -> Option<Vec<Entity<'a>>> {
-        let content_type = get_header(&self.headers(), "content-type")?;
-        if !content_type.to_ascii_lowercase().starts_with("multipart/") {
-            return None;
+    /// The parts of a multipart entity; `None` for anything else, which is
+    /// then a single part.
+    pub fn children(&self, id: MessagePartId) -> Option<&[MessagePartId]> {
+        match &self.message.parts.get(id as usize)?.body {
+            PartType::Multipart(parts) if !parts.is_empty() => Some(parts),
+            _ => None,
         }
-        let boundary = extract_boundary(&content_type)?;
-        Some(
-            split_parts(self.body, &boundary)
-                .into_iter()
-                .map(Entity::parse)
-                .collect(),
-        )
     }
-}
-
-/// The raw parts between the delimiter lines of a multipart body. The line
-/// break before a delimiter belongs to the delimiter (RFC 2046 §5.1.1), not
-/// to the part it ends. A part with no closing delimiter is dropped.
-fn split_parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
-    let delimiter = format!("--{boundary}");
-    let mut parts = Vec::new();
-    let mut start = None;
-    let mut pos = 0;
-    for line in body.split_inclusive('\n') {
-        if let Some(rest) = line.strip_prefix(&delimiter) {
-            if let Some(start) = start.filter(|&start| start < pos) {
-                let part = &body[start..pos];
-                let part = part
-                    .strip_suffix("\r\n")
-                    .or_else(|| part.strip_suffix('\n'))
-                    .unwrap_or(part);
-                parts.push(part);
-            }
-            if rest.starts_with("--") {
-                break;
-            }
-            start = Some(pos + line.len());
-        }
-        pos += line.len();
-    }
-    parts
 }
 
 /// The octets of a numbered `BODY` section (RFC 3501 §6.4.5): `1`, `2.1`,
@@ -92,16 +62,18 @@ fn split_parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
 /// embedded message and the bridge renders none.
 pub(crate) fn section<'a>(message: &'a str, spec: &str) -> Option<Cow<'a, str>> {
     let (path, modifier) = parse_spec(spec)?;
-    let mut entity = Entity::parse(message);
+    let tree = Tree::parse(message)?;
+    let mut id = Tree::ROOT;
     // A message that is not multipart has exactly one part, itself.
     let mut whole_message = false;
     for (depth, &number) in path.iter().enumerate() {
-        match entity.children() {
-            Some(parts) => entity = *parts.get(number - 1)?,
+        match tree.children(id) {
+            Some(parts) => id = *parts.get(number - 1)?,
             None if depth == 0 && path == [1] => whole_message = true,
             None => return None,
         }
     }
+    let entity = tree.entity(id)?;
     match modifier {
         "" => Some(Cow::Borrowed(entity.body)),
         // A part's MIME header is its whole header. For the message itself
@@ -224,33 +196,14 @@ mod tests {
         // A multipart header with no boundary cannot be split either.
         let broken = "Content-Type: multipart/mixed\r\n\r\nbroken";
         assert_eq!(get(broken, "1").as_deref(), Some("broken"));
+        assert_eq!(get("", "1"), None);
     }
 
     #[test]
-    fn entities_split_at_the_first_blank_line() {
-        let entity = Entity::parse("A: 1\r\n\r\nbody\r\n\r\nmore");
-        assert_eq!(
-            (entity.head, entity.body),
-            ("A: 1\r\n\r\n", "body\r\n\r\nmore")
-        );
-        let bare_lf = Entity::parse("A: 1\n\nbody");
-        assert_eq!((bare_lf.head, bare_lf.body), ("A: 1\n\n", "body"));
-        let no_header = Entity::parse("\r\nbody");
-        assert_eq!((no_header.head, no_header.body), ("\r\n", "body"));
-        let no_body = Entity::parse("A: 1\r\n");
-        assert_eq!((no_body.head, no_body.body), ("A: 1\r\n", ""));
-    }
-
-    #[test]
-    fn parts_are_slices_between_delimiters() {
-        assert_eq!(
-            split_parts("pre\r\n--B\r\none\r\n--B\r\n\r\n--B\r\n--B\r\nlast\r\n--B--\r\nepilogue\r\n--B\r\nno", "B"),
-            // An empty line is a part, two adjacent delimiters are not.
-            vec!["one", "", "last"]
-        );
-        assert_eq!(split_parts("--B\nlf\n--B--", "B"), vec!["lf"]);
-        // Unterminated: nothing after the last delimiter counts.
-        assert_eq!(split_parts("--B\r\none\r\n--B\r\ntwo", "B"), vec!["one"]);
-        assert!(split_parts("no delimiter", "B").is_empty());
+    fn bare_line_feeds_and_a_part_without_header_are_read() {
+        let message = "A: 1\nContent-Type: multipart/mixed; boundary=B\n\n--B\n\nfirst\n--B\nContent-Type: text/plain\n\nsecond\n\n--B--\n";
+        assert_eq!(get(message, "1").as_deref(), Some("first"));
+        assert_eq!(get(message, "1.MIME").as_deref(), Some("\n"));
+        assert_eq!(get(message, "2").as_deref(), Some("second\n"));
     }
 }

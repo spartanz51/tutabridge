@@ -10,48 +10,51 @@
 //! `("type" "subtype" (params) NIL NIL "encoding" size [lines])`; multipart
 //! wraps its parts in `((part1)(part2)... "subtype" ("boundary" "..."))`.
 
-use super::mime::Entity;
-use super::parser::get_header;
+use super::mime::Tree;
+use super::parser::{get_header, parse_headers};
+use mail_parser::MessagePartId;
 
 /// Compute the parenthesised BODYSTRUCTURE payload for a full RFC 2822
 /// envelope (no surrounding `BODYSTRUCTURE ` prefix — the caller composes
 /// that with the appropriate FETCH response token).
 pub fn compute_bodystructure(rfc2822: &str) -> String {
-    structure(Entity::parse(rfc2822), "text/html; charset=UTF-8")
+    const DEFAULT_TYPE: &str = "text/html; charset=UTF-8";
+    match Tree::parse(rfc2822) {
+        Some(tree) => structure(&tree, Tree::ROOT, DEFAULT_TYPE),
+        None => single_part_structure(DEFAULT_TYPE, "7bit", rfc2822, &[]),
+    }
 }
 
 /// The structure of a message or a part. `default_type` is what an entity
 /// without a Content-Type is taken to be.
-fn structure(entity: Entity<'_>, default_type: &str) -> String {
-    let headers = entity.headers();
+fn structure(tree: &Tree<'_>, id: MessagePartId, default_type: &str) -> String {
+    let Some(entity) = tree.entity(id) else {
+        return single_part_structure(default_type, "7bit", "", &[]);
+    };
+    let headers = parse_headers(entity.head.trim_end_matches(['\r', '\n']));
     let content_type =
         get_header(&headers, "content-type").unwrap_or_else(|| default_type.to_owned());
     let cte =
         get_header(&headers, "content-transfer-encoding").unwrap_or_else(|| "7bit".to_owned());
 
-    if content_type.to_lowercase().starts_with("multipart/") {
-        return multipart_structure(&content_type, entity);
+    if !content_type.to_lowercase().starts_with("multipart/") {
+        return single_part_structure(&content_type, &cte, entity.body, &headers);
     }
-    single_part_structure(&content_type, &cte, entity.body, &headers)
-}
-
-fn multipart_structure(content_type: &str, entity: Entity<'_>) -> String {
-    let Some(parts) = entity.children() else {
-        // No boundary — treat as a degenerate single-part fallback so
-        // clients see something instead of a malformed parenthesised tree.
+    let boundary = super::parser::extract_boundary(&content_type);
+    let (Some(parts), Some(boundary)) = (tree.children(id), boundary) else {
+        // No usable boundary — a degenerate single part, so clients see
+        // something instead of a malformed parenthesised tree.
         return format!(
             "(\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" {} 0)",
             entity.body.len()
         );
     };
-    let boundary = super::parser::extract_boundary(content_type).unwrap_or_default();
-    let subtype = subtype_of(content_type).unwrap_or_else(|| "mixed".to_owned());
+    let subtype = subtype_of(&content_type).unwrap_or_else(|| "mixed".to_owned());
 
     let mut out = String::new();
-    for part in parts {
-        out.push_str(&structure(part, "text/plain"));
+    for &part in parts {
+        out.push_str(&structure(tree, part, "text/plain"));
     }
-
     out.push(' ');
     out.push_str(&quoted(&subtype.to_uppercase()));
     out.push(' ');
