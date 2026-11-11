@@ -272,10 +272,10 @@ impl ImapSession {
         responses
     }
 
-    pub async fn handle_command(&mut self, line: &str) -> Vec<String> {
+    pub async fn handle_command_bytes(&mut self, line: &str) -> Vec<Vec<u8>> {
         let (tag, cmd, args) = parse_command(line);
 
-        match cmd.to_uppercase().as_str() {
+        let responses = match cmd.to_uppercase().as_str() {
             "CAPABILITY" => self.cmd_capability(&tag),
             "NOOP" => vec![format!("{} OK NOOP completed\r\n", tag)],
             "LOGOUT" => self.cmd_logout(&tag),
@@ -294,8 +294,8 @@ impl ImapSession {
             "SELECT" => self.cmd_select(&tag, args).await,
             "EXAMINE" => self.cmd_select(&tag, args).await,
             "STATUS" => self.cmd_status(&tag, args).await,
-            "FETCH" => self.cmd_fetch(&tag, args, false).await,
-            "UID" => self.cmd_uid(&tag, args).await,
+            "FETCH" => return self.cmd_fetch(&tag, args, false).await,
+            "UID" => return self.cmd_uid(&tag, args).await,
             "CLOSE" => self.cmd_close(&tag),
             "EXPUNGE" => self.cmd_expunge(&tag).await,
             "SEARCH" => self.cmd_search(&tag, args, false),
@@ -311,7 +311,8 @@ impl ImapSession {
                 format!("{} OK NAMESPACE completed\r\n", tag),
             ],
             _ => vec![format!("{} BAD Unknown command\r\n", tag)],
-        }
+        };
+        responses.into_iter().map(String::into_bytes).collect()
     }
 
     /// What an `APPEND` to `mailbox` does (see `handle_append` in the
@@ -567,17 +568,14 @@ impl ImapSession {
         ]
     }
 
-    async fn cmd_fetch(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
+    async fn cmd_fetch(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<Vec<u8>> {
         if self.state != State::Selected {
-            return vec![format!("{} NO No mailbox selected\r\n", tag)];
+            return vec![format!("{} NO No mailbox selected\r\n", tag).into_bytes()];
         }
 
         let (seq_set, items) = parse_fetch_args(args);
         if body_sections(&items).is_none() {
-            return vec![format!(
-                "{} BAD Unsupported or malformed BODY section\r\n",
-                tag
-            )];
+            return vec![format!("{} BAD Malformed BODY section\r\n", tag).into_bytes()];
         }
         let indices = self.resolve_sequence_set(&seq_set, uid_mode);
 
@@ -616,7 +614,7 @@ impl ImapSession {
                             return vec![format!(
                                 "{} NO [UNAVAILABLE] message body temporarily unavailable, try again later\r\n",
                                 tag
-                            )];
+                            ).into_bytes()];
                         }
                     }
                     let mail = self.mails[idx].mail.clone();
@@ -629,7 +627,7 @@ impl ImapSession {
                                     if let Some(eid) = &elem_id {
                                         self.store.mark_body_fetch_failed(eid);
                                     }
-                                    return vec![format!("{} NO [UNAVAILABLE] message attachments cannot be fetched\r\n", tag)];
+                                    return vec![format!("{} NO [UNAVAILABLE] message attachments cannot be fetched\r\n", tag).into_bytes()];
                                 }
                             };
                             let refs: Vec<(&TutanotaFile, &[u8])> =
@@ -657,7 +655,7 @@ impl ImapSession {
                             return vec![format!(
                                 "{} NO [UNAVAILABLE] could not fetch message body, try again later\r\n",
                                 tag
-                            )];
+                            ).into_bytes()];
                         }
                     }
                 }
@@ -690,7 +688,7 @@ impl ImapSession {
             });
         }
         let cmd_name = if uid_mode { "UID FETCH" } else { "FETCH" };
-        responses.push(format!("{} OK {} completed\r\n", tag, cmd_name));
+        responses.push(format!("{} OK {} completed\r\n", tag, cmd_name).into_bytes());
         responses
     }
 
@@ -856,23 +854,24 @@ impl ImapSession {
         vec![format!("{} OK {} completed\r\n", tag, cmd)]
     }
 
-    async fn cmd_uid(&mut self, tag: &str, args: &str) -> Vec<String> {
+    async fn cmd_uid(&mut self, tag: &str, args: &str) -> Vec<Vec<u8>> {
         if self.state != State::Selected {
-            return vec![format!("{} NO No mailbox selected\r\n", tag)];
+            return vec![format!("{} NO No mailbox selected\r\n", tag).into_bytes()];
         }
 
         let parts: Vec<&str> = args.splitn(2, ' ').collect();
         let subcmd = parts.first().map(|s| s.to_uppercase()).unwrap_or_default();
         let subargs = parts.get(1).unwrap_or(&"");
 
-        match subcmd.as_str() {
-            "FETCH" => self.cmd_fetch(tag, subargs, true).await,
+        let responses = match subcmd.as_str() {
+            "FETCH" => return self.cmd_fetch(tag, subargs, true).await,
             "SEARCH" => self.cmd_search(tag, subargs, true),
             "STORE" => self.cmd_store(tag, subargs, true).await,
             "MOVE" => self.cmd_move(tag, subargs, true).await,
             "COPY" => self.cmd_copy(tag),
             _ => vec![format!("{} BAD Unknown UID subcommand\r\n", tag)],
-        }
+        };
+        responses.into_iter().map(String::into_bytes).collect()
     }
 
     fn cmd_close(&mut self, tag: &str) -> Vec<String> {
@@ -1158,7 +1157,7 @@ fn build_fetch_response(
     items: &str,
     uid_mode: bool,
     body: Option<&crate::body_cache::BodyEntry>,
-) -> String {
+) -> Vec<u8> {
     let items_upper = items.to_ascii_uppercase();
     let mut parts = Vec::new();
 
@@ -1210,7 +1209,12 @@ fn build_fetch_response(
         parts.push(format!("BODYSTRUCTURE {}", bs));
     }
 
-    for section in body_sections(items).unwrap_or_default() {
+    let mut parts: Vec<Vec<u8>> = parts.into_iter().map(String::into_bytes).collect();
+    for BodySection {
+        name: section,
+        partial,
+    } in body_sections(items).unwrap_or_default()
+    {
         if let Some(rfc) = rfc {
             let content = match section.to_ascii_uppercase().as_str() {
                 "" => Cow::Borrowed(rfc),
@@ -1223,22 +1227,25 @@ fn build_fetch_response(
                     None => continue,
                 },
             };
-            parts.push(format!(
-                "BODY[{}] {{{}}}\r\n{}",
-                section,
-                content.len(),
-                content
-            ));
+            let bytes = content.as_bytes();
+            let (content, origin) = match partial {
+                Some((start, count)) => {
+                    let from = start.min(bytes.len());
+                    let to = start.saturating_add(count).min(bytes.len());
+                    (&bytes[from..to], format!("<{start}>"))
+                }
+                None => (bytes, String::new()),
+            };
+            let mut part =
+                format!("BODY[{section}]{origin} {{{}}}\r\n", content.len()).into_bytes();
+            part.extend_from_slice(content);
+            parts.push(part);
         }
     }
     if items_upper.contains("RFC822.HEADER") {
         if let Some(rfc) = rfc {
             let headers = extract_headers(rfc);
-            parts.push(format!(
-                "RFC822.HEADER {{{}}}\r\n{}",
-                headers.len(),
-                headers
-            ));
+            parts.push(format!("RFC822.HEADER {{{}}}\r\n{}", headers.len(), headers).into_bytes());
         }
     }
 
@@ -1247,11 +1254,14 @@ fn build_fetch_response(
         .any(|t| t.trim_matches(|c| c == '(' || c == ')') == "RFC822");
     if has_rfc822_full {
         if let Some(rfc) = rfc {
-            parts.push(format!("RFC822 {{{}}}\r\n{}", rfc.len(), rfc));
+            parts.push(format!("RFC822 {{{}}}\r\n{}", rfc.len(), rfc).into_bytes());
         }
     }
 
-    format!("* {} FETCH ({})\r\n", seq, parts.join(" "))
+    let mut response = format!("* {seq} FETCH (").into_bytes();
+    response.extend_from_slice(&parts.join(b" ".as_slice()));
+    response.extend_from_slice(b")\r\n");
+    response
 }
 /// The reference and mailbox pattern of a LIST or LSUB command, each a quoted
 /// string or an atom. Reject LIST-EXTENDED options: they are not supported.
@@ -1483,8 +1493,14 @@ fn parse_store_args(args: &str) -> (String, String) {
     (seq, rest)
 }
 
-/// Top-level BODY sections. Partial fetches need byte responses, not strings.
-fn body_sections(items: &str) -> Option<Vec<&str>> {
+#[derive(Debug, PartialEq)]
+struct BodySection<'a> {
+    name: &'a str,
+    partial: Option<(usize, usize)>,
+}
+
+/// Top-level BODY sections and optional (offset, count) byte ranges.
+fn body_sections(items: &str) -> Option<Vec<BodySection<'_>>> {
     let mut sections = Vec::new();
     let mut rest = items;
     while let Some(open) = rest.find('[') {
@@ -1494,10 +1510,26 @@ fn body_sections(items: &str) -> Option<Vec<&str>> {
         let tail = &rest[open + 1..];
         let close = tail.find(']')?;
         if name.eq_ignore_ascii_case("BODY") || name.eq_ignore_ascii_case("BODY.PEEK") {
-            if tail[close + 1..].starts_with('<') {
-                return None;
-            }
-            sections.push(&tail[..close]);
+            let partial = if let Some(range) = tail[close + 1..].strip_prefix('<') {
+                let (range, _) = range.split_once('>')?;
+                let (start, count) = range.split_once('.')?;
+                if !start.bytes().all(|b| b.is_ascii_digit())
+                    || !count.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                let count = count.parse::<usize>().ok()?;
+                if count == 0 {
+                    return None;
+                }
+                Some((start.parse().ok()?, count))
+            } else {
+                None
+            };
+            sections.push(BodySection {
+                name: &tail[..close],
+                partial,
+            });
         }
         rest = &tail[close + 1..];
     }
@@ -1510,7 +1542,7 @@ fn needs_body(items: &str) -> bool {
     if body_sections(items)
         .unwrap_or_default()
         .iter()
-        .any(|s| s.is_empty() || s.eq_ignore_ascii_case("TEXT"))
+        .any(|s| s.name.is_empty() || s.name.eq_ignore_ascii_case("TEXT"))
     {
         return true;
     }
@@ -1662,6 +1694,31 @@ fn append_literal_size(args: &str) -> Option<usize> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // Existing text assertions decode strictly; partial-literal tests use the byte API.
+    impl ImapSession {
+        pub(crate) async fn handle_command(&mut self, line: &str) -> Vec<String> {
+            self.handle_command_bytes(line)
+                .await
+                .into_iter()
+                .map(|bytes| String::from_utf8(bytes).expect("text response"))
+                .collect()
+        }
+    }
+
+    fn build_fetch_response(
+        seq: usize,
+        cached: &CachedMail,
+        items: &str,
+        uid_mode: bool,
+        body: Option<&crate::body_cache::BodyEntry>,
+    ) -> String {
+        String::from_utf8(super::build_fetch_response(
+            seq, cached, items, uid_mode, body,
+        ))
+        .expect("text response")
+    }
+
     use base64::Engine;
     use tutasdk::date::DateTime;
     use tutasdk::entities::generated::tutanota::{MailAddress, MailDetails};
@@ -2344,13 +2401,60 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn body_sections_handles_unicode_and_rejects_partial_fetches() {
+    fn partial_fetch_returns_exact_octets_and_origin() {
+        let cached = make_test_mail(1, "Test", true);
+        let body = crate::body_cache::BodyEntry {
+            details: None,
+            rfc2822: "Subject: Test\r\n\r\naéz".into(),
+        };
+        for (start, count, bytes) in [
+            (0, 2, &b"a\xc3"[..]),
+            (2, 1, &b"\xa9"[..]),
+            (3, 99, &b"z"[..]),
+            (4, 1, &b""[..]),
+            (99, 1, &b""[..]),
+            (usize::MAX, 1, &b""[..]),
+            (1, usize::MAX, &b"\xc3\xa9z"[..]),
+        ] {
+            let request = format!("BODY.PEEK[TEXT]<{start}.{count}>");
+            let response = super::build_fetch_response(1, &cached, &request, false, Some(&body));
+            let mut expected =
+                format!("* 1 FETCH (BODY[TEXT]<{start}> {{{}}}\r\n", bytes.len()).into_bytes();
+            expected.extend_from_slice(bytes);
+            expected.extend_from_slice(b")\r\n");
+            assert_eq!(response, expected);
+        }
         assert_eq!(
-            body_sections("(é BODY.PEEK[TEXT] BODY[HEADER])"),
-            Some(vec!["TEXT", "HEADER"])
+            build_fetch_response(
+                1,
+                &cached,
+                "BODY.PEEK[HEADER.FIELDS (Subject)]<1.4>",
+                false,
+                Some(&body)
+            ),
+            "* 1 FETCH (BODY[HEADER.FIELDS (Subject)]<1> {4}\r\nubje)\r\n"
+        );
+    }
+
+    #[test]
+    fn body_sections_handles_unicode_and_rejects_malformed_ranges() {
+        assert_eq!(
+            body_sections("(é BODY.PEEK[TEXT] BODY[HEADER])")
+                .unwrap()
+                .iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>(),
+            vec!["TEXT", "HEADER"]
         );
         assert_eq!(body_sections("(NOTBODY[TEXT])"), Some(vec![]));
-        for request in ["BODY.PEEK[TEXT", "BODY.PEEK[TEXT]<0.10>", "BODY[]<1.2>"] {
+        for request in [
+            "BODY.PEEK[TEXT",
+            "BODY.PEEK[TEXT]<0.0>",
+            "BODY[]<1.2.3>",
+            "BODY[]<+1.2>",
+            "BODY[]<1>",
+            "BODY[]<1.2",
+        ] {
             assert!(body_sections(request).is_none(), "{request}");
         }
     }
@@ -2358,7 +2462,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn text_fetch_loads_cold_body_once_and_keeps_peek_unread() {
         let mail = make_mail("text", "Test", true);
-        let details = make_details("<p>Synthetic body</p>");
+        let details = make_details(&format!("<p>{}</p>", "Synthetic body ".repeat(500)));
         let expected = mail_to_rfc2822(&mail, Some(&details), &[]);
         let content = expected.split_once("\r\n\r\n").unwrap().1;
         let backend = Arc::new(MockBackend::with_mails(vec![mail.clone()]));
@@ -2384,10 +2488,17 @@ pub(crate) mod tests {
             .await;
         assert!(response[0].contains("Subject: Test"));
         let response = session
-            .handle_command("c UID FETCH 1 (BODY.PEEK[TEXT]<0.10>)")
+            .handle_command("c UID FETCH 1 (BODY.PEEK[TEXT]<0.0>)")
             .await;
         assert!(response[0].starts_with("c BAD "));
         assert_eq!(*backend.details_calls.lock().unwrap(), 0);
+        let response = session
+            .handle_command_bytes("c UID FETCH 1 (UID BODY.PEEK[]<0.4096>)")
+            .await;
+        let mut wanted = b"* 1 FETCH (UID 1 BODY[]<0> {4096}\r\n".to_vec();
+        wanted.extend_from_slice(&expected.as_bytes()[..4096]);
+        wanted.extend_from_slice(b")\r\n");
+        assert_eq!(response[0], wanted);
         for _ in 0..2 {
             let response = session
                 .handle_command(
@@ -2403,6 +2514,25 @@ pub(crate) mod tests {
         assert_eq!(*backend.details_calls.lock().unwrap(), 1);
         assert!(backend.unread_calls.lock().unwrap().is_empty());
         assert!(session.mails[0].mail.unread);
+
+        // Drive the real writer with a literal containing only half of 'é'.
+        session.store.bodies().insert(
+            "text",
+            crate::body_cache::BodyEntry {
+                details: None,
+                rfc2822: "Subject: Test\r\n\r\naéz".into(),
+            },
+        );
+        let mut reader = &b"e UID FETCH 1 (BODY.PEEK[TEXT]<2.1>)\r\n"[..];
+        let mut writer = Vec::new();
+        let mut watch = session.store.subscribe();
+        super::super::run_connection_loop(&mut reader, &mut writer, &mut session, &mut watch)
+            .await
+            .unwrap();
+        assert_eq!(
+            writer,
+            b"* 1 FETCH (UID 1 BODY[TEXT]<2> {1}\r\n\xa9)\r\ne OK UID FETCH completed\r\n"
+        );
     }
 
     // =================================================================
