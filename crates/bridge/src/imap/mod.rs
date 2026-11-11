@@ -153,19 +153,25 @@ fn is_login_command(line: &str) -> bool {
 /// carry mail content (FETCH envelopes, headers and bodies), so only their
 /// first words and size are kept; tagged and continuation responses keep their
 /// first line, which never holds mail content.
-fn log_summary(response: &str) -> std::borrow::Cow<'_, str> {
-    let response = response.trim_end();
-    if let Some(rest) = response.strip_prefix("* ") {
+fn log_summary(response: impl AsRef<[u8]>) -> String {
+    let response = response.as_ref().trim_ascii_end();
+    let first = response
+        .split(|&b| b == b'\r' || b == b'\n')
+        .next()
+        .unwrap_or_default();
+    let first = String::from_utf8_lossy(first);
+    if let Some(rest) = first.strip_prefix("* ") {
         let head: Vec<&str> = rest.split_whitespace().take(2).collect();
         let shown = format!("* {}", head.join(" "));
         if shown.len() >= response.len() {
-            return response.into();
+            return shown;
         }
-        return format!("{shown} … ({} bytes)", response.len()).into();
+        return format!("{shown} … ({} bytes)", response.len());
     }
-    match response.split_once("\r\n") {
-        Some((first, _)) => format!("{first} … ({} bytes)", response.len()).into(),
-        None => response.into(),
+    if first.len() < response.len() {
+        format!("{first} … ({} bytes)", response.len())
+    } else {
+        first.into_owned()
     }
 }
 
@@ -284,16 +290,20 @@ where
 
         let carries_secret = session.is_awaiting_auth() || is_login_command(trimmed);
         let responses = if session.is_awaiting_auth() {
-            session.handle_auth_response(trimmed)
+            session
+                .handle_auth_response(trimmed)
+                .into_iter()
+                .map(String::into_bytes)
+                .collect()
         } else {
-            session.handle_command(trimmed).await
+            session.handle_command_bytes(trimmed).await
         };
         if carries_secret {
             zeroize::Zeroize::zeroize(&mut *line);
         }
         for resp in &responses {
             debug!("IMAP S: {}", log_summary(resp));
-            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(resp).await?;
         }
         writer.flush().await?;
 
@@ -1154,6 +1164,11 @@ mod tests {
 
     #[test]
     fn log_summary_keeps_no_mail_content() {
+        let binary = b"* 1 FETCH (BODY[TEXT]<2> {1}\r\n\xa9)\r\n";
+        assert_eq!(
+            log_summary(binary),
+            format!("* 1 FETCH … ({} bytes)", binary.len() - 2)
+        );
         let fetch = log_summary("* 1 FETCH (ENVELOPE (\"date\" \"Secret subject\"))\r\n");
         assert!(fetch.starts_with("* 1 FETCH … ("), "{fetch}");
         assert!(!fetch.contains("Secret"), "{fetch}");
