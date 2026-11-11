@@ -47,8 +47,9 @@ hex = "0.4"
 # WHATWG HTML tokenizer for the text/plain body: no unsafe code, and no
 # dependencies without its default `jetscii` feature (SIMD, unsafe).
 html5gum = { version = "0.8.4", default-features = false }
-# MIME structure of rendered messages: part boundaries and their offsets.
-mail-parser = { version = "0.11", default-features = false }
+# Reads messages: the MIME structure of rendered ones, and everything a
+# submitted one carries. `full_encoding` adds the multi-byte charsets.
+mail-parser = { version = "0.11", default-features = false, features = ["full_encoding"] }
 
 # OS keychain backend — one per platform so the CLI builds (and packages,
 # e.g. on the AUR) on Linux/Windows, not just macOS. Linux uses the
