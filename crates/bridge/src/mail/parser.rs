@@ -83,9 +83,20 @@ pub fn parse_rfc2822(raw: &str) -> ParsedMessage {
         .unwrap_or_default()
         .to_lowercase();
 
+    let content_disposition = get_header(&headers, "content-disposition").unwrap_or_default();
     let ct_lower = content_type.to_lowercase();
     let (body_html, attachments, body_text) = if ct_lower.contains("multipart/") {
         extract_multipart_body_and_attachments(&body_section, &content_type)
+    } else if is_single_part_attachment(&ct_lower, &content_disposition) {
+        // A message that is only a file: Gnus sends an attachment with no
+        // body text this way, not wrapped in a multipart.
+        let attachment = attachment_from_part(
+            &body_section,
+            &content_type,
+            &content_transfer_encoding,
+            &content_disposition,
+        );
+        (String::new(), vec![attachment], None)
     } else {
         // An absent Content-Type defaults to text/plain (RFC 2045 §5.2).
         let is_plaintext = ct_lower.is_empty() || ct_lower.contains("text/plain");
@@ -457,33 +468,9 @@ fn extract_multipart_body_and_attachments(
             }
             attachments.extend(nested_atts);
         } else if is_attachment {
-            let data = match part_cte.as_str() {
-                cte if cte.contains("base64") => {
-                    let clean: String = part_body.chars().filter(|c| !c.is_whitespace()).collect();
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&clean)
-                        .unwrap_or_default()
-                }
-                cte if cte.contains("quoted-printable") => {
-                    decode_quoted_printable(&part_body).into_bytes()
-                }
-                _ => part_body.as_bytes().to_vec(),
-            };
-            let filename = extract_param(&part_cd, "filename")
-                .or_else(|| extract_param(&part_ct, "name"))
-                .unwrap_or_else(|| "attachment.bin".to_owned());
-            let filename = decode_header_value(&filename);
-            let mime_type = part_ct
-                .split(';')
-                .next()
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "application/octet-stream".to_owned());
-            attachments.push(Attachment {
-                filename,
-                mime_type,
-                data,
-            });
+            attachments.push(attachment_from_part(
+                &part_body, &part_ct, &part_cte, &part_cd,
+            ));
         } else if part_ct_lower.contains("text/html") && html_part.is_none() {
             html_part = Some(decode_transfer(&part_body, &part_cte));
         } else if part_ct_lower.contains("text/plain") && html_part.is_none() && text_part.is_none()
@@ -503,6 +490,45 @@ fn extract_multipart_body_and_attachments(
             (html, attachments, Some(raw))
         }
         (None, None) => (body.to_string(), attachments, None),
+    }
+}
+
+/// Whether a message that is not multipart is a file rather than a body:
+/// it says `attachment`, or its type is something other than text. Tuta
+/// bodies are HTML, so a lone PDF or image can only be an attachment.
+fn is_single_part_attachment(ct_lower: &str, content_disposition: &str) -> bool {
+    content_disposition.to_lowercase().contains("attachment")
+        || !(ct_lower.is_empty() || ct_lower.contains("text/"))
+}
+
+/// The file in one MIME part: its bytes with the transfer encoding undone,
+/// its name from `filename=` or `name=`, and its type.
+fn attachment_from_part(body: &str, content_type: &str, cte: &str, cd: &str) -> Attachment {
+    let cte = cte.to_lowercase();
+    let data = if cte.contains("base64") {
+        let clean: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD
+            .decode(&clean)
+            .unwrap_or_default()
+    } else if cte.contains("quoted-printable") {
+        decode_quoted_printable(body).into_bytes()
+    } else {
+        body.as_bytes().to_vec()
+    };
+    let filename = extract_param(cd, "filename")
+        .or_else(|| extract_param(content_type, "name"))
+        .unwrap_or_else(|| "attachment.bin".to_owned());
+    let filename = decode_header_value(&filename);
+    let mime_type = content_type
+        .split(';')
+        .next()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    Attachment {
+        filename,
+        mime_type,
+        data,
     }
 }
 
@@ -1040,6 +1066,43 @@ mod tests {
         assert_eq!(att.filename, "doc.pdf");
         assert_eq!(att.mime_type, "application/pdf");
         assert_eq!(att.data, body);
+    }
+
+    /// Gnus sends a mail that is only an attachment as a single part, not
+    /// a multipart: the file must not become the body.
+    #[test]
+    fn single_part_attachment_is_a_file_not_the_body() {
+        let pdf = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n";
+        let raw = format!(
+            "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nMIME-Version: 1.0\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=test.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(pdf)
+        );
+        let msg = parse_rfc2822(&raw);
+        assert_eq!(msg.body_html, "");
+        assert_eq!(msg.body_text, None);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "test.pdf");
+        assert_eq!(msg.attachments[0].mime_type, "application/pdf");
+        assert_eq!(msg.attachments[0].data, pdf);
+    }
+
+    #[test]
+    fn single_part_non_text_without_disposition_is_a_file() {
+        let raw = "From: a@b.com\r\nContent-Type: image/png; name=\"a.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\nUE5HSEVBREVS\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.body_html, "");
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "a.png");
+        assert_eq!(msg.attachments[0].data, b"PNGHEADER");
+    }
+
+    #[test]
+    fn single_part_text_attachment_is_a_file() {
+        let raw = "From: a@b.com\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=notes.txt\r\n\r\nhello\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.body_html, "");
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "notes.txt");
     }
 
     #[test]
