@@ -288,6 +288,33 @@ starts, so a bridge started without a terminal needs a cached passphrase or a
 graphical pinentry. Log in once after setting it; an existing keychain session
 is not moved.
 
+### Reading the bridge password from authinfo
+
+If your mail client already keeps its logins in an `authinfo` or `netrc`
+file, as Emacs (Gnus, auth-source) does, the bridge can read its password
+from there, so it lives in one place:
+
+```toml
+authinfo_path = "~/.authinfo.gpg"
+```
+
+The bridge uses the `password` of the first entry for `127.0.0.1`,
+`localhost` or `::1` whose `login` is your address and whose `port`, if
+given, is the IMAP or SMTP port:
+
+```
+machine 127.0.0.1 port 1143 login you@tuta.io password <bridge password>
+machine 127.0.0.1 port 1025 login you@tuta.io password <bridge password>
+```
+
+A `.gpg` file is decrypted with `gpg`, so as with `pass`, `gpg-agent` must be
+able to decrypt it when the bridge starts. The bridge only reads the file and
+never copies the password into `config.toml`. To set it up, run
+`tutabridge password` and add the lines above (in Emacs, opening
+`~/.authinfo.gpg` decrypts it and saving re-encrypts it). Without a matching
+entry the bridge uses the password in `config.toml`; with one, change the
+password in the file rather than regenerating it in the GUI.
+
 ---
 
 ## Testing
