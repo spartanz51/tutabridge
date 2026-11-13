@@ -155,6 +155,10 @@ impl LocalStore {
                 last_batch_id  TEXT NOT NULL,
                 updated_at_ms  INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS message_ids (
+                message_id  TEXT PRIMARY KEY,
+                element_id  TEXT NOT NULL
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts USING fts5(
                 element_id UNINDEXED,
                 body,
@@ -193,6 +197,60 @@ impl LocalStore {
         .ok()
     }
 
+    /// Remember that a mail we hold carries this RFC `Message-ID`.
+    ///
+    /// Tuta keeps the id in `ConversationEntry.messageId`, bare, and that is
+    /// what a reply has to pass as `previousMessageId`. The same string is in
+    /// the mail's stored header block, so indexing it as mail arrives lets a
+    /// later reply be threaded without asking the server anything.
+    ///
+    /// `message_id` is stored bare: callers strip the angle brackets, because
+    /// a submission's `In-Reply-To` is parsed bare too.
+    pub fn remember_message_id(
+        &self,
+        message_id: &str,
+        element_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO message_ids(message_id, element_id) VALUES (?1, ?2)",
+            [message_id, element_id],
+        )?;
+        Ok(())
+    }
+
+    /// Is this `Message-ID` one of a mail we hold? See `remember_message_id`.
+    pub fn knows_message_id(&self, message_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM message_ids WHERE message_id = ?1",
+            [message_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok()
+    }
+
+    /// Element ids that already have a `Message-ID` on record. The backfill
+    /// uses this to skip mails it has already resolved, so an interrupted
+    /// pass costs only the mails it had not reached.
+    pub fn indexed_element_ids(&self) -> std::collections::HashSet<String> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = std::collections::HashSet::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT element_id FROM message_ids") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// How many Message-IDs are indexed. Diagnostics only.
+    pub fn message_id_count(&self) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM message_ids", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
     /// Write a value into the generic `store_meta` key-value table.
     pub fn set_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -211,6 +269,7 @@ impl LocalStore {
              DELETE FROM sync_state;
              DELETE FROM store_meta;
              DELETE FROM mail_fts;
+             DELETE FROM message_ids;
              INSERT INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
         drop(conn);
@@ -388,8 +447,11 @@ impl LocalStore {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             {
                 let mut stmt = conn.prepare_cached("DELETE FROM mails WHERE element_id = ?1")?;
+                let mut ids =
+                    conn.prepare_cached("DELETE FROM message_ids WHERE element_id = ?1")?;
                 for eid in &deleted {
                     stmt.execute([eid])?;
+                    ids.execute([eid])?;
                 }
             }
             conn.execute_batch("COMMIT")?;
@@ -620,6 +682,11 @@ impl LocalStore {
             .filter_map(|r| r.ok())
             .collect();
         if !ids.is_empty() {
+            conn.execute(
+                "DELETE FROM message_ids WHERE element_id IN \
+                 (SELECT element_id FROM mails WHERE folder_id = ?1)",
+                [folder_id],
+            )?;
             conn.execute("DELETE FROM mails WHERE folder_id = ?1", [folder_id])?;
         }
         Ok(ids)
@@ -631,10 +698,22 @@ impl LocalStore {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute("DELETE FROM mails WHERE element_id = ?1", [element_id])?;
+            // A reply to a deleted mail must not thread to an id the server
+            // no longer holds.
+            conn.execute(
+                "DELETE FROM message_ids WHERE element_id = ?1",
+                [element_id],
+            )?;
         }
         self.delete_eml(element_id)?;
         self.unindex_body(element_id)?;
         Ok(())
+    }
+}
+
+impl crate::tuta::MessageIdIndex for LocalStore {
+    fn knows_message_id(&self, message_id: &str) -> bool {
+        LocalStore::knows_message_id(self, message_id)
     }
 }
 
@@ -656,6 +735,77 @@ mod tests {
         let db_path = tmp_dir.join("test.db");
         let mails_dir = tmp_dir.join("mails");
         LocalStore::open(&db_path, &mails_dir, key).unwrap()
+    }
+
+    #[test]
+    fn message_ids_are_remembered_and_found() {
+        let store = open_memory_store();
+        assert_eq!(store.message_id_count(), 0);
+        assert!(!store.knows_message_id("a1b2@mail.example.org"));
+
+        store
+            .remember_message_id("a1b2@mail.example.org", "elem1")
+            .unwrap();
+        assert!(store.knows_message_id("a1b2@mail.example.org"));
+        assert_eq!(store.message_id_count(), 1);
+
+        // Ids are matched exactly: a reply's In-Reply-To is parsed bare, so a
+        // bracketed form is a different string and must not match.
+        assert!(!store.knows_message_id("<a1b2@mail.example.org>"));
+        assert!(!store.knows_message_id("other@example.org"));
+
+        // Re-indexing the same mail is idempotent, not a duplicate row.
+        store
+            .remember_message_id("a1b2@mail.example.org", "elem1")
+            .unwrap();
+        assert_eq!(store.message_id_count(), 1);
+    }
+
+    #[test]
+    fn removing_a_mail_forgets_its_message_id() {
+        let store = open_memory_store();
+        for (eid, folder) in [
+            ("a", "inbox"),
+            ("b", "inbox"),
+            ("c", "doomed"),
+            ("d", "kept"),
+        ] {
+            store.upsert_mail_metadata(&meta(eid, folder, 0)).unwrap();
+            store
+                .remember_message_id(&format!("{eid}@example.org"), eid)
+                .unwrap();
+        }
+        store.delete_mail("a").unwrap();
+        assert!(!store.knows_message_id("a@example.org"));
+        store.delete_mails_not_in("inbox", &[]).unwrap();
+        assert!(!store.knows_message_id("b@example.org"));
+        store.delete_folder_mails("doomed").unwrap();
+        assert!(!store.knows_message_id("c@example.org"));
+        // Mail still held keeps its id until a reset drops everything.
+        assert!(store.knows_message_id("d@example.org"));
+        store.reset().unwrap();
+        assert_eq!(store.message_id_count(), 0);
+    }
+
+    #[test]
+    fn the_index_survives_reopening_the_store() {
+        let key = test_key();
+        let tmp_dir =
+            std::env::temp_dir().join(format!("tutabridge_test_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let db_path = tmp_dir.join("test.db");
+        let mails_dir = tmp_dir.join("mails");
+
+        {
+            let store = LocalStore::open(&db_path, &mails_dir, key.clone()).unwrap();
+            store
+                .remember_message_id("kept@example.org", "elem1")
+                .unwrap();
+        }
+        // The point of putting this on disk rather than in a cache: a reply
+        // sent days after the mail arrived still threads.
+        let store = LocalStore::open(&db_path, &mails_dir, key).unwrap();
+        assert!(store.knows_message_id("kept@example.org"));
     }
 
     fn meta(element_id: &str, folder_id: &str, received: i64) -> MailMetadata {

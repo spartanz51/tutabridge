@@ -288,6 +288,20 @@ starts, so a bridge started without a terminal needs a cached passphrase or a
 graphical pinentry. Log in once after setting it; an existing keychain session
 is not moved.
 
+### Threading replies
+
+A reply threads when its `In-Reply-To` names a mail the bridge sent, served
+over IMAP, or holds within the `sync_limit` window. Anything else, such as a
+reply to your own mail sent more than an hour ago, goes out as a new thread. If
+that is worse than not sending, as when answering a mailing list with
+`git send-email`, the bridge can refuse such a reply instead:
+
+```toml
+strict_threading = true
+```
+
+This only refuses sending: a draft saved over IMAP is kept either way.
+
 ---
 
 ## Testing

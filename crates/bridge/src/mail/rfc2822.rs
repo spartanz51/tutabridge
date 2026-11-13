@@ -304,6 +304,20 @@ impl QuotedText {
     }
 }
 
+/// The bare `Message-ID` of a received mail, from the header block Tuta stores
+/// with it. It equals `ConversationEntry.messageId` without the brackets.
+/// `None` for mail this account sent, which has no stored header block.
+pub(crate) fn header_message_id(details: &MailDetails) -> Option<String> {
+    let headers = details.headers.as_ref()?;
+    // Plain text despite the name; a live mailbox fills `compressedHeaders`.
+    let raw = headers
+        .compressedHeaders
+        .as_deref()
+        .or(headers.headers.as_deref())?;
+    // The parser that reads a submission's In-Reply-To, so both sides agree.
+    super::parser::parse_message_id(raw)
+}
+
 /// The `(name, address)` pairs of a received mail's Reply-To, addresses
 /// trimmed and blank entries dropped. The `Reply-To:` header and the IMAP
 /// ENVELOPE both read this, so they cannot disagree on what counts as an
@@ -551,6 +565,88 @@ pub(crate) fn extract_body_text(rfc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod header_message_id {
+        use super::*;
+        use tutasdk::entities::generated::tutanota::{Body, Header, Recipients};
+
+        /// MailDetails carrying just a header block, which is all this reads.
+        fn details(headers: Option<&str>, compressed: Option<&str>) -> MailDetails {
+            MailDetails {
+                _id: None,
+                sentDate: tutasdk::date::DateTime::from_millis(0),
+                authStatus: 0,
+                replyTos: vec![],
+                recipients: Recipients {
+                    _id: None,
+                    toRecipients: vec![],
+                    ccRecipients: vec![],
+                    bccRecipients: vec![],
+                },
+                headers: Some(Header {
+                    _id: None,
+                    headers: headers.map(str::to_string),
+                    compressedHeaders: compressed.map(str::to_string),
+                    _errors: Default::default(),
+                }),
+                body: Body {
+                    _id: None,
+                    text: None,
+                    compressedText: None,
+                    _errors: Default::default(),
+                },
+            }
+        }
+
+        const BLOCK: &str = "Received: by mx.example.org with SMTP id x\r\n\
+             From: Alice <alice@example.org>\r\n\
+             Message-ID: <a1b2=c3@mail.example.org>\r\n\
+             Subject: Re: [PATCH] example\r\n";
+
+        #[test]
+        fn reads_the_id_bare_from_compressed_headers() {
+            // compressedHeaders is the field a live mailbox populates.
+            let d = details(None, Some(BLOCK));
+            assert_eq!(
+                header_message_id(&d).as_deref(),
+                Some("a1b2=c3@mail.example.org")
+            );
+        }
+
+        #[test]
+        fn falls_back_to_the_plain_headers_field() {
+            let d = details(Some(BLOCK), None);
+            assert_eq!(
+                header_message_id(&d).as_deref(),
+                Some("a1b2=c3@mail.example.org")
+            );
+        }
+
+        #[test]
+        fn the_header_name_is_case_insensitive_and_brackets_are_optional() {
+            let d = details(None, Some("MESSAGE-ID: bare@example.org\r\n"));
+            assert_eq!(header_message_id(&d).as_deref(), Some("bare@example.org"));
+        }
+
+        #[test]
+        fn a_folded_message_id_is_unfolded() {
+            let d = details(None, Some("Message-ID:\r\n <folded@example.org>\r\n"));
+            assert_eq!(header_message_id(&d).as_deref(), Some("folded@example.org"));
+        }
+
+        #[test]
+        fn mail_without_a_header_block_has_no_id() {
+            // Our own sent mail: Tuta stores what arrived over SMTP.
+            let mut d = details(None, None);
+            d.headers = None;
+            assert_eq!(header_message_id(&d), None);
+            // A block with no Message-ID line, likewise.
+            assert_eq!(
+                header_message_id(&details(None, Some("From: a@b\r\n"))),
+                None
+            );
+        }
+    }
 
     fn test_id(s: &str) -> tutasdk::GeneratedId {
         tutasdk::GeneratedId(s.to_string())
