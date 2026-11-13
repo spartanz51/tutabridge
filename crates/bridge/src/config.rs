@@ -35,6 +35,18 @@ pub struct Config {
     /// keyring on supported desktop platforms; Android requires this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_path: Option<String>,
+    /// Read the bridge password from this `authinfo` / `netrc` file (a
+    /// `.gpg` one is decrypted with `gpg`), the one Emacs and other mail
+    /// clients keep their logins in. Read-only: its entry for the bridge,
+    /// when there is one, wins over `bridge_password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authinfo_path: Option<String>,
+    /// Set by `load_config` when `bridge_password` came from
+    /// `authinfo_path`: the `bridge_password` the config file itself holds.
+    /// `save_config` writes that back, so the authinfo password never
+    /// lands in the file.
+    #[serde(skip)]
+    pub file_bridge_password: Option<Option<String>>,
 }
 
 /// The fields the settings form owns. Hidden configuration must come from
@@ -153,6 +165,8 @@ impl Default for Config {
             mcp_port: default_mcp_port(),
             auto_update: default_auto_update(),
             pass_path: None,
+            authinfo_path: None,
+            file_bridge_password: None,
         }
     }
 }
@@ -182,18 +196,56 @@ pub fn load_config() -> Result<Option<Config>, Box<dyn std::error::Error>> {
         // written before files were created owner-only.
         crate::fs_private::tighten(&path);
         let content = std::fs::read_to_string(&path)?;
-        Ok(Some(toml::from_str(&content)?))
+        let mut cfg: Config = toml::from_str(&content)?;
+        apply_authinfo(&mut cfg)?;
+        Ok(Some(cfg))
     } else {
         Ok(None)
+    }
+}
+
+/// Take the bridge password from `authinfo_path` when it has an entry for
+/// the bridge, remembering the file's own value for `save_config`. A file
+/// that cannot be read or decrypted is an error, not a fallback.
+fn apply_authinfo(cfg: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
+    match crate::authinfo::bridge_password(cfg) {
+        Ok(Some(password)) => {
+            let from_file = cfg.bridge_password.replace(password);
+            cfg.file_bridge_password = Some(from_file);
+            Ok(())
+        }
+        Ok(None) => {
+            if let Some(path) = crate::authinfo::configured_path(cfg) {
+                log::info!(
+                    "No bridge entry for {} in {}; using the password in config.toml",
+                    cfg.email,
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("Could not read the bridge password: {e}").into()),
     }
 }
 
 pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let path = config_path();
     crate::fs_private::create_dir_all_private(path.parent().unwrap())?;
-    let content = toml::to_string_pretty(cfg)?;
+    let content = config_file_content(cfg)?;
     crate::fs_private::write_private(&path, &content)?;
     Ok(())
+}
+
+/// What `save_config` writes: the config with the file's own bridge
+/// password in place of one read from authinfo.
+fn config_file_content(cfg: &Config) -> Result<String, toml::ser::Error> {
+    match &cfg.file_bridge_password {
+        Some(from_file) => toml::to_string_pretty(&Config {
+            bridge_password: from_file.clone(),
+            ..cfg.clone()
+        }),
+        None => toml::to_string_pretty(cfg),
+    }
 }
 
 /// Merge GUI-owned settings into the latest configuration on disk. Keep the
@@ -248,6 +300,15 @@ pub fn ensure_bridge_password(config: &mut Config) -> Result<String, Box<dyn std
 pub fn regenerate_bridge_password(
     config: &mut Config,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    if config.file_bridge_password.is_some() {
+        // A new password in config.toml would be hidden by the authinfo entry.
+        let path = crate::authinfo::configured_path(config).unwrap_or_default();
+        return Err(format!(
+            "The bridge password comes from {}: change it there.",
+            path.display()
+        )
+        .into());
+    }
     let password = generate_bridge_password();
     config.bridge_password = Some(password.clone());
     save_config(config)?;
@@ -436,6 +497,8 @@ smtp_port = 1025
             mcp_port: 1944,
             auto_update: false,
             pass_path: Some("Tuta/Bridge".to_string()),
+            authinfo_path: Some("~/.authinfo.gpg".to_string()),
+            file_bridge_password: None,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
@@ -659,5 +722,41 @@ enabled = true
         payload.as_object_mut().unwrap().remove("bind_addr");
         payload.as_object_mut().unwrap().remove("auto_update");
         assert!(serde_json::from_value::<EditableSettings>(payload).is_err());
+    }
+
+    #[test]
+    fn an_authinfo_password_is_never_written_to_the_config_file() {
+        let cfg = Config {
+            email: "me@tuta.io".into(),
+            bridge_password: Some("from-authinfo".into()),
+            authinfo_path: Some("~/.authinfo.gpg".into()),
+            file_bridge_password: Some(Some("from-file".into())),
+            ..Config::default()
+        };
+        let content = config_file_content(&cfg).unwrap();
+        assert!(content.contains("from-file"), "{content}");
+        assert!(!content.contains("from-authinfo"), "{content}");
+
+        let none_in_file = Config {
+            file_bridge_password: Some(None),
+            ..cfg
+        };
+        let content = config_file_content(&none_in_file).unwrap();
+        assert!(!content.contains("bridge_password"), "{content}");
+    }
+
+    #[test]
+    fn a_password_from_authinfo_is_not_regenerated() {
+        let mut cfg = Config {
+            bridge_password: Some("from-authinfo".into()),
+            authinfo_path: Some("/somewhere/authinfo.gpg".into()),
+            file_bridge_password: Some(None),
+            ..Config::default()
+        };
+        let err = regenerate_bridge_password(&mut cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/somewhere/authinfo.gpg"), "{err}");
+        assert_eq!(cfg.bridge_password.as_deref(), Some("from-authinfo"));
     }
 }
