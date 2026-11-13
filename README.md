@@ -292,6 +292,8 @@ that is worse than not sending, as when answering a mailing list with
 strict_threading = true
 ```
 
+This only refuses sending: a draft saved over IMAP is kept either way.
+
 ---
 
 ## Testing

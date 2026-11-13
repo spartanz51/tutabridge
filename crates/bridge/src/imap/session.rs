@@ -602,6 +602,9 @@ impl ImapSession {
                             let rfc = mail_to_rfc2822(&mail, details.as_ref(), &refs);
                             if let (Some(eid), Some(folder)) = (&elem_id, &self.selected_folder) {
                                 self.persist_body(eid, &rfc);
+                                if let (Some(ls), Some(d)) = (&self.local_store, &details) {
+                                    crate::sync::index_message_id(ls, eid, d);
+                                }
                                 self.store
                                     .update_complete_mail(&folder.id, eid, details, rfc)
                                     .await;
@@ -2359,6 +2362,94 @@ pub(crate) mod tests {
             resp2.last().unwrap().contains("NO [UNAVAILABLE]"),
             "cooldown should keep returning NO, got {resp2:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn on_demand_body_fetch_indexes_the_message_id() {
+        use crypto_primitives::{aes::Aes256Key, key::GenericAesKey};
+        let path =
+            std::env::temp_dir().join(format!("tutabridge-fetch-index-{}", rand::random::<u64>()));
+        let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[23; 32]).unwrap());
+        let local =
+            Arc::new(LocalStore::open(&path.join("cache.db"), &path.join("mails"), key).unwrap());
+        let mail = make_mail("ef", "subj", false);
+        let backend = Arc::new(MockBackend::with_mails(vec![mail.clone()]));
+        let mut details = make_details("body");
+        details.headers = Some(tutasdk::entities::generated::tutanota::Header {
+            _id: None,
+            headers: None,
+            compressedHeaders: Some("Message-ID: <fetched@example.org>\r\n".into()),
+            _errors: Default::default(),
+        });
+        backend.add_details("ef", details);
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store
+            .set_folder(
+                "inbox",
+                vec![StoredMail {
+                    mail,
+                    body_loaded: false,
+                    uid: 1,
+                    attachments_pending: false,
+                }],
+            )
+            .await;
+        let mut session = ImapSession::new(store, backend, None, Some(local.clone()));
+        session.handle_command("a LOGIN u p").await;
+        session.handle_command("b SELECT INBOX").await;
+
+        // The body is cached complete now, so prefetch will skip this mail:
+        // FETCH has to index the id itself.
+        let resp = session.handle_command("c UID FETCH 1 (BODY.PEEK[])").await;
+        assert!(resp.last().unwrap().contains("OK"), "{resp:?}");
+        assert!(local.knows_message_id("fetched@example.org"));
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn message_id_backfill_fetches_only_cached_mail() {
+        use crypto_primitives::{aes::Aes256Key, key::GenericAesKey};
+        let path =
+            std::env::temp_dir().join(format!("tutabridge-backfill-{}", rand::random::<u64>()));
+        let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[29; 32]).unwrap());
+        let local = LocalStore::open(&path.join("cache.db"), &path.join("mails"), key).unwrap();
+        let (cached, uncached) = (make_mail("bc", "a", false), make_mail("bu", "b", false));
+        let backend = MockBackend::with_mails(vec![cached.clone(), uncached.clone()]);
+        for (eid, id) in [("bc", "cached@example.org"), ("bu", "uncached@example.org")] {
+            let mut details = make_details("body");
+            details.headers = Some(tutasdk::entities::generated::tutanota::Header {
+                _id: None,
+                headers: None,
+                compressedHeaders: Some(format!("Message-ID: <{id}>\r\n")),
+                _errors: Default::default(),
+            });
+            backend.add_details(eid, details);
+        }
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        let stored = |mail, body_loaded, uid| StoredMail {
+            mail,
+            body_loaded,
+            uid,
+            attachments_pending: false,
+        };
+        store
+            .set_folder(
+                "inbox",
+                vec![stored(cached, true, 1), stored(uncached, false, 2)],
+            )
+            .await;
+        let (_tx, shutdown) = tokio::sync::watch::channel(false);
+
+        crate::sync::backfill_message_ids(&store, &local, &backend, 10, &shutdown).await;
+
+        // The uncached mail is left to prefetch, which indexes it as it
+        // downloads it, so the backfill does not fetch it a second time.
+        assert_eq!(*backend.details_calls.lock().unwrap(), 1);
+        assert!(local.knows_message_id("cached@example.org"));
+        assert!(!local.knows_message_id("uncached@example.org"));
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[tokio::test]

@@ -269,6 +269,7 @@ impl LocalStore {
              DELETE FROM sync_state;
              DELETE FROM store_meta;
              DELETE FROM mail_fts;
+             DELETE FROM message_ids;
              INSERT INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
         drop(conn);
@@ -446,8 +447,11 @@ impl LocalStore {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             {
                 let mut stmt = conn.prepare_cached("DELETE FROM mails WHERE element_id = ?1")?;
+                let mut ids =
+                    conn.prepare_cached("DELETE FROM message_ids WHERE element_id = ?1")?;
                 for eid in &deleted {
                     stmt.execute([eid])?;
+                    ids.execute([eid])?;
                 }
             }
             conn.execute_batch("COMMIT")?;
@@ -678,6 +682,11 @@ impl LocalStore {
             .filter_map(|r| r.ok())
             .collect();
         if !ids.is_empty() {
+            conn.execute(
+                "DELETE FROM message_ids WHERE element_id IN \
+                 (SELECT element_id FROM mails WHERE folder_id = ?1)",
+                [folder_id],
+            )?;
             conn.execute("DELETE FROM mails WHERE folder_id = ?1", [folder_id])?;
         }
         Ok(ids)
@@ -689,6 +698,12 @@ impl LocalStore {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute("DELETE FROM mails WHERE element_id = ?1", [element_id])?;
+            // A reply to a deleted mail must not thread to an id the server
+            // no longer holds.
+            conn.execute(
+                "DELETE FROM message_ids WHERE element_id = ?1",
+                [element_id],
+            )?;
         }
         self.delete_eml(element_id)?;
         self.unindex_body(element_id)?;
@@ -744,6 +759,32 @@ mod tests {
             .remember_message_id("a1b2@mail.example.org", "elem1")
             .unwrap();
         assert_eq!(store.message_id_count(), 1);
+    }
+
+    #[test]
+    fn removing_a_mail_forgets_its_message_id() {
+        let store = open_memory_store();
+        for (eid, folder) in [
+            ("a", "inbox"),
+            ("b", "inbox"),
+            ("c", "doomed"),
+            ("d", "kept"),
+        ] {
+            store.upsert_mail_metadata(&meta(eid, folder, 0)).unwrap();
+            store
+                .remember_message_id(&format!("{eid}@example.org"), eid)
+                .unwrap();
+        }
+        store.delete_mail("a").unwrap();
+        assert!(!store.knows_message_id("a@example.org"));
+        store.delete_mails_not_in("inbox", &[]).unwrap();
+        assert!(!store.knows_message_id("b@example.org"));
+        store.delete_folder_mails("doomed").unwrap();
+        assert!(!store.knows_message_id("c@example.org"));
+        // Mail still held keeps its id until a reset drops everything.
+        assert!(store.knows_message_id("d@example.org"));
+        store.reset().unwrap();
+        assert_eq!(store.message_id_count(), 0);
     }
 
     #[test]

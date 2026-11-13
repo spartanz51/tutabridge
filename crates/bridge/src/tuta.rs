@@ -209,6 +209,29 @@ struct CreatedDraft {
     attachment_keys: Vec<GenericAesKey>,
 }
 
+/// Pass a resolved In-Reply-To through. An unresolved one goes out as a new,
+/// unthreaded message, unless `refuse` is set (`strict_threading`, on send).
+fn refuse_if_unthreaded(
+    in_reply_to: &str,
+    resolved: (Option<String>, i64),
+    refuse: bool,
+) -> Result<(Option<String>, i64), ApiCallError> {
+    if resolved.0.is_none() && refuse {
+        return Err(ApiCallError::InternalSdkError {
+            error_message: format!(
+                "In-Reply-To <{in_reply_to}> could not be resolved to a Tuta \
+                 conversation, so this reply would be delivered \
+                 detached from its thread. Refusing because \
+                 strict_threading is set in the config. The referenced \
+                 message has to be one this bridge sent recently, \
+                 one it served over IMAP, or one whose Message-ID \
+                 the index holds."
+            ),
+        });
+    }
+    Ok(resolved)
+}
+
 pub struct TutaSession {
     pub logged_in: Arc<LoggedInSdk>,
     pub email: String,
@@ -659,7 +682,9 @@ impl TutaSession {
             id: draft,
             session_key,
             attachment_keys,
-        } = self.create_draft_impl(msg, &randomizer).await?;
+        } = self
+            .create_draft_impl(msg, &randomizer, self.strict_threading())
+            .await?;
 
         // To populate `attachmentKeyData[]` we need each File entity's
         // IdTuple — the server allocated those when the draft was created.
@@ -710,7 +735,22 @@ impl TutaSession {
         &self,
         msg: &ParsedMessage,
         randomizer: &RandomizerFacade,
+        refuse_unthreaded: bool,
     ) -> Result<CreatedDraft, ApiCallError> {
+        // Thread replies: a submission carrying In-Reply-To (git send-email
+        // series, MUA replies) gets its reference resolved to an id the
+        // server can act on. Unresolvable → (None, NEW), today's behavior,
+        // unless the caller refuses that (`strict_threading`, on send only).
+        // Resolved first, so a refused send uploads no attachments.
+        let (previous_message_id, conversation_type) = match &msg.in_reply_to {
+            Some(irt) => refuse_if_unthreaded(
+                irt,
+                self.resolve_previous_message(irt).await,
+                refuse_unthreaded,
+            )?,
+            None => (None, CONVERSATION_TYPE_NEW),
+        };
+
         let session_key: GenericAesKey = Aes256Key::generate(randomizer).into();
 
         // Send as the address the submission asked for, when the account
@@ -774,31 +814,6 @@ impl TutaSession {
         }
 
         let draft_data = build_draft_data(msg, &sender_email, added_attachments);
-
-        // Thread replies: a submission carrying In-Reply-To (git send-email
-        // series, MUA replies) gets its reference resolved to an id the
-        // server can act on. Unresolvable → (None, NEW), today's behavior,
-        // unless strict threading is on (see the `strict_threading` field).
-        let (previous_message_id, conversation_type) = match &msg.in_reply_to {
-            Some(irt) => {
-                let resolved = self.resolve_previous_message(irt).await;
-                if resolved.0.is_none() && self.strict_threading() {
-                    return Err(ApiCallError::InternalSdkError {
-                        error_message: format!(
-                            "In-Reply-To <{irt}> could not be resolved to a Tuta \
-                             conversation, so this reply would be delivered \
-                             detached from its thread. Refusing because \
-                             strict_threading is set in the config. The referenced \
-                             message has to be one this bridge sent recently, \
-                             one it served over IMAP, or one whose Message-ID \
-                             the index holds."
-                        ),
-                    });
-                }
-                resolved
-            }
-            None => (None, CONVERSATION_TYPE_NEW),
-        };
 
         let create_data = DraftCreateData {
             _format: 0,
@@ -1244,7 +1259,8 @@ impl MailBackend for TutaSession {
 
     async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
-        self.create_draft_impl(msg, &randomizer)
+        // A saved draft is not sent, so strict threading does not apply.
+        self.create_draft_impl(msg, &randomizer, false)
             .await
             .map(|draft| draft.id)
             .map_err(|e| format!("{e}"))
@@ -2048,5 +2064,28 @@ mod send_tests {
         let sd = build_send_draft_data(vec![1u8], draft_id, pid, vec![], true);
         assert!(sd.plaintext);
         assert!(sd.parameters.expect("parameters must be set").plaintext);
+    }
+
+    #[test]
+    fn an_unresolved_reply_is_refused_only_when_asked() {
+        let unresolved = (None, CONVERSATION_TYPE_NEW);
+        // Send with strict_threading: refused, before anything is uploaded.
+        assert!(refuse_if_unthreaded("x@example.org", unresolved.clone(), true).is_err());
+        // Saving a draft, or strict_threading off: goes out unthreaded.
+        assert_eq!(
+            refuse_if_unthreaded("x@example.org", unresolved.clone(), false).unwrap(),
+            unresolved
+        );
+    }
+
+    #[test]
+    fn a_resolved_reply_passes_through_either_way() {
+        let resolved = (Some("x@example.org".to_string()), CONVERSATION_TYPE_REPLY);
+        for refuse in [true, false] {
+            assert_eq!(
+                refuse_if_unthreaded("x@example.org", resolved.clone(), refuse).unwrap(),
+                resolved
+            );
+        }
     }
 }

@@ -604,13 +604,13 @@ const MESSAGE_ID_BACKFILL_MARKER: &str = "message_ids_backfilled_v1";
 /// be threaded. The id is not recoverable locally: the cached `.eml` carries
 /// the id this bridge mints for IMAP, not the one the sender set. Only
 /// `MailDetails.headers` holds the original, so this pass re-fetches details
-/// for the mails it has not resolved yet.
+/// for the cached mails it has not resolved yet.
 ///
 /// Runs once, inline, after the startup sync has already opened the IMAP and
 /// SMTP listeners. It costs one request per unresolved mail, bounded by the
 /// same body-prefetch window the rest of the syncer uses, and it only delays
 /// body prefetch, never mail delivery.
-async fn backfill_message_ids(
+pub(crate) async fn backfill_message_ids(
     store: &MailStore,
     local_store: &LocalStore,
     backend: &dyn MailBackend,
@@ -636,7 +636,10 @@ async fn backfill_message_ids(
             let mail = &stored.mail;
             let Some(id) = &mail._id else { continue };
             let eid = id.element_id.to_string();
-            if known.contains(&eid) {
+            // Only mail cached complete: prefetch indexes the rest when it
+            // downloads them, so fetching them here would fetch them twice.
+            let cached = stored.body_loaded || local_store.has_eml(&eid);
+            if !cached || known.contains(&eid) {
                 continue;
             }
             tokio::time::sleep(INTER_REQUEST_DELAY).await;
@@ -957,6 +960,17 @@ fn prefetch_window(mut mails: Vec<StoredMail>, limit: usize) -> Vec<StoredMail> 
     mails
 }
 
+/// Remember a received mail's Message-ID, so a later reply to it can be
+/// threaded (see `MessageIdIndex`). Called wherever details arrive: body
+/// prefetch, on-demand IMAP FETCH and the event handler.
+pub(crate) fn index_message_id(local_store: &LocalStore, element_id: &str, details: &MailDetails) {
+    if let Some(message_id) = header_message_id(details) {
+        if let Err(error) = local_store.remember_message_id(&message_id, element_id) {
+            warn!("Failed to index message id for {element_id}: {error}");
+        }
+    }
+}
+
 pub(crate) async fn prefetch_details(
     store: &MailStore,
     local_store: &LocalStore,
@@ -1043,14 +1057,7 @@ pub(crate) async fn prefetch_details(
             if let Err(error) = local_store.index_body(&eid, &body_text) {
                 warn!("Failed to index complete message: {error}");
             }
-            // The header block came with the details we already fetched, so
-            // remembering the Message-ID costs no request and lets a later
-            // reply to this mail be threaded (see `MessageIdIndex`).
-            if let Some(message_id) = header_message_id(details) {
-                if let Err(error) = local_store.remember_message_id(&message_id, &eid) {
-                    warn!("Failed to index message id: {error}");
-                }
-            }
+            index_message_id(local_store, &eid, details);
         }
         store
             .update_complete_mail(&folder.id, &eid, details, rfc)
