@@ -318,6 +318,11 @@ impl BridgeHandle {
         };
         let bus_base_url = config.api_url.clone();
 
+        // Let the send path ask the store whether a Message-ID belongs to mail
+        // this account holds, so a reply to someone else's mail threads.
+        session.attach_message_id_index(local_store.clone());
+        session.set_strict_threading(config.strict_threading);
+
         let backend: Arc<dyn MailBackend> = Arc::new(session);
         let store = MailStore::new();
         self.store = Some(store.clone());

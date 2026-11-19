@@ -209,6 +209,29 @@ struct CreatedDraft {
     attachment_keys: Vec<GenericAesKey>,
 }
 
+/// Pass a resolved In-Reply-To through. An unresolved one goes out as a new,
+/// unthreaded message, unless `refuse` is set (`strict_threading`, on send).
+fn refuse_if_unthreaded(
+    in_reply_to: &str,
+    resolved: (Option<String>, i64),
+    refuse: bool,
+) -> Result<(Option<String>, i64), ApiCallError> {
+    if resolved.0.is_none() && refuse {
+        return Err(ApiCallError::InternalSdkError {
+            error_message: format!(
+                "In-Reply-To <{in_reply_to}> could not be resolved to a Tuta \
+                 conversation, so this reply would be delivered \
+                 detached from its thread. Refusing because \
+                 strict_threading is set in the config. The referenced \
+                 message has to be one this bridge sent recently, \
+                 one it served over IMAP, or one whose Message-ID \
+                 the index holds."
+            ),
+        });
+    }
+    Ok(resolved)
+}
+
 pub struct TutaSession {
     pub logged_in: Arc<LoggedInSdk>,
     pub email: String,
@@ -229,9 +252,47 @@ pub struct TutaSession {
     /// we sent (patch 2..N of a git send-email series) must be threaded
     /// against the id the server actually delivered.
     sent_id_cache: Arc<tokio::sync::Mutex<HashMap<String, SentIdEntry>>>,
+    /// Message-IDs of mail this account holds, for threading replies to mail
+    /// the bridge did not send. Attached by the bridge after the local store
+    /// is open; `None` for sessions without one (the `backup` path), which
+    /// simply falls back to the unindexed behaviour.
+    message_ids: std::sync::OnceLock<Arc<dyn MessageIdIndex>>,
+    /// Refuse a reply whose `In-Reply-To` cannot be resolved instead of
+    /// sending it as an unthreaded NEW message (`strict_threading` in the
+    /// config). Tuta carries no `In-Reply-To`/`References` of its own: the
+    /// server derives them from `previousMessageId`, so an unresolvable
+    /// reference does not merely lose a header, it detaches the message
+    /// from its thread, which the sender only notices in the archive.
+    strict_threading: std::sync::atomic::AtomicBool,
+}
+
+/// Lookup of Message-IDs the account holds, implemented by the local store.
+///
+/// Deliberately one method: the session talks to Tuta and the store owns the
+/// disk, and this is the only thing the send path needs from the other side
+/// of that line. Keeping it this narrow keeps the backend mockable.
+pub trait MessageIdIndex: Send + Sync {
+    fn knows_message_id(&self, message_id: &str) -> bool;
 }
 
 impl TutaSession {
+    /// Give the send path a way to ask whether a Message-ID belongs to mail
+    /// this account holds. Called once, after the local store is open.
+    pub fn attach_message_id_index(&self, index: Arc<dyn MessageIdIndex>) {
+        let _ = self.message_ids.set(index);
+    }
+
+    /// Apply the config's `strict_threading` (see the field).
+    pub fn set_strict_threading(&self, strict: bool) {
+        self.strict_threading
+            .store(strict, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn strict_threading(&self) -> bool {
+        self.strict_threading
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub async fn load_mailbox(&self) -> Result<MailBox, ApiCallError> {
         self.logged_in.mail_facade().load_user_mailbox().await
     }
@@ -621,7 +682,9 @@ impl TutaSession {
             id: draft,
             session_key,
             attachment_keys,
-        } = self.create_draft_impl(msg, &randomizer).await?;
+        } = self
+            .create_draft_impl(msg, &randomizer, self.strict_threading())
+            .await?;
 
         // To populate `attachmentKeyData[]` we need each File entity's
         // IdTuple — the server allocated those when the draft was created.
@@ -672,7 +735,22 @@ impl TutaSession {
         &self,
         msg: &ParsedMessage,
         randomizer: &RandomizerFacade,
+        refuse_unthreaded: bool,
     ) -> Result<CreatedDraft, ApiCallError> {
+        // Thread replies: a submission carrying In-Reply-To (git send-email
+        // series, MUA replies) gets its reference resolved to an id the
+        // server can act on. Unresolvable → (None, NEW), today's behavior,
+        // unless the caller refuses that (`strict_threading`, on send only).
+        // Resolved first, so a refused send uploads no attachments.
+        let (previous_message_id, conversation_type) = match &msg.in_reply_to {
+            Some(irt) => refuse_if_unthreaded(
+                irt,
+                self.resolve_previous_message(irt).await,
+                refuse_unthreaded,
+            )?,
+            None => (None, CONVERSATION_TYPE_NEW),
+        };
+
         let session_key: GenericAesKey = Aes256Key::generate(randomizer).into();
 
         // Send as the address the submission asked for, when the account
@@ -736,14 +814,6 @@ impl TutaSession {
         }
 
         let draft_data = build_draft_data(msg, &sender_email, added_attachments);
-
-        // Thread replies: a submission carrying In-Reply-To (git send-email
-        // series, MUA replies) gets its reference resolved to an id the
-        // server can act on. Unresolvable → (None, NEW), today's behavior.
-        let (previous_message_id, conversation_type) = match &msg.in_reply_to {
-            Some(irt) => self.resolve_previous_message(irt).await,
-            None => (None, CONVERSATION_TYPE_NEW),
-        };
 
         let create_data = DraftCreateData {
             _format: 0,
@@ -888,6 +958,25 @@ impl TutaSession {
                 _ => (None, CONVERSATION_TYPE_NEW),
             };
         }
+        // Mail this account holds: its Message-ID is exactly what the server
+        // stores in ConversationEntry.messageId, so it can be passed straight
+        // through. This is what threads a reply to someone else's mail, which
+        // neither branch above can do.
+        match self.message_ids.get() {
+            Some(index) if index.knows_message_id(in_reply_to) => {
+                return (Some(in_reply_to.to_string()), CONVERSATION_TYPE_REPLY);
+            }
+            Some(_) => {}
+            // Nothing attached the index. Every foreign reply then falls
+            // through to the unthreaded branch below, which looks exactly
+            // like an id the mailbox does not hold — so say which it is,
+            // or the wiring bug is invisible from the outside.
+            None => log::warn!(
+                "No Message-ID index is attached to this session; \
+                 replies to mail this bridge did not send cannot be threaded"
+            ),
+        }
+
         // A foreign id the server may not know, and no conversation type
         // can safely carry it (see `CONVERSATION_TYPE_NEW` above), so keep
         // today's unthreaded behavior rather than risk the send.
@@ -1170,7 +1259,8 @@ impl MailBackend for TutaSession {
 
     async fn create_draft(&self, msg: &ParsedMessage) -> Result<IdTupleGenerated, String> {
         let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
-        self.create_draft_impl(msg, &randomizer)
+        // A saved draft is not sent, so strict threading does not apply.
+        self.create_draft_impl(msg, &randomizer, false)
             .await
             .map(|draft| draft.id)
             .map_err(|e| format!("{e}"))
@@ -1350,6 +1440,8 @@ pub async fn login_with_persistence(
                     access_token,
                     self_send_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                     sent_id_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                    message_ids: std::sync::OnceLock::new(),
+                    strict_threading: std::sync::atomic::AtomicBool::new(false),
                 });
             }
             Err(e) => match classify_resume_failure(&e) {
@@ -1467,6 +1559,8 @@ pub async fn login_with_persistence(
         access_token: credentials.access_token,
         self_send_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         sent_id_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        message_ids: std::sync::OnceLock::new(),
+        strict_threading: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -1970,5 +2064,28 @@ mod send_tests {
         let sd = build_send_draft_data(vec![1u8], draft_id, pid, vec![], true);
         assert!(sd.plaintext);
         assert!(sd.parameters.expect("parameters must be set").plaintext);
+    }
+
+    #[test]
+    fn an_unresolved_reply_is_refused_only_when_asked() {
+        let unresolved = (None, CONVERSATION_TYPE_NEW);
+        // Send with strict_threading: refused, before anything is uploaded.
+        assert!(refuse_if_unthreaded("x@example.org", unresolved.clone(), true).is_err());
+        // Saving a draft, or strict_threading off: goes out unthreaded.
+        assert_eq!(
+            refuse_if_unthreaded("x@example.org", unresolved.clone(), false).unwrap(),
+            unresolved
+        );
+    }
+
+    #[test]
+    fn a_resolved_reply_passes_through_either_way() {
+        let resolved = (Some("x@example.org".to_string()), CONVERSATION_TYPE_REPLY);
+        for refuse in [true, false] {
+            assert_eq!(
+                refuse_if_unthreaded("x@example.org", resolved.clone(), refuse).unwrap(),
+                resolved
+            );
+        }
     }
 }

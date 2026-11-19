@@ -367,6 +367,9 @@ async fn apply_mail_set_entry_create(
                 ""
             },
         );
+        if let Some(details) = &details {
+            crate::sync::index_message_id(local_store, &mail_eid, details);
+        }
         // Render the inline body to an RFC 2822 envelope only when the mail
         // has zero attachments — those need a separate blob download per
         // File that the event-bus handler cannot do synchronously. Mails
