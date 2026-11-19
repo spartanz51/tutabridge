@@ -276,8 +276,11 @@ mod tests {
     fn date_stamp_is_sortable_and_correct() {
         // 2024-12-25 12:37:25 UTC = 1735130245000 ms
         assert_eq!(date_stamp(1735130245000), "20241225-123725");
-        // epoch
+        // leap day: 2000-02-29 00:00:00 UTC = 951782400000 ms
+        assert_eq!(date_stamp(951_782_400_000), "20000229-000000");
+        // epoch and out-of-range fallback
         assert_eq!(date_stamp(0), "19700101-000000");
+        assert_eq!(date_stamp(u64::MAX), "19700101-000000");
     }
 
     // --- integration: export_eml over a mock backend + temp store ---

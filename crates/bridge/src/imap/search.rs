@@ -531,6 +531,7 @@ mod tests {
 
     #[test]
     fn imap_dates_are_day_numbers_and_impossible_ones_are_rejected() {
+        assert_eq!(parse_imap_date("31-Dec-1969"), Some(-1));
         assert_eq!(parse_imap_date("1-Jan-1970"), Some(0));
         assert_eq!(parse_imap_date("01-jan-1970"), Some(0));
         assert_eq!(parse_imap_date("25-DEC-2024"), Some(20082));
@@ -539,6 +540,9 @@ mod tests {
             "31-Feb-2020",
             "29-Feb-2023",
             "0-Jan-2020",
+            "00-Jan-2020",
+            "32-Jan-2020",
+            "001-Jan-2020",
             "1-Foo-2020",
             "1-Jan",
             "",

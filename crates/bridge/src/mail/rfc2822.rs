@@ -584,6 +584,24 @@ mod tests {
     }
 
     #[test]
+    fn test_format_dates_leap_day_and_out_of_range_fallback() {
+        // 2000-02-29 00:00:00 UTC = 951782400000 ms (Tuesday)
+        assert_eq!(
+            format_rfc2822_date(951_782_400_000),
+            "Tue, 29 Feb 2000 00:00:00 +0000"
+        );
+        assert_eq!(
+            format_internal_date(951_782_400_000),
+            "29-Feb-2000 00:00:00 +0000"
+        );
+        assert_eq!(
+            format_rfc2822_date(u64::MAX),
+            "Thu, 01 Jan 1970 00:00:00 +0000"
+        );
+        assert_eq!(format_internal_date(u64::MAX), "01-Jan-1970 00:00:00 +0000");
+    }
+
+    #[test]
     fn test_encode_header_ascii() {
         assert_eq!(encode_header_value("Hello World"), "Hello World");
     }
