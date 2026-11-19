@@ -453,8 +453,8 @@ pub(crate) fn extract_headers(rfc: &str) -> String {
 }
 
 /// Strip HTML markup down to readable text for full-text indexing. Drops tags,
-/// the contents of `<script>`/`<style>` blocks, and decodes the handful of
-/// entities that actually show up in mail bodies, then collapses whitespace.
+/// comments, and the contents of `<script>`/`<style>` blocks, decodes HTML
+/// character references via the HTML tokenizer, and collapses whitespace.
 /// This is lossy by design — it only needs to be good enough that a body
 /// search matches the words a human would see, not the markup around them.
 pub(crate) fn strip_html(html: &str) -> String {
@@ -571,6 +571,8 @@ mod tests {
     fn strip_html_skips_script_and_style() {
         let html = "<style>.a{color:red}</style><div>Visible</div><script>alert(1)</script>";
         assert_eq!(strip_html(html), "Visible");
+        let upper = "<STYLE>body{}</STYLE><p>Été &mdash; 日本語</p><SCRIPT>x()</SCRIPT>";
+        assert_eq!(strip_html(upper), "Été — 日本語");
     }
 
     #[test]
