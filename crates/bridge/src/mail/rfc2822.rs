@@ -467,55 +467,39 @@ pub(crate) fn extract_headers(rfc: &str) -> String {
 }
 
 /// Strip HTML markup down to readable text for full-text indexing. Drops tags,
-/// the contents of `<script>`/`<style>` blocks, and decodes the handful of
-/// entities that actually show up in mail bodies, then collapses whitespace.
+/// comments, and the contents of `<script>`/`<style>` blocks, decodes HTML
+/// character references via the HTML tokenizer, and collapses whitespace.
 /// This is lossy by design — it only needs to be good enough that a body
 /// search matches the words a human would see, not the markup around them.
 pub(crate) fn strip_html(html: &str) -> String {
+    let mut emitter = html5gum::DefaultEmitter::default();
+    // Read script/style contents as raw text, so a `</b` inside is not a tag.
+    emitter.naively_switch_states(true);
     let mut out = String::with_capacity(html.len());
-    let mut chars = html.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '<' {
-            // Capture the tag name to detect script/style blocks we must skip
-            // wholesale (their text content is not human-visible).
-            let mut tag = String::new();
-            for t in chars.clone().take(6) {
-                if t == '>' || t.is_whitespace() {
-                    break;
-                }
-                tag.push(t.to_ascii_lowercase());
+    let mut skipped = 0usize;
+    for token in html5gum::Tokenizer::new_with_emitter(html, emitter) {
+        let Ok(token) = token;
+        match token {
+            // The tokenizer has already decoded every character reference.
+            html5gum::Token::String(s) if skipped == 0 => {
+                out.push_str(&String::from_utf8_lossy(&s));
             }
-            let skip_block = matches!(tag.trim_start_matches('/'), "script" | "style");
-            // Consume up to and including the closing '>'.
-            for t in chars.by_ref() {
-                if t == '>' {
-                    break;
+            html5gum::Token::StartTag(tag) => {
+                if matches!(&tag.name[..], b"script" | b"style") {
+                    skipped += 1;
                 }
+                out.push(' ');
             }
-            if skip_block && !tag.starts_with('/') {
-                // Swallow everything until the matching closing tag.
-                let close = format!("</{tag}");
-                let mut window = String::new();
-                for t in chars.by_ref() {
-                    window.push(t.to_ascii_lowercase());
-                    if window.ends_with(&close) {
-                        // Drop the rest of the closing tag.
-                        for t2 in chars.by_ref() {
-                            if t2 == '>' {
-                                break;
-                            }
-                        }
-                        break;
-                    }
+            html5gum::Token::EndTag(tag) => {
+                if matches!(&tag.name[..], b"script" | b"style") {
+                    skipped = skipped.saturating_sub(1);
                 }
+                out.push(' ');
             }
-            out.push(' ');
-        } else {
-            out.push(c);
+            _ => {}
         }
     }
-    let decoded = decode_entities(&out);
-    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn decode_entities(s: &str) -> String {
@@ -664,9 +648,27 @@ mod tests {
     }
 
     #[test]
+    fn strip_html_decodes_every_character_reference() {
+        // Named, decimal and hexadecimal references, not only the basic five.
+        let html = "<p>caf&eacute; &#233;t&#xe9; &euro;5 &copy; a&nbsp;b &amp;lt; 1 &lt; 2</p>";
+        assert_eq!(strip_html(html), "café été €5 © a b &lt; 1 < 2");
+    }
+
+    #[test]
+    fn strip_html_is_not_fooled_by_markup_lookalikes() {
+        // A `>` inside an attribute value does not end the tag, a comment
+        // is not text, and a `</b` inside a script is not a tag.
+        let html =
+            "<a title=\"a > b\" href=x>link</a><!-- hidden > --><script>if (a</b) x()</script>end";
+        assert_eq!(strip_html(html), "link end");
+    }
+
+    #[test]
     fn strip_html_skips_script_and_style() {
         let html = "<style>.a{color:red}</style><div>Visible</div><script>alert(1)</script>";
         assert_eq!(strip_html(html), "Visible");
+        let upper = "<STYLE>body{}</STYLE><p>Été &mdash; 日本語</p><SCRIPT>x()</SCRIPT>";
+        assert_eq!(strip_html(upper), "Été — 日本語");
     }
 
     #[test]
