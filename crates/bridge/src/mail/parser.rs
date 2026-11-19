@@ -203,6 +203,16 @@ fn body_of(message: &Message<'_>, raw: &str) -> Body {
             attachments: found.attachments,
         };
     }
+    if is_single_part_attachment(root) {
+        // A message that is only a file (e.g. Gnus sending a lone attachment
+        // without wrapping it in a multipart): Tuta bodies are HTML, so a
+        // lone PDF, image, or attachment-disposed part can only be a file.
+        return Body {
+            html: String::new(),
+            text: None,
+            attachments: vec![attachment_from_part(root, raw)],
+        };
+    }
     let decoded = match root.text_contents() {
         Some(text) => text.to_string(),
         None => String::from_utf8_lossy(root.contents()).into_owned(),
@@ -219,6 +229,37 @@ fn body_of(message: &Message<'_>, raw: &str) -> Body {
         },
         text: (content_type.is_none() || declared_plain).then_some(decoded),
         attachments: Vec::new(),
+    }
+}
+
+fn is_text_part(part: &mail_parser::MessagePart<'_>) -> bool {
+    part.content_type()
+        .is_none_or(|ct| ct.ctype().eq_ignore_ascii_case("text"))
+}
+
+fn is_attachment_disposition(part: &mail_parser::MessagePart<'_>) -> bool {
+    part.content_disposition()
+        .is_some_and(|cd| cd.ctype().eq_ignore_ascii_case("attachment"))
+}
+
+/// Whether a non-multipart message is a file rather than a body: it declares
+/// `Content-Disposition: attachment`, or its type is neither `text/*` nor
+/// `multipart/*` (a malformed multipart without a boundary stays a body).
+fn is_single_part_attachment(part: &mail_parser::MessagePart<'_>) -> bool {
+    is_attachment_disposition(part)
+        || part.content_type().is_some_and(|ct| {
+            !ct.ctype().eq_ignore_ascii_case("text")
+                && !ct.ctype().eq_ignore_ascii_case("multipart")
+        })
+}
+
+fn attachment_from_part(part: &mail_parser::MessagePart<'_>, raw: &str) -> Attachment {
+    Attachment {
+        filename: attachment_name(part)
+            .unwrap_or("attachment.bin")
+            .to_string(),
+        mime_type: mime_type(part),
+        data: attachment_bytes(part, raw),
     }
 }
 
@@ -249,24 +290,13 @@ fn collect(message: &Message<'_>, raw: &str, id: MessagePartId, found: &mut Foun
             collect(message, raw, child, found);
             continue;
         }
-        let is_text = part
-            .content_type()
-            .is_none_or(|ct| ct.ctype().eq_ignore_ascii_case("text"));
-        let is_attachment = part
-            .content_disposition()
-            .is_some_and(|cd| cd.ctype().eq_ignore_ascii_case("attachment"))
-            || (!is_text
+        let is_attachment = is_attachment_disposition(part)
+            || (!is_text_part(part)
                 && part
                     .content_type()
                     .is_some_and(|ct| ct.attribute("name").is_some()));
         if is_attachment {
-            found.attachments.push(Attachment {
-                filename: attachment_name(part)
-                    .unwrap_or("attachment.bin")
-                    .to_string(),
-                mime_type: mime_type(part),
-                data: attachment_bytes(part, raw),
-            });
+            found.attachments.push(attachment_from_part(part, raw));
         } else if part.is_content_type("text", "html") {
             if found.html.is_none() {
                 found.html = part.text_contents().map(str::to_string);
@@ -1088,6 +1118,68 @@ mod tests {
         assert!(!msg.is_plaintext);
         assert_eq!(msg.attachments.len(), 1);
         assert_eq!(msg.attachments[0].data, b"PK\x03\x04");
+    }
+
+    #[test]
+    fn single_part_attachment_is_a_file_not_the_body() {
+        let pdf = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n";
+        let raw = format!(
+            "From: a@b.com\r\nTo: b@c.com\r\nSubject: Test\r\nMIME-Version: 1.0\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=test.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(pdf)
+        );
+        let msg = parse_rfc2822(&raw);
+        assert_eq!(msg.body_html, "");
+        assert_eq!(msg.body_text, None);
+        assert!(!msg.is_plaintext);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "test.pdf");
+        assert_eq!(msg.attachments[0].mime_type, "application/pdf");
+        assert_eq!(msg.attachments[0].data, pdf);
+    }
+
+    #[test]
+    fn single_part_non_text_without_disposition_is_a_file() {
+        let raw = "From: a@b.com\r\nContent-Type: image/png; name=\"a.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\nUE5HSEVBREVS\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.body_html, "");
+        assert!(!msg.is_plaintext);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "a.png");
+        assert_eq!(msg.attachments[0].mime_type, "image/png");
+        assert_eq!(msg.attachments[0].data, b"PNGHEADER");
+    }
+
+    #[test]
+    fn single_part_text_attachment_is_a_file() {
+        let raw = "From: a@b.com\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=notes.txt\r\n\r\nhello\r\n";
+        let msg = parse_rfc2822(raw);
+        assert_eq!(msg.body_html, "");
+        assert!(!msg.is_plaintext);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "notes.txt");
+        assert_eq!(msg.attachments[0].mime_type, "text/plain");
+        assert_eq!(msg.attachments[0].data, b"hello\r\n");
+    }
+
+    #[test]
+    fn single_part_classification_ignores_parameter_values_and_preserves_binary_qp() {
+        // `attachment` inside a filename parameter must not turn an inline
+        // text body into an attachment.
+        let inline_html = "From: a@b.com\r\nContent-Type: text/html\r\nContent-Disposition: inline; filename=\"attachment.html\"\r\n\r\n<p>hi</p>";
+        let msg = parse_rfc2822(inline_html);
+        assert_eq!(msg.body_html, "<p>hi</p>");
+        assert!(msg.attachments.is_empty());
+
+        // `text/` inside a name parameter must not hide a non-text attachment,
+        // and quoted-printable binary bytes must not be corrupted through UTF-8.
+        let qp_pdf = "From: a@b.com\r\nContent-Type: application/pdf; name=\"text/report.pdf\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n=00=FF=80=41";
+        let msg = parse_rfc2822(qp_pdf);
+        assert_eq!(msg.body_html, "");
+        assert!(!msg.is_plaintext);
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename, "text/report.pdf");
+        assert_eq!(msg.attachments[0].mime_type, "application/pdf");
+        assert_eq!(msg.attachments[0].data, b"\x00\xff\x80A");
     }
 
     #[test]
