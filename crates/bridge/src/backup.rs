@@ -219,14 +219,11 @@ fn sanitize_segment(s: &str) -> String {
 /// Compact, sortable `YYYYMMDD-HHMMSS` stamp from an epoch-millis value, used
 /// as a filename prefix so a folder listing sorts chronologically.
 fn date_stamp(millis: u64) -> String {
-    let secs = millis / 1000;
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let (y, m, d) = crate::mail::rfc2822::days_to_ymd(days);
-    let h = tod / 3600;
-    let mi = (tod % 3600) / 60;
-    let s = tod % 60;
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, h, mi, s)
+    crate::mail::rfc2822::utc_datetime(millis)
+        .format(time::macros::format_description!(
+            "[year][month][day]-[hour][minute][second]"
+        ))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -279,8 +276,11 @@ mod tests {
     fn date_stamp_is_sortable_and_correct() {
         // 2024-12-25 12:37:25 UTC = 1735130245000 ms
         assert_eq!(date_stamp(1735130245000), "20241225-123725");
-        // epoch
+        // leap day: 2000-02-29 00:00:00 UTC = 951782400000 ms
+        assert_eq!(date_stamp(951_782_400_000), "20000229-000000");
+        // epoch and out-of-range fallback
         assert_eq!(date_stamp(0), "19700101-000000");
+        assert_eq!(date_stamp(u64::MAX), "19700101-000000");
     }
 
     // --- integration: export_eml over a mock backend + temp store ---
