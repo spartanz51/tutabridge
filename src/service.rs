@@ -1004,6 +1004,7 @@ mod tests {
                 certificate: Some(pem.clone()),
                 address: Some(address),
                 password: None,
+                authinfo_configured: false,
             });
             let _server = StatusServer::start(receiver).unwrap();
             println!("public-health-fixture-ready");
