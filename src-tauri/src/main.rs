@@ -119,7 +119,8 @@ async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
     let (cfg, bridge_pw, _) = match bridge_password::ensure_async(cfg).await {
         Ok(resolved) => resolved,
         Err(e) => {
-            log::warn!("Bridge password setup failed: {e}");
+            let msg = format!("Bridge password setup failed: {e}");
+            state.lock().await.fail_start(msg).await;
             return;
         }
     };

@@ -152,8 +152,8 @@ pub async fn get_stats(state: State<'_, BridgeState>) -> Result<BridgeStats, Str
 
 #[tauri::command]
 pub async fn get_bridge_password(state: State<'_, BridgeState>) -> Result<Option<String>, String> {
-    if let Some(pw) = state.lock().await.active_bridge_password() {
-        return Ok(Some(pw.to_owned()));
+    if let Some(pw) = state.lock().await.active_bridge_password().await {
+        return Ok(Some(pw));
     }
     let Some(cfg) = config::load_config().map_err(|e| e.to_string())? else {
         return Ok(None);
@@ -179,11 +179,7 @@ pub async fn get_mcp_client_config(state: State<'_, BridgeState>) -> Result<Stri
     let cfg = config::load_config()
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    let active = state
-        .lock()
-        .await
-        .active_bridge_password()
-        .map(str::to_owned);
+    let active = state.lock().await.active_bridge_password().await;
     let token = match active {
         Some(pw) => pw,
         None => bridge_password::resolve_async(cfg.clone())

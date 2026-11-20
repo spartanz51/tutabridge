@@ -101,9 +101,7 @@ export function ConnectionPanel({
             </div>
           </div>
           {bridgePassword && bridgePasswordError && (
-            <p className="error-text" style={{ marginTop: "0.75rem" }}>
-              {bridgePasswordError}
-            </p>
+            <p className="error-text">{bridgePasswordError}</p>
           )}
         </div>
       </div>

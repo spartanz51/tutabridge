@@ -68,14 +68,20 @@ pub fn resolve(cfg: &Config) -> Result<Option<ResolvedPassword>, String> {
 /// If an authinfo entry provides the password, `cfg.bridge_password` and
 /// `config.toml` are left untouched. Only when no password exists anywhere is
 /// a new one generated and saved to `config.toml`.
-pub fn ensure(cfg: &mut Config) -> Result<(String, bool), Box<dyn std::error::Error>> {
+pub fn ensure(cfg: &mut Config) -> Result<(ResolvedPassword, bool), Box<dyn std::error::Error>> {
     if let Some(resolved) = resolve(cfg)? {
-        return Ok((resolved.value, false));
+        return Ok((resolved, false));
     }
     let password = generate_bridge_password();
     cfg.bridge_password = Some(password.clone());
     save_config(cfg)?;
-    Ok((password, true))
+    Ok((
+        ResolvedPassword {
+            value: password,
+            source: PasswordSource::Config,
+        },
+        true,
+    ))
 }
 
 /// Generate and persist a new bridge password in `config.toml`.
@@ -109,7 +115,7 @@ pub async fn resolve_async(cfg: Config) -> Result<Option<ResolvedPassword>, Stri
 }
 
 /// Async wrapper around [`ensure`] for async callers (GUI, service).
-pub async fn ensure_async(mut cfg: Config) -> Result<(Config, String, bool), String> {
+pub async fn ensure_async(mut cfg: Config) -> Result<(Config, ResolvedPassword, bool), String> {
     tokio::task::spawn_blocking(move || {
         let (password, is_new) = ensure(&mut cfg).map_err(|e| e.to_string())?;
         Ok((cfg, password, is_new))
@@ -174,7 +180,7 @@ mod tests {
         assert_eq!(cfg.bridge_password.as_deref(), Some("from-file"));
 
         let (ensured, is_new) = ensure(&mut cfg).unwrap();
-        assert_eq!(ensured, "from-authinfo");
+        assert_eq!(ensured.value, "from-authinfo");
         assert!(!is_new);
         assert_eq!(cfg.bridge_password.as_deref(), Some("from-file"));
 
@@ -195,7 +201,7 @@ mod tests {
         };
 
         let (pw, is_new) = ensure(&mut cfg).unwrap();
-        assert_eq!(pw, "from-authinfo");
+        assert_eq!(pw.value, "from-authinfo");
         assert!(!is_new);
         assert_eq!(cfg.bridge_password, None);
 

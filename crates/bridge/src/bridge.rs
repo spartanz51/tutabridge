@@ -134,9 +134,19 @@ impl BridgeHandle {
         }
     }
 
-    /// The resolved local bridge password while the bridge is running.
-    pub fn active_bridge_password(&self) -> Option<&str> {
-        self.active_bridge_password.as_deref()
+    /// The resolved local bridge password while the bridge is actually running.
+    /// Guarded on `BridgeStatus::Running` (like `uptime_secs` in `stats()`) so
+    /// an internal crash/teardown never serves a stale cached password.
+    pub async fn active_bridge_password(&self) -> Option<String> {
+        if *self.status.read().await != BridgeStatus::Running {
+            return None;
+        }
+        self.active_bridge_password.clone()
+    }
+
+    /// Surface a pre-start failure in the bridge log stream and status.
+    pub async fn fail_start(&self, msg: String) -> String {
+        self.start_failed(msg).await
     }
 
     /// The logged-in backend + local cache, available while the bridge is
@@ -223,7 +233,7 @@ impl BridgeHandle {
         &mut self,
         config: Config,
         password: Option<String>,
-        bridge_password: Option<String>,
+        bridge_password: Option<crate::bridge_password::ResolvedPassword>,
         totp_callback: Option<TwoFactorCallback>,
     ) -> Result<(), String> {
         // The Tuta password is wiped from memory once this start is over.
@@ -243,11 +253,22 @@ impl BridgeHandle {
         }
 
         // Resolve the local bridge password before TLS, port binds, Tuta login,
-        // or mutating handle state so a locked/unreadable authinfo fails cleanly.
+        // or mutating handle state so a locked/unreadable or missing password
+        // fails cleanly and never starts IMAP/SMTP unauthenticated.
         let pw = match bridge_password {
-            Some(pw) => Some(pw),
+            Some(resolved) if !resolved.value.is_empty() => Some(resolved.value),
+            Some(_) => {
+                return Err(self
+                    .start_failed("Bridge password must not be empty".into())
+                    .await);
+            }
             None => match crate::bridge_password::resolve_async(config.clone()).await {
-                Ok(resolved) => resolved.map(|r| r.value),
+                Ok(Some(resolved)) => Some(resolved.value),
+                Ok(None) => {
+                    return Err(self
+                        .start_failed("Bridge password is not configured".into())
+                        .await);
+                }
                 Err(e) => return Err(self.start_failed(e).await),
             },
         };
@@ -714,7 +735,35 @@ mod tests {
         assert!(handle.backend.is_none());
         assert!(handle.shutdown_tx.is_none());
         assert!(handle.started_at.is_none());
-        assert!(handle.active_bridge_password().is_none());
+        assert!(handle.active_bridge_password().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_bridge_password_refuses_to_start() {
+        let mut handle = BridgeHandle::new();
+        let config = Config::default();
+
+        let err = handle.start(config, None, None, None).await.unwrap_err();
+
+        assert_eq!(err, "Bridge password is not configured");
+        assert_eq!(*handle.status.read().await, BridgeStatus::Error(err));
+        assert!(handle.active_bridge_password().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn active_bridge_password_is_only_reported_while_running() {
+        let mut handle = BridgeHandle::new();
+        handle.active_bridge_password = Some("s3cret".into());
+        *handle.status.write().await = BridgeStatus::Running;
+        assert_eq!(
+            handle.active_bridge_password().await.as_deref(),
+            Some("s3cret")
+        );
+
+        // Internal teardown updates status without calling stop(): stale
+        // cached password must not be returned.
+        *handle.status.write().await = BridgeStatus::Error("crashed".into());
+        assert_eq!(handle.active_bridge_password().await, None);
     }
 
     #[tokio::test]

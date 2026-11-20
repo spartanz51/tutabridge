@@ -264,8 +264,9 @@ async fn serve_bridge(
     session: tuta::TutaSession,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let (bridge_password, bridge_password_is_new) = bridge_password::ensure(&mut cfg)
+    let (resolved_password, bridge_password_is_new) = bridge_password::ensure(&mut cfg)
         .map_err(|e| anyhow::anyhow!("Bridge password setup failed: {e}"))?;
+    let bridge_password = resolved_password.value;
     info!("TutaBridge {VERSION} starting");
 
     let tls_acceptor =
