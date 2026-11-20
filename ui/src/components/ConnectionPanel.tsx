@@ -5,10 +5,17 @@ interface Props {
   config: Config | null;
   status: BridgeStatus | null;
   bridgePassword: string | null;
-  onRegeneratePassword: () => Promise<string>;
+  bridgePasswordError: string | null;
+  onRegeneratePassword: () => Promise<string | null>;
 }
 
-export function ConnectionPanel({ config, status, bridgePassword, onRegeneratePassword }: Props) {
+export function ConnectionPanel({
+  config,
+  status,
+  bridgePassword,
+  bridgePasswordError,
+  onRegeneratePassword,
+}: Props) {
   const [showPassword, setShowPassword] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -86,18 +93,23 @@ export function ConnectionPanel({ config, status, bridgePassword, onRegeneratePa
                     {copied ? "Copied!" : "Copy"}
                   </button>
                 </>
+              ) : bridgePasswordError ? (
+                <span className="error-text">{bridgePasswordError}</span>
               ) : (
                 <span className="muted">Start the bridge to generate</span>
               )}
             </div>
           </div>
+          {bridgePassword && bridgePasswordError && (
+            <p className="error-text">{bridgePasswordError}</p>
+          )}
         </div>
       </div>
 
       {bridgePassword && (
         <button
           className="small regen-btn"
-          onClick={onRegeneratePassword}
+          onClick={() => { void onRegeneratePassword(); }}
           disabled={isRunning}
           title={isRunning ? "Stop the bridge first" : "Generate a new password"}
         >

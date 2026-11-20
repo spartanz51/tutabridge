@@ -3,6 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use tutabridge_core::backup;
 use tutabridge_core::bridge::{BridgeHandle, BridgeStats, BridgeStatus};
+use tutabridge_core::bridge_password;
 use tutabridge_core::config::{self, Config};
 use tutabridge_core::tuta;
 
@@ -62,7 +63,7 @@ pub async fn start_bridge(
     totp_state: State<'_, TotpState>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    let mut cfg = match config::load_config() {
+    let cfg = match config::load_config() {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
         // First run: no account yet. Bootstrap a default config from the email
         // the user just entered on the dashboard, instead of erroring out.
@@ -80,7 +81,8 @@ pub async fn start_bridge(
         }
     };
 
-    config::ensure_bridge_password(&mut cfg)
+    let (cfg, bridge_pw, _) = bridge_password::ensure_async(cfg)
+        .await
         .map_err(|e| format!("Bridge password setup failed: {e}"))?;
 
     // Interactive 2FA, like the CLI: a single login. The callback fires only if
@@ -105,7 +107,9 @@ pub async fn start_bridge(
 
     let result = {
         let mut handle = state.lock().await;
-        handle.start(cfg, password, Some(totp_cb)).await
+        handle
+            .start(cfg, password, Some(bridge_pw), Some(totp_cb))
+            .await
     };
     *totp_state.0.lock().unwrap() = None;
     result
@@ -147,27 +151,42 @@ pub async fn get_stats(state: State<'_, BridgeState>) -> Result<BridgeStats, Str
 }
 
 #[tauri::command]
-pub async fn get_bridge_password() -> Result<Option<String>, String> {
-    let cfg = config::load_config().map_err(|e| e.to_string())?;
-    Ok(cfg.and_then(|c| c.bridge_password))
+pub async fn get_bridge_password(state: State<'_, BridgeState>) -> Result<Option<String>, String> {
+    if let Some(pw) = state.lock().await.active_bridge_password().await {
+        return Ok(Some(pw));
+    }
+    let Some(cfg) = config::load_config().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    Ok(bridge_password::resolve_async(cfg)
+        .await?
+        .map(|resolved| resolved.value))
 }
 
 #[tauri::command]
 pub async fn regenerate_bridge_password() -> Result<String, String> {
-    let mut cfg = config::load_config()
+    let cfg = config::load_config()
         .map_err(|e| e.to_string())?
         .ok_or("No config found")?;
-    config::regenerate_bridge_password(&mut cfg).map_err(|e| e.to_string())
+    let (_, password) = bridge_password::regenerate_async(cfg).await?;
+    Ok(password)
 }
 
 /// Build the MCP client config snippet (URL + bearer token) to paste into
 /// Claude Desktop / Code. Read-only; reflects the saved port + bridge password.
 #[tauri::command]
-pub async fn get_mcp_client_config() -> Result<String, String> {
+pub async fn get_mcp_client_config(state: State<'_, BridgeState>) -> Result<String, String> {
     let cfg = config::load_config()
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    let token = cfg.bridge_password.unwrap_or_default();
+    let active = state.lock().await.active_bridge_password().await;
+    let token = match active {
+        Some(pw) => pw,
+        None => bridge_password::resolve_async(cfg.clone())
+            .await?
+            .map(|resolved| resolved.value)
+            .unwrap_or_default(),
+    };
     let snippet = serde_json::json!({
         "mcpServers": {
             "tutabridge": {

@@ -2,6 +2,7 @@ pub mod activity;
 pub mod backup;
 pub mod body_cache;
 pub mod bridge;
+pub mod bridge_password;
 pub mod config;
 pub mod event_handler;
 mod fs_private;

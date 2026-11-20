@@ -35,6 +35,12 @@ pub struct Config {
     /// keyring on supported desktop platforms; Android requires this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_path: Option<String>,
+    /// Read the local bridge password from this `authinfo` / `netrc` file (a
+    /// `.gpg` file is decrypted with `gpg`), the one Emacs and other mail
+    /// clients keep their logins in. Read-only: resolved on demand by
+    /// `bridge_password`, never written back to `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authinfo_path: Option<String>,
     /// Refuse to send a reply whose `In-Reply-To` cannot be resolved to a
     /// Tuta conversation, instead of delivering it detached from its thread.
     /// Off by default: for ordinary mail, losing threading beats losing the
@@ -161,6 +167,7 @@ impl Default for Config {
             mcp_port: default_mcp_port(),
             auto_update: default_auto_update(),
             pass_path: None,
+            authinfo_path: None,
             strict_threading: false,
         }
     }
@@ -242,37 +249,6 @@ fn merge_settings(
     config.validate_ports()?;
     let content = toml::to_string_pretty(&table)?;
     Ok((config, content))
-}
-
-pub fn ensure_bridge_password(config: &mut Config) -> Result<String, Box<dyn std::error::Error>> {
-    if let Some(ref pw) = config.bridge_password {
-        return Ok(pw.clone());
-    }
-    let password = generate_bridge_password();
-    config.bridge_password = Some(password.clone());
-    save_config(config)?;
-    Ok(password)
-}
-
-pub fn regenerate_bridge_password(
-    config: &mut Config,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let password = generate_bridge_password();
-    config.bridge_password = Some(password.clone());
-    save_config(config)?;
-    Ok(password)
-}
-
-fn generate_bridge_password() -> String {
-    use rand::Rng;
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
-    let mut group = || -> String {
-        (0..5)
-            .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
-            .collect()
-    };
-    format!("{}-{}-{}-{}", group(), group(), group(), group())
 }
 
 #[cfg(test)]
@@ -471,6 +447,7 @@ strict_threading = true
             mcp_port: 1944,
             auto_update: false,
             pass_path: Some("Tuta/Bridge".to_string()),
+            authinfo_path: Some("~/.authinfo.gpg".to_string()),
             strict_threading: true,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
@@ -579,6 +556,7 @@ mcp_port = 1944
 auto_update = true
 bridge_password = "keep-me"
 pass_path = "Tuta/Bridge"
+authinfo_path = "~/.authinfo.gpg"
 bind_addr = "0.0.0.0"
 strict_threading = true
 [future_settings]
@@ -602,6 +580,7 @@ enabled = true
         let merged: toml::Table = toml::from_str(&content).unwrap();
         assert_eq!(merged["bridge_password"].as_str(), Some("keep-me"));
         assert_eq!(merged["pass_path"].as_str(), Some("Tuta/Bridge"));
+        assert_eq!(merged["authinfo_path"].as_str(), Some("~/.authinfo.gpg"));
         assert_eq!(merged["bind_addr"].as_str(), Some("0.0.0.0"));
         assert!(config.strict_threading);
         assert_eq!(merged["strict_threading"].as_bool(), Some(true));

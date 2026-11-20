@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tauri::{Manager, WebviewWindowBuilder};
 use tokio::sync::Mutex;
 use tutabridge_core::bridge::BridgeHandle;
+use tutabridge_core::{bridge_password, config};
 
 fn main() {
     // Info by default, with the HTTP/2 + TLS transport firehose
@@ -109,17 +110,20 @@ fn main() {
 }
 
 async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
-    use tutabridge_core::config;
-
-    let mut cfg = match config::load_config() {
+    let cfg = match config::load_config() {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
         _ => return,
     };
 
     // Ensure bridge password exists (so the UI can display it)
-    if let Err(e) = config::ensure_bridge_password(&mut cfg) {
-        log::warn!("Bridge password setup failed: {e}");
-    }
+    let (cfg, bridge_pw, _) = match bridge_password::ensure_async(cfg).await {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            let msg = format!("Bridge password setup failed: {e}");
+            state.lock().await.fail_start(msg).await;
+            return;
+        }
+    };
 
     let store = state.lock().await.session_store(&cfg);
     match store.load().await {
@@ -132,7 +136,7 @@ async fn auto_start(state: Arc<Mutex<BridgeHandle>>) {
     }
 
     let mut handle = state.lock().await;
-    if let Err(e) = handle.start(cfg, None, None).await {
+    if let Err(e) = handle.start(cfg, None, Some(bridge_pw), None).await {
         log::warn!("Auto-start failed: {e}");
     }
 }

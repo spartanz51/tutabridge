@@ -151,6 +151,7 @@ function App() {
             config={bridge.config}
             status={bridge.status}
             bridgePassword={bridge.bridgePassword}
+            bridgePasswordError={bridge.bridgePasswordError}
             onRegeneratePassword={bridge.regenerateBridgePassword}
           />
         )}

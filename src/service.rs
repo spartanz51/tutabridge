@@ -112,6 +112,10 @@ struct Status {
     certificate: Option<String>,
     address: Option<std::net::IpAddr>,
     password: Option<String>,
+    /// True when `authinfo_path` is set in `config.toml`; the supervisor
+    /// leaves `password` unset so it never invokes `gpg` or serves a shadowed
+    /// `config.toml` password, and `service::password()` resolves it once.
+    authinfo_configured: bool,
 }
 impl Status {
     fn waiting(state: State) -> Self {
@@ -121,6 +125,7 @@ impl Status {
             certificate: None,
             address: None,
             password: None,
+            authinfo_configured: false,
         }
     }
 }
@@ -185,7 +190,11 @@ impl StatusServer {
                 let reply = if request == [b'p'] {
                     // Private IPC (0700 directory). Only the lock owner reads
                     // configuration; health responses never contain this value.
-                    serde_json::json!({"password":snapshot.password}).to_string()
+                    serde_json::json!({
+                        "password": snapshot.password,
+                        "authinfo": snapshot.authinfo_configured,
+                    })
+                    .to_string()
                 } else if request == [b'h'] {
                     serde_json::json!({"state":snapshot.state as i32,"reason":snapshot.state.reason(),
                     "ports":snapshot.ports,"certificate":snapshot.certificate,"address":snapshot.address}).to_string()
@@ -214,7 +223,16 @@ fn configure_status() -> Status {
     if let Ok(Some(cfg)) = tutabridge_core::config::load_config() {
         status.ports = Some((cfg.imap_port, cfg.smtp_port));
         status.address = Some(cfg.bind_addr);
-        status.password = cfg.bridge_password;
+        // `configure_status` ticks every second in the supervisor loop; never
+        // invoke `gpg` or serve a `config.toml` password that `authinfo_path`
+        // may shadow.
+        status.authinfo_configured = cfg
+            .authinfo_path
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty());
+        status.password = (!status.authinfo_configured)
+            .then_some(cfg.bridge_password)
+            .flatten();
         status.certificate = std::fs::read_to_string(
             tutabridge_core::config::config_path().with_file_name("cert.pem"),
         )
@@ -664,15 +682,24 @@ pub fn bootstrap(init: bool) -> Result<(), State> {
     }
 }
 
+async fn resolve_password_from_config() -> anyhow::Result<String> {
+    let cfg = tutabridge_core::config::load_config().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pw = match cfg {
+        Some(cfg) => tutabridge_core::bridge_password::resolve_async(cfg)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .map(|resolved| resolved.value),
+        None => None,
+    };
+    pw.context("No bridge password yet; run tutabridge init")
+}
+
 /// Password is read by the volume owner, including when a bridge is running.
 pub async fn password() -> anyhow::Result<String> {
     if let Some(_lock) = Lock::acquire()? {
-        return tutabridge_core::config::load_config()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .and_then(|cfg| cfg.bridge_password)
-            .context("No bridge password yet; run tutabridge init");
+        return resolve_password_from_config().await;
     }
-    tokio::time::timeout(Duration::from_secs(1), async {
+    let response = tokio::time::timeout(Duration::from_secs(1), async {
         let mut socket = UnixStream::connect(runtime_dir().join("health.sock"))
             .await
             .context("Volume busy; password is available only in the running service container")?;
@@ -683,13 +710,18 @@ pub async fn password() -> anyhow::Result<String> {
             bail!("Invalid service response");
         }
         let response: serde_json::Value = serde_json::from_slice(&bytes)?;
-        response["password"]
-            .as_str()
-            .map(str::to_owned)
-            .context("Password unavailable during initialization")
+        Ok::<_, anyhow::Error>(response)
     })
     .await
-    .context("Password request timed out")?
+    .context("Password request timed out")??;
+
+    if response["authinfo"].as_bool() == Some(true) {
+        return resolve_password_from_config().await;
+    }
+    response["password"]
+        .as_str()
+        .map(str::to_owned)
+        .context("Password unavailable during initialization")
 }
 
 #[cfg(test)]
@@ -972,6 +1004,7 @@ mod tests {
                 certificate: Some(pem.clone()),
                 address: Some(address),
                 password: None,
+                authinfo_configured: false,
             });
             let _server = StatusServer::start(receiver).unwrap();
             println!("public-health-fixture-ready");
