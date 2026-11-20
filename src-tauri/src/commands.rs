@@ -63,7 +63,7 @@ pub async fn start_bridge(
     totp_state: State<'_, TotpState>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    let mut cfg = match config::load_config() {
+    let cfg = match config::load_config() {
         Ok(Some(cfg)) if !cfg.email.is_empty() => cfg,
         // First run: no account yet. Bootstrap a default config from the email
         // the user just entered on the dashboard, instead of erroring out.
