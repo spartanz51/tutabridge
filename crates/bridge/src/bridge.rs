@@ -341,7 +341,10 @@ impl BridgeHandle {
         let status = self.status.clone();
         let log_tx = self.log_tx.clone();
         let sync_limit = config.sync_limit;
-        let pw = config.bridge_password.clone();
+        let pw = match crate::bridge_password::resolve(&config) {
+            Ok(resolved) => resolved.map(|r| r.value),
+            Err(e) => return Err(self.start_failed(e).await),
+        };
         let mcp_permission = config.mcp_permission;
 
         // Build the realtime event bus and hydrate its catch-up state from

@@ -214,7 +214,10 @@ fn configure_status() -> Status {
     if let Ok(Some(cfg)) = tutabridge_core::config::load_config() {
         status.ports = Some((cfg.imap_port, cfg.smtp_port));
         status.address = Some(cfg.bind_addr);
-        status.password = cfg.bridge_password;
+        status.password = tutabridge_core::bridge_password::resolve(&cfg)
+            .ok()
+            .flatten()
+            .map(|resolved| resolved.value);
         status.certificate = std::fs::read_to_string(
             tutabridge_core::config::config_path().with_file_name("cert.pem"),
         )
@@ -667,10 +670,14 @@ pub fn bootstrap(init: bool) -> Result<(), State> {
 /// Password is read by the volume owner, including when a bridge is running.
 pub async fn password() -> anyhow::Result<String> {
     if let Some(_lock) = Lock::acquire()? {
-        return tutabridge_core::config::load_config()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .and_then(|cfg| cfg.bridge_password)
-            .context("No bridge password yet; run tutabridge init");
+        let cfg = tutabridge_core::config::load_config().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let pw = match cfg {
+            Some(cfg) => tutabridge_core::bridge_password::resolve(&cfg)
+                .map_err(anyhow::Error::msg)?
+                .map(|resolved| resolved.value),
+            None => None,
+        };
+        return pw.context("No bridge password yet; run tutabridge init");
     }
     tokio::time::timeout(Duration::from_secs(1), async {
         let mut socket = UnixStream::connect(runtime_dir().join("health.sock"))

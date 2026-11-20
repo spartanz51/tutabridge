@@ -302,6 +302,32 @@ strict_threading = true
 
 This only refuses sending: a draft saved over IMAP is kept either way.
 
+### Reading the bridge password from authinfo
+
+If your mail client already keeps its logins in an `authinfo` or `netrc`
+file (such as Emacs Gnus / `auth-source`), the bridge can read its local
+password from there instead of duplicating it in `config.toml`:
+
+```toml
+authinfo_path = "~/.authinfo.gpg"
+```
+
+The bridge uses the `password` of the first entry for `127.0.0.1`,
+`localhost` or `::1` whose `login` is your address and whose `port` /
+`protocol` (if given) matches the IMAP or SMTP service:
+
+```
+machine 127.0.0.1 port 1143 login you@tuta.io password <bridge password>
+machine 127.0.0.1 port 1025 login you@tuta.io password <bridge password>
+```
+
+A `.gpg` file is decrypted on demand with `gpg`, so as with `pass`,
+`gpg-agent` must be able to decrypt it when the bridge starts. The bridge
+only reads the file and never copies the password into `config.toml`.
+Without a matching entry, `config.toml`'s `bridge_password` is used;
+with one, change the password in the authinfo file rather than
+regenerating it in the GUI.
+
 ---
 
 ## Testing

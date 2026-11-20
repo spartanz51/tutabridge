@@ -3,6 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use tutabridge_core::backup;
 use tutabridge_core::bridge::{BridgeHandle, BridgeStats, BridgeStatus};
+use tutabridge_core::bridge_password;
 use tutabridge_core::config::{self, Config};
 use tutabridge_core::tuta;
 
@@ -148,8 +149,10 @@ pub async fn get_stats(state: State<'_, BridgeState>) -> Result<BridgeStats, Str
 
 #[tauri::command]
 pub async fn get_bridge_password() -> Result<Option<String>, String> {
-    let cfg = config::load_config().map_err(|e| e.to_string())?;
-    Ok(cfg.and_then(|c| c.bridge_password))
+    let Some(cfg) = config::load_config().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    Ok(bridge_password::resolve(&cfg)?.map(|resolved| resolved.value))
 }
 
 #[tauri::command]
@@ -167,7 +170,9 @@ pub async fn get_mcp_client_config() -> Result<String, String> {
     let cfg = config::load_config()
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    let token = cfg.bridge_password.unwrap_or_default();
+    let token = bridge_password::resolve(&cfg)?
+        .map(|resolved| resolved.value)
+        .unwrap_or_default();
     let snippet = serde_json::json!({
         "mcpServers": {
             "tutabridge": {

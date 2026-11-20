@@ -7,8 +7,8 @@ mod shutdown;
 use cli::{Command, LoginMode};
 use std::sync::Arc;
 use tutabridge_core::{
-    backup, bridge as bridge_helpers, config, event_handler, imap, mcp, smtp, store::LocalStore,
-    sync, tls, tuta, VERSION,
+    backup, bridge as bridge_helpers, bridge_password, config, event_handler, imap, mcp, smtp,
+    store::LocalStore, sync, tls, tuta, VERSION,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -94,9 +94,12 @@ async fn run() -> anyhow::Result<()> {
         }
         Command::Backup(output) => run_backup(&output).await,
         Command::Password => {
-            let pw = config::load_config()
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-                .and_then(|cfg| cfg.bridge_password);
+            let pw = match config::load_config().map_err(|e| anyhow::anyhow!("{e}"))? {
+                Some(cfg) => bridge_password::resolve(&cfg)
+                    .map_err(anyhow::Error::msg)?
+                    .map(|resolved| resolved.value),
+                None => None,
+            };
             let Some(pw) = pw else {
                 eprintln!("No bridge password yet — run the bridge once to generate one.");
                 std::process::exit(1);
@@ -261,8 +264,7 @@ async fn serve_bridge(
     session: tuta::TutaSession,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let bridge_password_is_new = cfg.bridge_password.is_none();
-    let bridge_password = config::ensure_bridge_password(&mut cfg)
+    let (bridge_password, bridge_password_is_new) = bridge_password::ensure(&mut cfg)
         .map_err(|e| anyhow::anyhow!("Bridge password setup failed: {e}"))?;
     info!("TutaBridge {VERSION} starting");
 
@@ -349,7 +351,7 @@ async fn serve_bridge(
     let imap_tls = tls_acceptor.clone();
     let smtp_tls = tls_acceptor;
 
-    let pw = cfg.bridge_password.clone();
+    let pw = Some(bridge_password.clone());
 
     // mpsc channel from event bus -> handler.
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
