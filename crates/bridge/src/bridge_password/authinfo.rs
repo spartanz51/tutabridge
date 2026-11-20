@@ -93,16 +93,12 @@ fn host_matches(machine: Option<&str>) -> bool {
     machine.is_none_or(|m| LOCAL_HOSTS.iter().any(|h| m.eq_ignore_ascii_case(h)))
 }
 
-fn port_matches(port: Option<&str>, ports: &[u16]) -> bool {
-    port.is_none_or(|p| p.parse::<u16>().is_ok_and(|n| ports.contains(&n)))
-}
-
-fn protocol_matches(protocol: Option<&str>, ports: &[u16]) -> bool {
-    protocol.is_none_or(|proto| {
+fn port_or_protocol_matches(value: Option<&str>, ports: &[u16]) -> bool {
+    value.is_none_or(|val| {
         MAIL_PROTOCOLS
             .iter()
-            .any(|known| proto.eq_ignore_ascii_case(known))
-            || proto.parse::<u16>().is_ok_and(|n| ports.contains(&n))
+            .any(|known| val.eq_ignore_ascii_case(known))
+            || val.parse::<u16>().is_ok_and(|n| ports.contains(&n))
     })
 }
 
@@ -114,8 +110,8 @@ fn find_password(text: &str, email: &str, ports: &[u16]) -> Option<String> {
             .is_some_and(|l| l.eq_ignore_ascii_case(email));
         let matches = host_matches(entry.machine.as_deref())
             && login_ok
-            && port_matches(entry.port.as_deref(), ports)
-            && protocol_matches(entry.protocol.as_deref(), ports);
+            && port_or_protocol_matches(entry.port.as_deref(), ports)
+            && port_or_protocol_matches(entry.protocol.as_deref(), ports);
         matches
             .then_some(entry.password)
             .flatten()
@@ -248,10 +244,12 @@ mod tests {
     }
 
     #[test]
-    fn protocol_does_not_clobber_port_and_mail_protocols_match() {
+    fn protocol_does_not_clobber_port_and_symbolic_mail_ports_match() {
         for text in [
             "machine 127.0.0.1 port 1143 protocol imap login me@tuta.io password s3cret",
             "machine 127.0.0.1 protocol smtp port 1025 login me@tuta.io password s3cret",
+            "machine 127.0.0.1 port imap login me@tuta.io password s3cret",
+            "machine 127.0.0.1 port smtp login me@tuta.io password s3cret",
             "machine 127.0.0.1 protocol imap login me@tuta.io password s3cret",
             "machine 127.0.0.1 protocol 1143 login me@tuta.io password s3cret",
         ] {
@@ -263,6 +261,7 @@ mod tests {
         }
         for rejected in [
             "machine 127.0.0.1 port 993 protocol imap login me@tuta.io password x",
+            "machine 127.0.0.1 port http login me@tuta.io password x",
             "machine 127.0.0.1 protocol http login me@tuta.io password x",
             "machine 127.0.0.1 protocol 993 login me@tuta.io password x",
         ] {

@@ -313,8 +313,10 @@ authinfo_path = "~/.authinfo.gpg"
 ```
 
 The bridge uses the `password` of the first entry for `127.0.0.1`,
-`localhost` or `::1` whose `login` is your address and whose `port` /
-`protocol` (if given) matches the IMAP or SMTP service:
+`localhost`, `::1`, or a `default` entry (which matches any host) whose
+`login` is your address and whose `port` / `protocol` (if given) matches
+the IMAP or SMTP service (numeric port or `imap` / `imaps` / `smtp` /
+`smtps`):
 
 ```
 machine 127.0.0.1 port 1143 login you@tuta.io password <bridge password>

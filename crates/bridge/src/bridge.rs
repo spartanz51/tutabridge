@@ -106,6 +106,9 @@ pub struct BridgeHandle {
     task: Option<tokio::task::JoinHandle<()>>,
     /// Latest event-bus state, populated at `start` and observed by `stats`.
     ws_state_rx: Option<watch::Receiver<tutabridge_tuta::event_bus::WsState>>,
+    /// Resolved local bridge password for the running instance, reused by GUI
+    /// queries so reading it never re-invokes `gpg` while the bridge is up.
+    active_bridge_password: Option<String>,
 }
 
 impl BridgeHandle {
@@ -127,7 +130,13 @@ impl BridgeHandle {
             local_store: None,
             task: None,
             ws_state_rx: None,
+            active_bridge_password: None,
         }
+    }
+
+    /// The resolved local bridge password while the bridge is running.
+    pub fn active_bridge_password(&self) -> Option<&str> {
+        self.active_bridge_password.as_deref()
     }
 
     /// The logged-in backend + local cache, available while the bridge is
@@ -214,6 +223,7 @@ impl BridgeHandle {
         &mut self,
         config: Config,
         password: Option<String>,
+        bridge_password: Option<String>,
         totp_callback: Option<TwoFactorCallback>,
     ) -> Result<(), String> {
         // The Tuta password is wiped from memory once this start is over.
@@ -231,6 +241,16 @@ impl BridgeHandle {
         if let Err(msg) = config.validate_ports() {
             return Err(self.start_failed(msg).await);
         }
+
+        // Resolve the local bridge password before TLS, port binds, Tuta login,
+        // or mutating handle state so a locked/unreadable authinfo fails cleanly.
+        let pw = match bridge_password {
+            Some(pw) => Some(pw),
+            None => match crate::bridge_password::resolve_async(config.clone()).await {
+                Ok(resolved) => resolved.map(|r| r.value),
+                Err(e) => return Err(self.start_failed(e).await),
+            },
+        };
 
         let tls_acceptor = match tls::load_or_create_tls_acceptor() {
             Ok(a) => a,
@@ -338,13 +358,11 @@ impl BridgeHandle {
             .map(|d| d.as_millis() as u64);
         let activity = self.activity.clone();
 
+        self.active_bridge_password = pw.clone();
+
         let status = self.status.clone();
         let log_tx = self.log_tx.clone();
         let sync_limit = config.sync_limit;
-        let pw = match crate::bridge_password::resolve(&config) {
-            Ok(resolved) => resolved.map(|r| r.value),
-            Err(e) => return Err(self.start_failed(e).await),
-        };
         let mcp_permission = config.mcp_permission;
 
         // Build the realtime event bus and hydrate its catch-up state from
@@ -576,6 +594,7 @@ impl BridgeHandle {
         self.ws_state_rx = None;
         self.backend = None;
         self.local_store = None;
+        self.active_bridge_password = None;
         // Final pulse so the UI re-reads `stats()` (now reporting Stopped /
         // zero uptime / zero mails) without waiting for a poll.
         let _ = self.stats_dirty_tx.send(());
@@ -673,10 +692,29 @@ mod tests {
             ..Config::default()
         };
 
-        let err = handle.start(config, None, None).await.unwrap_err();
+        let err = handle.start(config, None, None, None).await.unwrap_err();
 
         assert_eq!(err, "IMAP and SMTP ports must differ (both are 1143)");
         assert_eq!(*handle.status.read().await, BridgeStatus::Error(err));
+    }
+
+    #[tokio::test]
+    async fn unreadable_authinfo_fails_start_before_mutating_handle_state() {
+        let mut handle = BridgeHandle::new();
+        let config = Config {
+            authinfo_path: Some("/nonexistent/tutabridge-missing-authinfo".into()),
+            ..Config::default()
+        };
+
+        let err = handle.start(config, None, None, None).await.unwrap_err();
+
+        assert!(err.contains("Could not read the bridge password"), "{err}");
+        assert_eq!(*handle.status.read().await, BridgeStatus::Error(err));
+        assert!(handle.store.is_none());
+        assert!(handle.backend.is_none());
+        assert!(handle.shutdown_tx.is_none());
+        assert!(handle.started_at.is_none());
+        assert!(handle.active_bridge_password().is_none());
     }
 
     #[tokio::test]

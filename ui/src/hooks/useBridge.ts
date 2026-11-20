@@ -59,6 +59,7 @@ export function useBridge() {
   const sessionReadEpoch = useRef(0);
   const wasRunning = useRef(false);
   const [bridgePassword, setBridgePassword] = useState<string | null>(null);
+  const [bridgePasswordError, setBridgePasswordError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [needsTotp, setNeedsTotp] = useState(false);
@@ -98,6 +99,19 @@ export function useBridge() {
     }
   }, []);
 
+  const readBridgePassword = useCallback(async () => {
+    try {
+      const pw = await invoke<string | null>("get_bridge_password");
+      setBridgePassword(pw);
+      setBridgePasswordError(null);
+      return pw;
+    } catch (e) {
+      setBridgePassword(null);
+      setBridgePasswordError(String(e));
+      return null;
+    }
+  }, []);
+
   const acceptStatus = useCallback((next: BridgeStatus) => {
     setStatus(next);
     if (next === "Running" && !wasRunning.current) {
@@ -105,9 +119,10 @@ export function useBridge() {
       // status so its warning survives successful startup and status events.
       setSessionReadError(null);
       void readSavedSession();
+      void readBridgePassword();
     }
     wasRunning.current = next === "Running";
-  }, [readSavedSession]);
+  }, [readSavedSession, readBridgePassword]);
 
   const refresh = useCallback(() => {
     invoke<BridgeStatus>("get_status").then(acceptStatus);
@@ -119,7 +134,7 @@ export function useBridge() {
     // Strict storage errors block login; an unavailable OS keychain offers
     // a manual login with a visible warning that it cannot be persisted.
     void readSavedSession();
-    invoke<string | null>("get_bridge_password").then(setBridgePassword);
+    void readBridgePassword();
     invoke<string>("get_app_version").then(setAppVersion);
     refresh();
 
@@ -146,7 +161,7 @@ export function useBridge() {
       unlistenUpdate.then((fn) => fn());
       unlistenAvailable.then((fn) => fn());
     };
-  }, [refresh, readSavedSession, acceptStatus]);
+  }, [refresh, readSavedSession, readBridgePassword, acceptStatus]);
 
   useEffect(() => {
     let seq = 0;
@@ -220,7 +235,7 @@ export function useBridge() {
         await readSavedSession();
         setNeedsTotp(false);
         refresh();
-        invoke<string | null>("get_bridge_password").then(setBridgePassword);
+        void readBridgePassword();
       } catch (e) {
         setNeedsTotp(false);
         setStatus({ Error: String(e) });
@@ -228,7 +243,7 @@ export function useBridge() {
         setLoading(false);
       }
     },
-    [refresh, readSavedSession],
+    [refresh, readSavedSession, readBridgePassword],
   );
 
   // Deliver the 2FA code to the login that's currently waiting for it.
@@ -281,9 +296,15 @@ export function useBridge() {
   const restartApp = useCallback(() => invoke("restart_app"), []);
 
   const regenerateBridgePassword = useCallback(async () => {
-    const newPassword = await invoke<string>("regenerate_bridge_password");
-    setBridgePassword(newPassword);
-    return newPassword;
+    setBridgePasswordError(null);
+    try {
+      const newPassword = await invoke<string>("regenerate_bridge_password");
+      setBridgePassword(newPassword);
+      return newPassword;
+    } catch (e) {
+      setBridgePasswordError(String(e));
+      return null;
+    }
   }, []);
 
   const startBackup = useCallback(async () => {
@@ -322,6 +343,7 @@ export function useBridge() {
     hasSavedSession,
     sessionWarning,
     bridgePassword,
+    bridgePasswordError,
     logs,
     feed,
     subscribeActivity,

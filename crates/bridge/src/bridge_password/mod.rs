@@ -100,6 +100,34 @@ pub fn regenerate(cfg: &mut Config) -> Result<String, Box<dyn std::error::Error>
     Ok(password)
 }
 
+/// Async wrapper around [`resolve`] that runs file I/O and `gpg` on a blocking
+/// thread so async runtime workers are never stalled.
+pub async fn resolve_async(cfg: Config) -> Result<Option<ResolvedPassword>, String> {
+    tokio::task::spawn_blocking(move || resolve(&cfg))
+        .await
+        .map_err(|e| format!("Bridge password worker failed: {e}"))?
+}
+
+/// Async wrapper around [`ensure`] for async callers (GUI, service).
+pub async fn ensure_async(mut cfg: Config) -> Result<(Config, String, bool), String> {
+    tokio::task::spawn_blocking(move || {
+        let (password, is_new) = ensure(&mut cfg).map_err(|e| e.to_string())?;
+        Ok((cfg, password, is_new))
+    })
+    .await
+    .map_err(|e| format!("Bridge password worker failed: {e}"))?
+}
+
+/// Async wrapper around [`regenerate`] for async callers (GUI).
+pub async fn regenerate_async(mut cfg: Config) -> Result<(Config, String), String> {
+    tokio::task::spawn_blocking(move || {
+        let password = regenerate(&mut cfg).map_err(|e| e.to_string())?;
+        Ok((cfg, password))
+    })
+    .await
+    .map_err(|e| format!("Bridge password worker failed: {e}"))?
+}
+
 fn generate_bridge_password() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
     let mut rng = rand::thread_rng();

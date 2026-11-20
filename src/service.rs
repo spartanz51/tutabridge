@@ -214,10 +214,9 @@ fn configure_status() -> Status {
     if let Ok(Some(cfg)) = tutabridge_core::config::load_config() {
         status.ports = Some((cfg.imap_port, cfg.smtp_port));
         status.address = Some(cfg.bind_addr);
-        status.password = tutabridge_core::bridge_password::resolve(&cfg)
-            .ok()
-            .flatten()
-            .map(|resolved| resolved.value);
+        // `configure_status` ticks every second in the supervisor loop; never
+        // invoke `gpg` or decrypt `authinfo_path` here.
+        status.password = cfg.bridge_password;
         status.certificate = std::fs::read_to_string(
             tutabridge_core::config::config_path().with_file_name("cert.pem"),
         )
@@ -672,7 +671,8 @@ pub async fn password() -> anyhow::Result<String> {
     if let Some(_lock) = Lock::acquire()? {
         let cfg = tutabridge_core::config::load_config().map_err(|e| anyhow::anyhow!("{e}"))?;
         let pw = match cfg {
-            Some(cfg) => tutabridge_core::bridge_password::resolve(&cfg)
+            Some(cfg) => tutabridge_core::bridge_password::resolve_async(cfg)
+                .await
                 .map_err(anyhow::Error::msg)?
                 .map(|resolved| resolved.value),
             None => None,

@@ -251,16 +251,6 @@ fn merge_settings(
     Ok((config, content))
 }
 
-pub fn ensure_bridge_password(config: &mut Config) -> Result<String, Box<dyn std::error::Error>> {
-    crate::bridge_password::ensure(config).map(|(password, _)| password)
-}
-
-pub fn regenerate_bridge_password(
-    config: &mut Config,
-) -> Result<String, Box<dyn std::error::Error>> {
-    crate::bridge_password::regenerate(config)
-}
-
 #[cfg(test)]
 fn parse_config(content: &str) -> Result<Config, toml::de::Error> {
     toml::from_str(content)

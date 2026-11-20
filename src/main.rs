@@ -233,7 +233,7 @@ fn load_account(mode: LoginMode) -> anyhow::Result<config::Config> {
 async fn initialize() -> anyhow::Result<()> {
     let mut cfg = load_account(LoginMode::Initialize)?;
     login_session(&cfg, LoginMode::Initialize).await?;
-    config::ensure_bridge_password(&mut cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    bridge_password::ensure(&mut cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
     tls::load_or_create_tls_acceptor().map_err(|e| anyhow::anyhow!("{e}"))?;
     #[cfg(unix)]
     if service::container() {
