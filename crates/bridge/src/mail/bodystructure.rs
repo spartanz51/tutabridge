@@ -10,71 +10,56 @@
 //! `("type" "subtype" (params) NIL NIL "encoding" size [lines])`; multipart
 //! wraps its parts in `((part1)(part2)... "subtype" ("boundary" "..."))`.
 
-use super::parser::{
-    extract_boundary, get_header, parse_headers, split_headers_body, split_mime_parts,
-};
+use super::mime::Tree;
+use super::parser::{get_header, parse_headers};
+use mail_parser::MessagePartId;
 
 /// Compute the parenthesised BODYSTRUCTURE payload for a full RFC 2822
 /// envelope (no surrounding `BODYSTRUCTURE ` prefix — the caller composes
 /// that with the appropriate FETCH response token).
 pub fn compute_bodystructure(rfc2822: &str) -> String {
-    let (headers_text, body) = split_headers_body(rfc2822);
-    let headers = parse_headers(&headers_text);
-    let content_type = get_header(&headers, "content-type")
-        .unwrap_or_else(|| "text/html; charset=UTF-8".to_owned());
+    const DEFAULT_TYPE: &str = "text/html; charset=UTF-8";
+    match Tree::parse(rfc2822) {
+        Some(tree) => structure(&tree, Tree::ROOT, DEFAULT_TYPE),
+        None => single_part_structure(DEFAULT_TYPE, "7bit", rfc2822, &[]),
+    }
+}
+
+/// The structure of a message or a part. `default_type` is what an entity
+/// without a Content-Type is taken to be.
+fn structure(tree: &Tree<'_>, id: MessagePartId, default_type: &str) -> String {
+    let Some(entity) = tree.entity(id) else {
+        return single_part_structure(default_type, "7bit", "", &[]);
+    };
+    let headers = parse_headers(entity.head.trim_end_matches(['\r', '\n']));
+    let content_type =
+        get_header(&headers, "content-type").unwrap_or_else(|| default_type.to_owned());
     let cte =
         get_header(&headers, "content-transfer-encoding").unwrap_or_else(|| "7bit".to_owned());
 
-    bodystructure_for(&content_type, &cte, &body, &headers)
-}
-
-fn bodystructure_for(
-    content_type: &str,
-    cte: &str,
-    body: &str,
-    headers: &[(String, String)],
-) -> String {
-    let ct_lower = content_type.to_lowercase();
-    if ct_lower.starts_with("multipart/") {
-        return multipart_structure(content_type, body);
+    if !content_type.to_lowercase().starts_with("multipart/") {
+        return single_part_structure(&content_type, &cte, entity.body, &headers);
     }
-    single_part_structure(content_type, cte, body, headers)
-}
-
-fn multipart_structure(content_type: &str, body: &str) -> String {
-    let boundary = extract_boundary(content_type).unwrap_or_default();
-    let subtype = subtype_of(content_type).unwrap_or_else(|| "mixed".to_owned());
-
-    let mut out = String::new();
-    if boundary.is_empty() {
-        // No boundary — treat as a degenerate single-part fallback so
-        // clients see something instead of a malformed parenthesised tree.
+    let boundary = super::parser::extract_boundary(&content_type);
+    let (Some(parts), Some(boundary)) = (tree.children(id), boundary) else {
+        // No usable boundary — a degenerate single part, so clients see
+        // something instead of a malformed parenthesised tree.
         return format!(
             "(\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" {} 0)",
-            body.len()
+            entity.body.len()
         );
-    }
-    let parts = split_mime_parts(body, &boundary);
-    for part in &parts {
-        out.push_str(&part_structure(part));
-    }
+    };
+    let subtype = subtype_of(&content_type).unwrap_or_else(|| "mixed".to_owned());
 
+    let mut out = String::new();
+    for &part in parts {
+        out.push_str(&structure(tree, part, "text/plain"));
+    }
     out.push(' ');
     out.push_str(&quoted(&subtype.to_uppercase()));
     out.push(' ');
     out.push_str(&format!("(\"BOUNDARY\" {})", quoted(&boundary)));
     format!("({})", out)
-}
-
-fn part_structure(part: &str) -> String {
-    let (headers_text, body) = split_headers_body(part);
-    let headers = parse_headers(&headers_text);
-    let content_type =
-        get_header(&headers, "content-type").unwrap_or_else(|| "text/plain".to_owned());
-    let cte =
-        get_header(&headers, "content-transfer-encoding").unwrap_or_else(|| "7bit".to_owned());
-
-    bodystructure_for(&content_type, &cte, &body, &headers)
 }
 
 fn single_part_structure(
@@ -206,9 +191,10 @@ fn build_disposition(headers: &[(String, String)]) -> Option<String> {
 }
 
 fn count_lines(body: &str) -> usize {
-    // RFC 3501 counts physical lines (CRLF-separated). An empty trailing
-    // line that follows a final CRLF still counts.
-    body.matches('\n').count()
+    // Physical lines: one per line break, plus a last line that has none
+    // (the break before a MIME delimiter is not part of the body).
+    let unfinished = !body.is_empty() && !body.ends_with('\n');
+    body.matches('\n').count() + usize::from(unfinished)
 }
 
 /// Backslash-escape `\` and `"` then wrap in `"`. IMAP literal strings are an
@@ -275,8 +261,8 @@ mod tests {
     #[test]
     fn count_lines_basic() {
         assert_eq!(count_lines(""), 0);
-        assert_eq!(count_lines("hello"), 0);
-        assert_eq!(count_lines("a\nb\nc"), 2);
+        assert_eq!(count_lines("hello"), 1);
+        assert_eq!(count_lines("a\nb\nc"), 3);
         assert_eq!(count_lines("a\r\nb\r\n"), 2);
     }
 
