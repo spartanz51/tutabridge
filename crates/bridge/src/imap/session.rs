@@ -559,10 +559,13 @@ impl ImapSession {
         }
         let (raw_name, _) = parse_imap_token(args.trim());
         let folder_name = super::utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone());
-        let (stored, uid_next) = match self.store.folder_by_imap_path(&folder_name).await {
-            Some(folder) => self.store.folder_with_uid_next(&folder.id).await,
-            None => (Vec::new(), 1),
+        let Some(folder) = self.store.folder_by_imap_path(&folder_name).await else {
+            return vec![format!(
+                "{} NO [NONEXISTENT] Mailbox does not exist\r\n",
+                tag
+            )];
         };
+        let (stored, uid_next) = self.store.folder_with_uid_next(&folder.id).await;
         let count = stored.len();
         let unseen = stored.iter().filter(|m| m.mail.unread).count();
         vec![
@@ -4657,10 +4660,12 @@ pub(crate) mod tests {
             .handle_command("A005 STATUS Drafts (MESSAGES UIDNEXT)")
             .await;
         assert!(r[0].contains("UIDNEXT 1"), "got {r:?}");
+        // An unknown mailbox has no status: saying "empty, UIDNEXT 1" would
+        // tell a client its copy of the mailbox is gone.
         let r = session
             .handle_command("A006 STATUS Nonexistent (MESSAGES UIDNEXT)")
             .await;
-        assert!(r[0].contains("UIDNEXT 1"), "got {r:?}");
+        assert_eq!(r, vec!["A006 NO [NONEXISTENT] Mailbox does not exist\r\n"]);
 
         // After EXAMINE INBOX, STATUS for smaller/empty mailboxes must not inherit INBOX's UIDNEXT.
         let r = session.handle_command("A007 EXAMINE INBOX").await;
