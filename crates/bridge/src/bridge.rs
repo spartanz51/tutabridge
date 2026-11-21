@@ -343,6 +343,14 @@ impl BridgeHandle {
             self.emit_log("Storage key changed — resetting local cache");
             let _ = local_store.reset();
         }
+        // Read after any reset above, which renews it.
+        let uid_validity = match local_store.uid_validity() {
+            Ok(uid_validity) => uid_validity,
+            Err(e) => {
+                let msg = format!("Failed to read the local store: {e}");
+                return Err(self.start_failed(msg).await);
+            }
+        };
         let local_store = Arc::new(local_store);
         self.emit_log("Local store opened");
 
@@ -366,6 +374,7 @@ impl BridgeHandle {
 
         let backend: Arc<dyn MailBackend> = Arc::new(session);
         let store = MailStore::new();
+        store.set_uid_validity(uid_validity);
         self.store = Some(store.clone());
         self.backend = Some(backend.clone());
         self.local_store = Some(local_store.clone());

@@ -347,6 +347,11 @@ async fn serve_bridge(
     let backend: Arc<dyn tuta::MailBackend> = Arc::new(session);
 
     let store = sync::MailStore::new();
+    store.set_uid_validity(
+        local_store
+            .uid_validity()
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    );
     let mut background = tokio::task::JoinSet::new();
 
     let imap_tls = tls_acceptor.clone();

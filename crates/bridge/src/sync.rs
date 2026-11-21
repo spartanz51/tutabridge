@@ -63,6 +63,9 @@ impl FolderState {
 pub struct MailStore {
     /// folder id → mails in that folder and its next UID.
     folders: RwLock<HashMap<String, FolderState>>,
+    /// `UIDVALIDITY` of every mailbox, from the disk cache (see
+    /// [`LocalStore::uid_validity`]).
+    uid_validity: std::sync::atomic::AtomicU32,
     /// The folder list (system + custom), for IMAP enumeration.
     folder_list: RwLock<Vec<FolderInfo>>,
     /// Bumped on list-membership changes (mail added/removed, folder list).
@@ -87,6 +90,7 @@ impl MailStore {
         let (details_tx, _) = watch::channel(0u64);
         Arc::new(Self {
             folders: RwLock::new(HashMap::new()),
+            uid_validity: std::sync::atomic::AtomicU32::new(1),
             folder_list: RwLock::new(Vec::new()),
             generation: tx,
             details_generation: details_tx,
@@ -125,6 +129,18 @@ impl MailStore {
         // currently cooling down, not every mail that has ever failed.
         map.retain(|_, until| *until > now);
         map.insert(element_id.to_string(), now + BODY_FETCH_COOLDOWN);
+    }
+
+    /// The `UIDVALIDITY` IMAP sessions announce. 1 until the disk cache says
+    /// otherwise.
+    pub fn uid_validity(&self) -> u32 {
+        self.uid_validity.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set once at startup, before any IMAP client is served.
+    pub fn set_uid_validity(&self, uid_validity: u32) {
+        self.uid_validity
+            .store(uid_validity, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {

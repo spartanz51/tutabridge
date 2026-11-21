@@ -190,6 +190,11 @@ impl ImapSession {
         vec![format!("{} OK AUTHENTICATE completed\r\n", tag)]
     }
 
+    /// The `UIDVALIDITY` this session announces, for replies built outside it.
+    pub(super) fn uid_validity(&self) -> u32 {
+        self.store.uid_validity()
+    }
+
     pub fn end_idle(&mut self) -> Vec<String> {
         if let Some(tag) = self.idle_tag.take() {
             vec![format!("{} OK IDLE terminated\r\n", tag)]
@@ -525,7 +530,10 @@ impl ImapSession {
                     // clients drop flags missing here, so EXPUNGE would find
                     // nothing marked.
                     "* OK [PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)] Limited\r\n".to_string(),
-                    "* OK [UIDVALIDITY 1] UIDs valid\r\n".to_string(),
+                    format!(
+                        "* OK [UIDVALIDITY {}] UIDs valid\r\n",
+                        self.store.uid_validity()
+                    ),
                     format!("* OK [UIDNEXT {}] Predicted next UID\r\n", uid_next),
                 ];
                 if first_unseen > 0 {
@@ -559,8 +567,12 @@ impl ImapSession {
         let unseen = stored.iter().filter(|m| m.mail.unread).count();
         vec![
             format!(
-                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY 1)\r\n",
-                raw_name, count, unseen, uid_next
+                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY {})\r\n",
+                raw_name,
+                count,
+                unseen,
+                uid_next,
+                self.store.uid_validity()
             ),
             format!("{} OK STATUS completed\r\n", tag),
         ]
@@ -4762,5 +4774,26 @@ pub(crate) mod tests {
         assert!(!r.iter().any(|l| l.contains("(UID 3)")), "got {r:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn select_and_status_announce_the_stores_uidvalidity() {
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store
+            .set_folder("inbox", vec![stored_mail("i1", 1, false)])
+            .await;
+        store.set_uid_validity(1_700_000_000);
+        let mut session = signed_in(&store).await;
+
+        let r = session
+            .handle_command("A001 STATUS INBOX (UIDVALIDITY)")
+            .await;
+        assert!(r[0].contains("UIDVALIDITY 1700000000)"), "got {r:?}");
+        let r = session.handle_command("A002 SELECT INBOX").await;
+        assert!(
+            r.iter().any(|l| l.contains("[UIDVALIDITY 1700000000]")),
+            "got {r:?}"
+        );
     }
 }

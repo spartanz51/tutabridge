@@ -127,6 +127,10 @@ impl LocalStore {
                  DROP TABLE IF EXISTS event_bus_state;
                  DROP TABLE IF EXISTS mail_fts;",
             )?;
+            // The UID counters went with `sync_state`, so every UID is about
+            // to be handed out again. Renewed before the schema version is
+            // stamped below: if this fails, the next open comes back here.
+            renew_uid_validity(&conn, stored_uid_validity(&conn)?)?;
         }
 
         conn.execute_batch(&format!(
@@ -166,7 +170,6 @@ impl LocalStore {
             );
             INSERT OR REPLACE INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
-
         debug!("LocalStore opened at {}", db_path.display());
 
         Ok(Self {
@@ -184,6 +187,14 @@ impl LocalStore {
             |row| row.get::<_, String>(0),
         )
         .is_ok()
+    }
+
+    /// The IMAP `UIDVALIDITY` of every mailbox. It changes whenever the UID
+    /// counters start over (cache reset, schema change, new cache), which is
+    /// how a client learns that the UIDs it remembers no longer hold. A cache
+    /// that predates this value keeps 1, the value it was always served with.
+    pub fn uid_validity(&self) -> Result<u32, StoreError> {
+        stored_uid_validity(&self.conn.lock().unwrap())
     }
 
     /// Read a value from the generic `store_meta` key-value table.
@@ -264,7 +275,12 @@ impl LocalStore {
     pub fn reset(&self) -> Result<(), StoreError> {
         warn!("Resetting local store — all cached data will be deleted");
         let conn = self.conn.lock().unwrap();
-        conn.execute_batch(&format!(
+        // A store being reset may not be readable; 1 is what it then served.
+        let previous = stored_uid_validity(&conn).unwrap_or(1);
+        // One transaction: the counters never start over under the old
+        // UIDVALIDITY.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(&format!(
             "DELETE FROM mails;
              DELETE FROM sync_state;
              DELETE FROM store_meta;
@@ -272,6 +288,8 @@ impl LocalStore {
              DELETE FROM message_ids;
              INSERT INTO store_meta(key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');"
         ))?;
+        renew_uid_validity(&tx, previous)?;
+        tx.commit()?;
         drop(conn);
 
         if self.mails_dir.exists() {
@@ -728,6 +746,46 @@ impl LocalStore {
         self.unindex_body(element_id)?;
         Ok(())
     }
+}
+
+const UID_VALIDITY_KEY: &str = "uid_validity";
+
+/// The stored `UIDVALIDITY`, or 1 when there is none. A failed read is an
+/// error, not 1: it must not pass for a cache that predates the value.
+fn stored_uid_validity(conn: &Connection) -> Result<u32, StoreError> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM store_meta WHERE key = ?1",
+            [UID_VALIDITY_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(1))
+}
+
+/// Store a `UIDVALIDITY` above `previous` (RFC 3501 §2.3.1.1): the current
+/// time in seconds, the usual choice, or `previous + 1` if the clock is
+/// behind it.
+fn renew_uid_validity(conn: &Connection, previous: u32) -> Result<(), StoreError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    conn.execute(
+        "INSERT OR REPLACE INTO store_meta(key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            UID_VALIDITY_KEY,
+            next_uid_validity(previous, now).to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+fn next_uid_validity(previous: u32, now_secs: u64) -> u32 {
+    let from_clock = u32::try_from(now_secs).unwrap_or(u32::MAX);
+    from_clock.max(previous.saturating_add(1))
 }
 
 /// Clamp a raw SQLite `sync_state.next_uid` value into the valid RFC 3501
@@ -1307,5 +1365,88 @@ mod tests {
         assert_eq!(store.folder_next_uid("f").unwrap(), 1);
         set_counter(i64::from(u32::MAX) + 7);
         assert_eq!(store.folder_next_uid("f").unwrap(), u32::MAX);
+    }
+
+    fn reopen(dir: &Path, key_byte: u8) -> LocalStore {
+        let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[key_byte; 32]).unwrap());
+        LocalStore::open(&dir.join("test.db"), &dir.join("mails"), key).unwrap()
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tutabridge_test_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn uid_validity_is_new_for_a_new_cache_and_kept_across_reopens() {
+        let dir = fresh_dir();
+        let first = reopen(&dir, 3).uid_validity().unwrap();
+        // The current time: far above the 1 every older cache was served with.
+        assert!(first > 1_700_000_000, "got {first}");
+        assert_eq!(reopen(&dir, 3).uid_validity().unwrap(), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uid_validity_stays_1_for_a_cache_that_predates_it() {
+        let dir = fresh_dir();
+        let store = reopen(&dir, 3);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM store_meta WHERE key = 'uid_validity'", [])
+            .unwrap();
+        drop(store);
+        // Same schema, no stored value: nothing was renumbered, and clients
+        // know this cache under 1.
+        assert_eq!(reopen(&dir, 3).uid_validity().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uid_validity_grows_when_the_uid_counters_start_over() {
+        let dir = fresh_dir();
+        let store = reopen(&dir, 3);
+        let first = store.uid_validity().unwrap();
+        store.allocate_folder_uids("inbox", &["a", "b"]).unwrap();
+
+        store.reset().unwrap();
+        let after_reset = store.uid_validity().unwrap();
+        assert!(after_reset > first, "{after_reset} <= {first}");
+        assert_eq!(store.folder_next_uid("inbox").unwrap(), 1);
+
+        // A schema change drops the counters too.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE store_meta SET value = '0' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let after_migration = reopen(&dir, 3).uid_validity().unwrap();
+        assert!(
+            after_migration > after_reset,
+            "{after_migration} <= {after_reset}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn next_uid_validity_is_the_clock_unless_it_would_not_grow() {
+        assert_eq!(next_uid_validity(1, 1_800_000_000), 1_800_000_000);
+        // Two renewals in the same second, or a clock set in the past.
+        assert_eq!(
+            next_uid_validity(1_800_000_000, 1_800_000_000),
+            1_800_000_001
+        );
+        assert_eq!(next_uid_validity(1_800_000_000, 12), 1_800_000_001);
+        assert_eq!(next_uid_validity(1, 0), 2);
+        assert_eq!(next_uid_validity(1, u64::MAX), u32::MAX);
+        assert_eq!(next_uid_validity(u32::MAX, 5), u32::MAX);
     }
 }
