@@ -45,7 +45,6 @@ pub struct ImapSession {
     state: State,
     selected_folder: Option<FolderInfo>,
     mails: Vec<CachedMail>,
-    uid_next: u32,
     idle_tag: Option<String>,
     auth_tag: Option<String>,
     password_hash: Option<String>,
@@ -78,7 +77,6 @@ impl ImapSession {
             state: State::NotAuthenticated,
             selected_folder: None,
             mails: Vec::new(),
-            uid_next: 1,
             idle_tag: None,
             auth_tag: None,
             password_hash,
@@ -190,6 +188,11 @@ impl ImapSession {
             self.session_id
         );
         vec![format!("{} OK AUTHENTICATE completed\r\n", tag)]
+    }
+
+    /// The `UIDVALIDITY` this session announces, for replies built outside it.
+    pub(super) fn uid_validity(&self) -> u32 {
+        self.store.uid_validity()
     }
 
     pub fn end_idle(&mut self) -> Vec<String> {
@@ -510,7 +513,7 @@ impl ImapSession {
         self.state = State::Selected;
 
         match self.refresh_mails(&folder_id).await {
-            Ok(()) => {
+            Ok(uid_next) => {
                 let count = self.mails.len();
                 let first_unseen = self
                     .mails
@@ -527,8 +530,11 @@ impl ImapSession {
                     // clients drop flags missing here, so EXPUNGE would find
                     // nothing marked.
                     "* OK [PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)] Limited\r\n".to_string(),
-                    "* OK [UIDVALIDITY 1] UIDs valid\r\n".to_string(),
-                    format!("* OK [UIDNEXT {}] Predicted next UID\r\n", self.uid_next),
+                    format!(
+                        "* OK [UIDVALIDITY {}] UIDs valid\r\n",
+                        self.store.uid_validity()
+                    ),
+                    format!("* OK [UIDNEXT {}] Predicted next UID\r\n", uid_next),
                 ];
                 if first_unseen > 0 {
                     resp.push(format!("* OK [UNSEEN {}] First unseen\r\n", first_unseen));
@@ -553,16 +559,23 @@ impl ImapSession {
         }
         let (raw_name, _) = parse_imap_token(args.trim());
         let folder_name = super::utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone());
-        let stored = match self.store.folder_by_imap_path(&folder_name).await {
-            Some(folder) => self.store.get_folder(&folder.id).await,
-            None => Vec::new(),
+        let Some(folder) = self.store.folder_by_imap_path(&folder_name).await else {
+            return vec![format!(
+                "{} NO [NONEXISTENT] Mailbox does not exist\r\n",
+                tag
+            )];
         };
+        let (stored, uid_next) = self.store.folder_with_uid_next(&folder.id).await;
         let count = stored.len();
         let unseen = stored.iter().filter(|m| m.mail.unread).count();
         vec![
             format!(
-                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY 1)\r\n",
-                raw_name, count, unseen, self.uid_next
+                "* STATUS \"{}\" (MESSAGES {} UNSEEN {} RECENT 0 UIDNEXT {} UIDVALIDITY {})\r\n",
+                raw_name,
+                count,
+                unseen,
+                uid_next,
+                self.store.uid_validity()
             ),
             format!("{} OK STATUS completed\r\n", tag),
         ]
@@ -1034,8 +1047,10 @@ impl ImapSession {
         }
     }
 
-    async fn refresh_mails(&mut self, folder_id: &str) -> Result<(), String> {
-        let mut stored = self.store.get_folder(folder_id).await;
+    /// Reload the session's view of `folder_id`. Returns the folder's
+    /// `UIDNEXT` as of that same read.
+    async fn refresh_mails(&mut self, folder_id: &str) -> Result<u32, String> {
+        let (mut stored, uid_next) = self.store.folder_with_uid_next(folder_id).await;
 
         self.mails.clear();
         // UIDs are stable and assigned by the store; sort ascending so message
@@ -1043,14 +1058,10 @@ impl ImapSession {
         stored.sort_by_key(|m| m.uid);
 
         for sm in stored {
-            let uid = sm.uid;
-            if uid >= self.uid_next {
-                self.uid_next = uid + 1;
-            }
             self.mails.push(CachedMail {
                 mail: sm.mail,
                 body_loaded: sm.body_loaded,
-                uid,
+                uid: sm.uid,
                 deleted: false,
             });
         }
@@ -1060,7 +1071,7 @@ impl ImapSession {
             self.mails.len(),
             folder_id
         );
-        Ok(())
+        Ok(uid_next)
     }
 
     fn resolve_sequence_set(&self, seq_set: &str, uid_mode: bool) -> Vec<usize> {
@@ -1720,6 +1731,7 @@ fn append_literal_size(args: &str) -> Option<usize> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crypto_primitives::{aes::Aes256Key, key::GenericAesKey};
 
     // Existing text assertions decode strictly; partial-literal tests use the byte API.
     impl ImapSession {
@@ -4572,5 +4584,221 @@ pub(crate) mod tests {
             .handle_command(r#"A005 SEARCH TO "recip@test.com""#)
             .await;
         assert_eq!(resp[0], "* SEARCH 1 2\r\n");
+    }
+
+    fn folder_with(id: &str, kind: MailSetKind, imap_path: &str) -> FolderInfo {
+        FolderInfo {
+            id: id.to_string(),
+            list_id: "folders".to_string(),
+            entries_list_id: format!("{id}_entries"),
+            kind,
+            imap_path: imap_path.to_string(),
+            special_use: None,
+        }
+    }
+
+    fn stored_mail(eid: &str, uid: u32, unread: bool) -> StoredMail {
+        StoredMail {
+            mail: make_mail(eid, eid, unread),
+            body_loaded: false,
+            uid,
+            attachments_pending: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn status_and_select_report_per_folder_uidnext() {
+        let store = MailStore::new();
+        store
+            .set_folder_list(vec![
+                inbox_folder(),
+                folder_with("sent", MailSetKind::Sent, "Sent"),
+                folder_with("trash", MailSetKind::Trash, "Trash"),
+                folder_with("drafts", MailSetKind::Draft, "Drafts"),
+            ])
+            .await;
+        store
+            .set_folder(
+                "inbox",
+                vec![stored_mail("i1", 1, true), stored_mail("i111", 111, false)],
+            )
+            .await;
+        store
+            .set_folder(
+                "sent",
+                vec![stored_mail("s1", 1, false), stored_mail("s89", 89, false)],
+            )
+            .await;
+        store
+            .set_folder(
+                "trash",
+                vec![stored_mail("t1", 1, false), stored_mail("t7", 7, false)],
+            )
+            .await;
+        store.set_folder("drafts", vec![]).await;
+
+        let mut session = ImapSession::new(store, Arc::new(MockBackend::new()), None, None);
+        session.handle_command("A001 LOGIN user pass").await;
+
+        // Before any SELECT, STATUS must report each mailbox's own UIDNEXT.
+        let r = session
+            .handle_command("A002 STATUS INBOX (MESSAGES UIDNEXT)")
+            .await;
+        assert!(
+            r[0].contains("MESSAGES 2 UNSEEN 1 RECENT 0 UIDNEXT 112 UIDVALIDITY 1"),
+            "got {r:?}"
+        );
+        let r = session
+            .handle_command("A003 STATUS Sent (MESSAGES UIDNEXT)")
+            .await;
+        assert!(r[0].contains("UIDNEXT 90"), "got {r:?}");
+        let r = session
+            .handle_command("A004 STATUS Trash (MESSAGES UIDNEXT)")
+            .await;
+        assert!(r[0].contains("UIDNEXT 8"), "got {r:?}");
+        let r = session
+            .handle_command("A005 STATUS Drafts (MESSAGES UIDNEXT)")
+            .await;
+        assert!(r[0].contains("UIDNEXT 1"), "got {r:?}");
+        // An unknown mailbox has no status: saying "empty, UIDNEXT 1" would
+        // tell a client its copy of the mailbox is gone.
+        let r = session
+            .handle_command("A006 STATUS Nonexistent (MESSAGES UIDNEXT)")
+            .await;
+        assert_eq!(r, vec!["A006 NO [NONEXISTENT] Mailbox does not exist\r\n"]);
+
+        // After EXAMINE INBOX, STATUS for smaller/empty mailboxes must not inherit INBOX's UIDNEXT.
+        let r = session.handle_command("A007 EXAMINE INBOX").await;
+        assert!(r.iter().any(|l| l.contains("[UIDNEXT 112]")), "got {r:?}");
+
+        let r = session
+            .handle_command("A008 STATUS Sent (MESSAGES UIDNEXT)")
+            .await;
+        assert!(r[0].contains("UIDNEXT 90"), "got {r:?}");
+        let r = session
+            .handle_command("A009 STATUS Trash (MESSAGES UIDNEXT)")
+            .await;
+        assert!(r[0].contains("UIDNEXT 8"), "got {r:?}");
+        let r = session
+            .handle_command("A010 STATUS Drafts (MESSAGES UIDNEXT)")
+            .await;
+        assert!(r[0].contains("UIDNEXT 1"), "got {r:?}");
+
+        // Switching to a smaller or empty folder must reset UIDNEXT to that folder's value.
+        let r = session.handle_command("A011 EXAMINE Trash").await;
+        assert!(r.iter().any(|l| l.contains("[UIDNEXT 8]")), "got {r:?}");
+        let r = session.handle_command("A012 SELECT Drafts").await;
+        assert!(r.iter().any(|l| l.contains("[UIDNEXT 1]")), "got {r:?}");
+    }
+
+    fn open_cache(dir: &std::path::Path) -> Arc<LocalStore> {
+        let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[31; 32]).unwrap());
+        Arc::new(LocalStore::open(&dir.join("cache.db"), &dir.join("mails"), key).unwrap())
+    }
+
+    async fn signed_in(store: &Arc<MailStore>) -> ImapSession {
+        let mut session = ImapSession::new(store.clone(), Arc::new(MockBackend::new()), None, None);
+        session.handle_command("A000 LOGIN user pass").await;
+        session
+    }
+
+    /// The highest-UID mail is deleted on the server, the bridge restarts,
+    /// then a mail arrives: `UIDNEXT` holds at every step and the UID is not
+    /// handed out again. Driven through the sync and the cache load, since
+    /// after the restart only the counter on disk remembers UID 3.
+    #[tokio::test]
+    async fn uidnext_survives_the_loss_of_the_highest_uid_and_a_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "tutabridge-uidnext-monotonic-{}",
+            rand::random::<u64>()
+        ));
+        let inbox = inbox_folder();
+        let backend = MockBackend::with_mails(vec![
+            make_mail("m3", "three", false),
+            make_mail("m2", "two", false),
+            make_mail("m1", "one", false),
+        ]);
+
+        let local = open_cache(&dir);
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox.clone()]).await;
+        crate::sync::sync_folder(&store, &local, &backend, &inbox)
+            .await
+            .unwrap();
+        let mut session = signed_in(&store).await;
+        let r = session.handle_command("A001 STATUS INBOX (UIDNEXT)").await;
+        assert!(
+            r[0].contains("MESSAGES 3") && r[0].contains("UIDNEXT 4"),
+            "got {r:?}"
+        );
+
+        *backend.mails.lock().unwrap() =
+            vec![make_mail("m2", "two", false), make_mail("m1", "one", false)];
+        crate::sync::sync_folder(&store, &local, &backend, &inbox)
+            .await
+            .unwrap();
+        let r = session.handle_command("A002 STATUS INBOX (UIDNEXT)").await;
+        assert!(
+            r[0].contains("MESSAGES 2") && r[0].contains("UIDNEXT 4"),
+            "got {r:?}"
+        );
+
+        // Restart: a new process holds nothing but the files.
+        drop((session, store, local));
+        let local = open_cache(&dir);
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox.clone()]).await;
+        crate::sync::load_cached_folder(&store, &local, &inbox)
+            .await
+            .unwrap();
+        let mut session = signed_in(&store).await;
+        let r = session.handle_command("A003 STATUS INBOX (UIDNEXT)").await;
+        assert!(
+            r[0].contains("MESSAGES 2") && r[0].contains("UIDNEXT 4"),
+            "got {r:?}"
+        );
+        let r = session.handle_command("A004 SELECT INBOX").await;
+        assert!(r.iter().any(|l| l.contains("[UIDNEXT 4]")), "got {r:?}");
+
+        backend
+            .mails
+            .lock()
+            .unwrap()
+            .insert(0, make_mail("m4", "four", false));
+        crate::sync::sync_folder(&store, &local, &backend, &inbox)
+            .await
+            .unwrap();
+        let r = session.handle_command("A005 STATUS INBOX (UIDNEXT)").await;
+        assert!(
+            r[0].contains("MESSAGES 3") && r[0].contains("UIDNEXT 5"),
+            "got {r:?}"
+        );
+        session.handle_command("A006 SELECT INBOX").await;
+        let r = session.handle_command("A007 UID FETCH 1:* (UID)").await;
+        assert!(r.iter().any(|l| l.contains("(UID 4)")), "got {r:?}");
+        assert!(!r.iter().any(|l| l.contains("(UID 3)")), "got {r:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn select_and_status_announce_the_stores_uidvalidity() {
+        let store = MailStore::new();
+        store.set_folder_list(vec![inbox_folder()]).await;
+        store
+            .set_folder("inbox", vec![stored_mail("i1", 1, false)])
+            .await;
+        store.set_uid_validity(1_700_000_000);
+        let mut session = signed_in(&store).await;
+
+        let r = session
+            .handle_command("A001 STATUS INBOX (UIDVALIDITY)")
+            .await;
+        assert!(r[0].contains("UIDVALIDITY 1700000000)"), "got {r:?}");
+        let r = session.handle_command("A002 SELECT INBOX").await;
+        assert!(
+            r.iter().any(|l| l.contains("[UIDVALIDITY 1700000000]")),
+            "got {r:?}"
+        );
     }
 }

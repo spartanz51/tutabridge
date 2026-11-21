@@ -37,9 +37,35 @@ pub struct StoredMail {
     pub attachments_pending: bool,
 }
 
+/// One folder as IMAP sees it: its mails and the UID the next one will get.
+/// Both sit behind the same lock, so `UIDNEXT` is never announced ahead of
+/// the mails that justify it.
+#[derive(Default)]
+struct FolderState {
+    mails: Vec<StoredMail>,
+    /// Never lowered: deleting the highest-UID mail leaves it where it was.
+    uid_next: u32,
+}
+
+impl FolderState {
+    /// Raise `uid_next` to at least `floor` and above every mail held.
+    fn raise_uid_next(&mut self, floor: u32) {
+        let past_mails = self
+            .mails
+            .iter()
+            .map(|m| m.uid)
+            .max()
+            .map_or(1, |uid| uid.saturating_add(1));
+        self.uid_next = self.uid_next.max(floor).max(past_mails);
+    }
+}
+
 pub struct MailStore {
-    /// folder id → mails in that folder.
-    folders: RwLock<HashMap<String, Vec<StoredMail>>>,
+    /// folder id → mails in that folder and its next UID.
+    folders: RwLock<HashMap<String, FolderState>>,
+    /// `UIDVALIDITY` of every mailbox, from the disk cache (see
+    /// [`LocalStore::uid_validity`]).
+    uid_validity: std::sync::atomic::AtomicU32,
     /// The folder list (system + custom), for IMAP enumeration.
     folder_list: RwLock<Vec<FolderInfo>>,
     /// Bumped on list-membership changes (mail added/removed, folder list).
@@ -64,6 +90,7 @@ impl MailStore {
         let (details_tx, _) = watch::channel(0u64);
         Arc::new(Self {
             folders: RwLock::new(HashMap::new()),
+            uid_validity: std::sync::atomic::AtomicU32::new(1),
             folder_list: RwLock::new(Vec::new()),
             generation: tx,
             details_generation: details_tx,
@@ -104,6 +131,18 @@ impl MailStore {
         map.insert(element_id.to_string(), now + BODY_FETCH_COOLDOWN);
     }
 
+    /// The `UIDVALIDITY` IMAP sessions announce. 1 until the disk cache says
+    /// otherwise.
+    pub fn uid_validity(&self) -> u32 {
+        self.uid_validity.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set once at startup, before any IMAP client is served.
+    pub fn set_uid_validity(&self, uid_validity: u32) {
+        self.uid_validity
+            .store(uid_validity, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.generation.subscribe()
     }
@@ -116,7 +155,12 @@ impl MailStore {
     }
 
     pub async fn total_mail_count(&self) -> usize {
-        self.folders.read().await.values().map(|v| v.len()).sum()
+        self.folders
+            .read()
+            .await
+            .values()
+            .map(|f| f.mails.len())
+            .sum()
     }
 
     pub async fn folder_count(&self, folder_id: &str) -> usize {
@@ -124,7 +168,7 @@ impl MailStore {
             .read()
             .await
             .get(folder_id)
-            .map(|v| v.len())
+            .map(|f| f.mails.len())
             .unwrap_or(0)
     }
 
@@ -133,15 +177,23 @@ impl MailStore {
             .read()
             .await
             .get(folder_id)
-            .cloned()
+            .map(|f| f.mails.clone())
             .unwrap_or_default()
+    }
+
+    /// A folder's mails and its `UIDNEXT`, read together.
+    pub async fn folder_with_uid_next(&self, folder_id: &str) -> (Vec<StoredMail>, u32) {
+        match self.folders.read().await.get(folder_id) {
+            Some(f) => (f.mails.clone(), f.uid_next.max(1)),
+            None => (Vec::new(), 1),
+        }
     }
 
     /// The current version of one mail in one folder, without cloning the
     /// folder. `None` when it is no longer there (moved, sent or deleted).
     pub async fn mail_in_folder(&self, folder_id: &str, element_id: &str) -> Option<StoredMail> {
-        self.folders.read().await.get(folder_id).and_then(|mails| {
-            mails
+        self.folders.read().await.get(folder_id).and_then(|f| {
+            f.mails
                 .iter()
                 .find(|m| {
                     m.mail
@@ -180,12 +232,39 @@ impl MailStore {
         self.bump_generation();
     }
 
+    /// Replace a folder's mails. Its `UIDNEXT` rises with them and keeps
+    /// whatever it had already reached.
     pub(crate) async fn set_folder(&self, folder_id: &str, mails: Vec<StoredMail>) {
+        self.set_folder_with_uid_next(folder_id, mails, 1).await;
+    }
+
+    /// Replace a folder's mails and raise its `UIDNEXT` to at least
+    /// `uid_next`, the counter the disk cache allocates from. That counter is
+    /// what remembers a UID once its mail is gone.
+    pub(crate) async fn set_folder_with_uid_next(
+        &self,
+        folder_id: &str,
+        mails: Vec<StoredMail>,
+        uid_next: u32,
+    ) {
+        let mut folders = self.folders.write().await;
+        let folder = folders.entry(folder_id.to_string()).or_default();
+        folder.mails = mails;
+        folder.raise_uid_next(uid_next);
+        drop(folders);
+        self.bump_generation();
+    }
+
+    /// Raise a folder's `UIDNEXT` to at least `uid_next` without touching its
+    /// mails, so a folder that is listed but not loaded yet already announces
+    /// the right value.
+    pub(crate) async fn raise_uid_next(&self, folder_id: &str, uid_next: u32) {
         self.folders
             .write()
             .await
-            .insert(folder_id.to_string(), mails);
-        self.bump_generation();
+            .entry(folder_id.to_string())
+            .or_default()
+            .raise_uid_next(uid_next);
     }
 
     /// Refresh an existing mail's metadata in every folder that holds it
@@ -196,8 +275,8 @@ impl MailStore {
         };
         let mut folders = self.folders.write().await;
         let mut changed = false;
-        for mails in folders.values_mut() {
-            if let Some(m) = mails.iter_mut().find(|m| {
+        for folder in folders.values_mut() {
+            if let Some(m) = folder.mails.iter_mut().find(|m| {
                 m.mail
                     ._id
                     .as_ref()
@@ -221,8 +300,8 @@ impl MailStore {
     /// same mail just hopped between two cached folders, no REST round-trip.
     pub async fn find_mail_anywhere(&self, element_id: &str) -> Option<(String, StoredMail)> {
         let folders = self.folders.read().await;
-        for (fid, mails) in folders.iter() {
-            for m in mails {
+        for (fid, folder) in folders.iter() {
+            for m in &folder.mails {
                 if m.mail
                     ._id
                     .as_ref()
@@ -241,8 +320,8 @@ impl MailStore {
     /// per-folder removal to decide whether the cached `.eml` can go.
     pub async fn is_mail_anywhere(&self, element_id: &str) -> bool {
         let folders = self.folders.read().await;
-        folders.values().any(|mails| {
-            mails.iter().any(|m| {
+        folders.values().any(|folder| {
+            folder.mails.iter().any(|m| {
                 m.mail
                     ._id
                     .as_ref()
@@ -258,9 +337,10 @@ impl MailStore {
     /// folder if we are reprocessing an event).
     pub async fn remove_mail_from_folder(&self, folder_id: &str, element_id: &str) -> bool {
         let mut folders = self.folders.write().await;
-        let Some(mails) = folders.get_mut(folder_id) else {
+        let Some(folder) = folders.get_mut(folder_id) else {
             return false;
         };
+        let mails = &mut folder.mails;
         let before = mails.len();
         mails.retain(|m| {
             m.mail
@@ -286,7 +366,8 @@ impl MailStore {
             return;
         };
         let mut folders = self.folders.write().await;
-        let entries = folders.entry(folder_id.to_string()).or_default();
+        let folder = folders.entry(folder_id.to_string()).or_default();
+        let entries = &mut folder.mails;
         if let Some(slot) = entries.iter_mut().find(|m| {
             m.mail
                 ._id
@@ -299,6 +380,7 @@ impl MailStore {
         } else {
             entries.push(mail);
         }
+        folder.raise_uid_next(1);
         drop(folders);
         self.bump_generation();
     }
@@ -331,7 +413,8 @@ impl MailStore {
     pub async fn remove_mail_everywhere(&self, element_id: &str) {
         let mut folders = self.folders.write().await;
         let mut changed = false;
-        for mails in folders.values_mut() {
+        for folder in folders.values_mut() {
+            let mails = &mut folder.mails;
             let before = mails.len();
             mails.retain(|m| {
                 m.mail
@@ -360,7 +443,7 @@ impl MailStore {
     ) {
         let mut folders = self.folders.write().await;
         if let Some(folder) = folders.get_mut(folder_id) {
-            if let Some(m) = folder.iter_mut().find(|m| {
+            if let Some(m) = folder.mails.iter_mut().find(|m| {
                 m.mail
                     ._id
                     .as_ref()
@@ -430,7 +513,7 @@ pub async fn run_syncer(
             Vec::new()
         }
     };
-    store.set_folder_list(folders.clone()).await;
+    publish_folder_list(&store, &local_store, folders.clone()).await;
 
     // Phase 0: load cached mails from the local store into memory.
     for folder in &folders {
@@ -786,10 +869,12 @@ pub(crate) async fn load_cached_folder(
     // the `Vec` is built.
     let ls = local_store.clone();
     let folder_id = folder.id.clone();
-    let stored_mails = tokio::task::spawn_blocking(move || -> Result<Vec<StoredMail>, String> {
+    type Loaded = (Vec<StoredMail>, u32);
+    let loaded = tokio::task::spawn_blocking(move || -> Result<Loaded, String> {
         let metas = ls
             .load_folder_metadata(&folder_id)
             .map_err(|e| format!("{e}"))?;
+        let uid_next = persisted_uid_next(&ls, &folder_id);
 
         let mut stored_mails = Vec::with_capacity(metas.len());
         for meta in &metas {
@@ -818,14 +903,41 @@ pub(crate) async fn load_cached_folder(
                 attachments_pending: false,
             });
         }
-        Ok(stored_mails)
+        Ok((stored_mails, uid_next))
     })
     .await
     .map_err(|e| format!("cache load task failed: {e}"))??;
 
+    let (stored_mails, uid_next) = loaded;
     let count = stored_mails.len();
-    store.set_folder(&folder.id, stored_mails).await;
+    store
+        .set_folder_with_uid_next(&folder.id, stored_mails, uid_next)
+        .await;
     Ok(count)
+}
+
+/// Make `folders` the list IMAP clients see. Each folder's `UIDNEXT` is taken
+/// from the disk cache first: a client may ask for a folder's status before
+/// its mails are loaded, or after their load failed.
+pub(crate) async fn publish_folder_list(
+    store: &MailStore,
+    local_store: &LocalStore,
+    folders: Vec<FolderInfo>,
+) {
+    for folder in &folders {
+        let uid_next = persisted_uid_next(local_store, &folder.id);
+        store.raise_uid_next(&folder.id, uid_next).await;
+    }
+    store.set_folder_list(folders).await;
+}
+
+/// The folder's UID counter on disk, for `UIDNEXT`. A failed read falls back
+/// to 1: the folder's own mails then set the floor.
+fn persisted_uid_next(local_store: &LocalStore, folder_id: &str) -> u32 {
+    local_store.folder_next_uid(folder_id).unwrap_or_else(|e| {
+        warn!("Failed to read the UID counter of folder {folder_id}: {e}");
+        1
+    })
 }
 
 /// Sync a folder's full mail-list **metadata** (subject / sender / date /
@@ -1541,5 +1653,97 @@ mod tests {
         assert_eq!(removed, vec!["gone".to_string()]);
         assert_eq!(store.get_folder("keep").await.len(), 1);
         assert!(store.get_folder("gone").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn uid_next_is_one_until_a_folder_holds_something() {
+        let store = MailStore::new();
+        assert_eq!(store.folder_with_uid_next("unknown").await.1, 1);
+        store.set_folder("A", vec![]).await;
+        assert_eq!(store.folder_with_uid_next("A").await.1, 1);
+        // A mail whose UID could not be allocated carries 0.
+        store
+            .set_folder("A", vec![stored(make_mail("L1", "e0", "s", true), 0)])
+            .await;
+        assert_eq!(store.folder_with_uid_next("A").await.1, 1);
+    }
+
+    #[tokio::test]
+    async fn uid_next_follows_arrivals_and_never_goes_back() {
+        let store = MailStore::new();
+        store
+            .set_folder(
+                "A",
+                vec![
+                    stored(make_mail("L1", "e1", "one", true), 1),
+                    stored(make_mail("L1", "e7", "seven", true), 7),
+                ],
+            )
+            .await;
+        assert_eq!(store.folder_with_uid_next("A").await.1, 8);
+
+        store
+            .upsert_mail_in_folder("A", stored(make_mail("L1", "e9", "nine", true), 9))
+            .await;
+        let (mails, uid_next) = store.folder_with_uid_next("A").await;
+        assert_eq!((mails.len(), uid_next), (3, 10));
+
+        // The highest-UID mail leaves, by each of the three ways out.
+        assert!(store.remove_mail_from_folder("A", "e9").await);
+        assert_eq!(store.folder_with_uid_next("A").await.1, 10);
+        store.remove_mail_everywhere("e7").await;
+        assert_eq!(store.folder_with_uid_next("A").await.1, 10);
+        store.set_folder("A", vec![]).await;
+        assert_eq!(store.folder_with_uid_next("A").await.1, 10);
+
+        // Other folders keep their own count.
+        store
+            .upsert_mail_in_folder("B", stored(make_mail("L1", "b1", "b", true), 1))
+            .await;
+        assert_eq!(store.folder_with_uid_next("B").await.1, 2);
+    }
+
+    #[tokio::test]
+    async fn a_listed_folder_announces_its_disk_counter_before_it_is_loaded() {
+        use crypto_primitives::{aes::Aes256Key, key::GenericAesKey};
+        let dir = std::env::temp_dir().join(format!("tb_listed_{}", rand::random::<u64>()));
+        let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[5; 32]).unwrap());
+        let local = LocalStore::open(&dir.join("store.db"), &dir.join("mails"), key).unwrap();
+        local
+            .allocate_folder_uids("A", &["e1", "e2", "e3"])
+            .unwrap();
+        let folder = |id: &str| FolderInfo {
+            id: id.to_string(),
+            list_id: "folders".to_string(),
+            entries_list_id: format!("{id}_entries"),
+            kind: tutabridge_tuta::folder_system::MailSetKind::Custom,
+            imap_path: id.to_string(),
+            special_use: None,
+        };
+
+        let store = MailStore::new();
+        publish_folder_list(&store, &local, vec![folder("A"), folder("B")]).await;
+        // Listed, mails not loaded yet (or their load failed).
+        let (mails, uid_next) = store.folder_with_uid_next("A").await;
+        assert_eq!((mails.len(), uid_next), (0, 4));
+        assert_eq!(store.folder_with_uid_next("B").await.1, 1);
+        assert_eq!(store.list_folders().await.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn uid_next_takes_the_disk_counter_over_the_mails_held() {
+        let store = MailStore::new();
+        let mails = vec![stored(make_mail("L1", "e1", "one", true), 1)];
+        // UIDs 2 and 3 were handed out, then their mails deleted.
+        store.set_folder_with_uid_next("A", mails.clone(), 4).await;
+        assert_eq!(store.folder_with_uid_next("A").await.1, 4);
+        // A counter behind the mails never wins.
+        store.set_folder_with_uid_next("B", mails, 1).await;
+        assert_eq!(store.folder_with_uid_next("B").await.1, 2);
+        let top = vec![stored(make_mail("L1", "max", "max", true), u32::MAX)];
+        store.set_folder_with_uid_next("C", top, 1).await;
+        assert_eq!(store.folder_with_uid_next("C").await.1, u32::MAX);
     }
 }
