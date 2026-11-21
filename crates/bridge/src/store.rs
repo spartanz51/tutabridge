@@ -330,6 +330,7 @@ impl LocalStore {
                 received_date_ms = excluded.received_date_ms,
                 unread = excluded.unread,
                 has_details = excluded.has_details,
+                uid = CASE WHEN excluded.uid > 0 THEN excluded.uid ELSE mails.uid END,
                 mail_json = excluded.mail_json",
             rusqlite::params![
                 meta.element_id,
@@ -364,6 +365,7 @@ impl LocalStore {
                     received_date_ms = excluded.received_date_ms,
                     unread = excluded.unread,
                     has_details = CASE WHEN excluded.has_details = 1 THEN 1 ELSE mails.has_details END,
+                    uid = CASE WHEN excluded.uid > 0 THEN excluded.uid ELSE mails.uid END,
                     mail_json = excluded.mail_json",
             )?;
             for meta in metas {
@@ -1238,6 +1240,44 @@ mod tests {
 
         store.mark_has_details("det").unwrap();
         assert!(store.load_folder_metadata("inbox").unwrap()[0].has_details);
+    }
+
+    #[test]
+    fn a_moved_mail_takes_the_uid_of_its_new_folder() {
+        let store = open_memory_store();
+        let uid_of = |folder: &str, eid: &str| {
+            store
+                .load_folder_metadata(folder)
+                .unwrap()
+                .into_iter()
+                .find(|m| m.element_id == eid)
+                .map(|m| m.uid)
+        };
+        let mut in_a = meta("moved", "A", 1);
+        in_a.uid = 50;
+        store.upsert_mail_metadata(&in_a).unwrap();
+
+        // Moved to B, where it is given UID 4. The row is keyed by element id,
+        // so this is an update: it must not keep the 50 it had in A.
+        let mut in_b = meta("moved", "B", 1);
+        in_b.uid = 4;
+        store.upsert_mail_metadata(&in_b).unwrap();
+        assert_eq!(uid_of("B", "moved"), Some(4));
+        assert_eq!(uid_of("A", "moved"), None);
+
+        // Same through the batch a folder sync writes.
+        let mut in_c = meta("moved", "C", 1);
+        in_c.uid = 9;
+        store.upsert_mail_metadata_batch(&[in_c]).unwrap();
+        assert_eq!(uid_of("C", "moved"), Some(9));
+
+        // 0 means the caller could not allocate a UID: the one on record stays.
+        store.upsert_mail_metadata(&meta("moved", "C", 1)).unwrap();
+        assert_eq!(uid_of("C", "moved"), Some(9));
+        store
+            .upsert_mail_metadata_batch(&[meta("moved", "C", 1)])
+            .unwrap();
+        assert_eq!(uid_of("C", "moved"), Some(9));
     }
 
     #[test]
