@@ -419,6 +419,23 @@ impl LocalStore {
         Ok(map)
     }
 
+    /// Return the next IMAP UID that would be assigned in `folder_id`.
+    /// Defaults to `1` for folders that have never received a message.
+    /// The counter only advances, so deleting or expunging the highest-UID
+    /// message never makes `UIDNEXT` decrease (RFC 3501 §2.3.1.1).
+    pub fn folder_next_uid(&self, folder_id: &str) -> Result<u32, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_uid FROM sync_state WHERE folder_id = ?1",
+                [folder_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(1);
+        Ok(clamp_uid_next(next))
+    }
+
     pub fn delete_mails_not_in(
         &self,
         folder_id: &str,
@@ -711,6 +728,18 @@ impl LocalStore {
     }
 }
 
+/// Clamp a raw SQLite `sync_state.next_uid` value into the valid RFC 3501
+/// `nz-number` range (`1..=u32::MAX`).
+fn clamp_uid_next(raw: i64) -> u32 {
+    if raw < 1 {
+        1
+    } else if raw > i64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        raw as u32
+    }
+}
+
 impl crate::tuta::MessageIdIndex for LocalStore {
     fn knows_message_id(&self, message_id: &str) -> bool {
         LocalStore::knows_message_id(self, message_id)
@@ -997,6 +1026,33 @@ mod tests {
         // Each folder has its own counter.
         let m3 = store.allocate_folder_uids("custom", &["x"]).unwrap();
         assert_eq!(m3["x"], 1);
+    }
+
+    #[test]
+    fn folder_next_uid_starts_at_one_advances_and_survives_deletes() {
+        let store = open_memory_store();
+        assert_eq!(store.folder_next_uid("inbox").unwrap(), 1);
+        assert_eq!(store.folder_next_uid("sent").unwrap(), 1);
+
+        let allocated = store.allocate_folder_uids("inbox", &["a", "b"]).unwrap();
+        assert_eq!(allocated["b"], 2);
+        assert_eq!(store.folder_next_uid("inbox").unwrap(), 3);
+        assert_eq!(store.folder_next_uid("sent").unwrap(), 1);
+
+        // Removing every mail from the folder must not lower its next_uid.
+        let mut m1 = meta("a", "inbox", 1);
+        m1.uid = 1;
+        let mut m2 = meta("b", "inbox", 2);
+        m2.uid = 2;
+        store.upsert_mail_metadata(&m1).unwrap();
+        store.upsert_mail_metadata(&m2).unwrap();
+        let deleted = store.delete_mails_not_in("inbox", &[]).unwrap();
+        assert_eq!(deleted.len(), 2);
+        assert_eq!(store.folder_next_uid("inbox").unwrap(), 3);
+
+        // A full cache reset clears sync_state back to 1.
+        store.reset().unwrap();
+        assert_eq!(store.folder_next_uid("inbox").unwrap(), 1);
     }
 
     #[test]
