@@ -963,8 +963,14 @@ mod startup_tests {
         }
     }
 
-    /// Tuta, unreachable except for the folder list.
-    struct OfflineBackend;
+    /// Tuta, unreachable except for the folder list, and for the folder's
+    /// mail list when `listed` is set.
+    #[derive(Default)]
+    struct OfflineBackend {
+        listed: Option<Vec<Mail>>,
+        /// How many times a body was asked for.
+        details_asked: std::sync::atomic::AtomicUsize,
+    }
     #[async_trait::async_trait]
     impl MailBackend for OfflineBackend {
         async fn load_mail_ids_for_folder(
@@ -972,7 +978,7 @@ mod startup_tests {
             _f: &FolderInfo,
             _l: usize,
         ) -> Result<Vec<Mail>, String> {
-            Err("offline".into())
+            self.listed.clone().ok_or_else(|| "offline".into())
         }
         async fn load_mail(&self, _l: &str, _e: &str) -> Result<Option<Mail>, String> {
             Err("offline".into())
@@ -993,6 +999,8 @@ mod startup_tests {
             Err("offline".into())
         }
         async fn load_mail_details(&self, _m: &Mail) -> Result<Option<MailDetails>, String> {
+            self.details_asked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err("offline".into())
         }
         async fn load_attachments(
@@ -1060,8 +1068,9 @@ mod startup_tests {
         ls.upsert_mail_metadata_batch(&metas).unwrap();
         ls.write_eml(MARKER, "Subject: marker\r\n\r\nbody").unwrap();
         ls.set_event_bus_batch_id("group", "batch0").unwrap();
-        ls.set_meta("full_metadata_synced_v1", "1").unwrap();
-        ls.set_meta("body_fts_indexed_v1", "1").unwrap();
+        ls.set_meta(crate::store::FULL_METADATA_MARKER, "1")
+            .unwrap();
+        ls.set_meta(crate::store::FTS_BACKFILL_MARKER, "1").unwrap();
         Arc::new(ls)
     }
 
@@ -1103,7 +1112,7 @@ mod startup_tests {
     async fn a_catch_up_event_during_the_cache_load_is_not_overwritten() {
         let ls = cache_of_a_previous_run();
         let store = MailStore::new();
-        let backend: Arc<dyn MailBackend> = Arc::new(OfflineBackend);
+        let backend: Arc<dyn MailBackend> = Arc::new(OfflineBackend::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (startup_tx, startup_rx) = watch::channel(false);
         let (event_tx, event_rx) = mpsc::channel(64);
@@ -1185,7 +1194,7 @@ mod startup_tests {
         let handler = tokio::spawn(run_event_handler(
             store.clone(),
             ls,
-            Arc::new(OfflineBackend),
+            Arc::new(OfflineBackend::default()),
             Arc::new(Mutex::new(HashMap::new())),
             event_rx,
             startup_rx,
@@ -1302,5 +1311,211 @@ mod startup_tests {
         let (mails, uid_next) = store.folder_with_uid_next("target").await;
         assert_eq!((mails.len(), mails[0].uid, uid_next), (1, 1, 2));
         assert_eq!(ls.folder_next_uid("target").unwrap(), 2);
+    }
+
+    /// A cache as schema 4 could leave it: two mails on one UID, a UID above
+    /// the folder's counter, and everything saying the cache is complete.
+    /// The first start on the new schema rebuilds the mail list with fresh
+    /// UIDs under a new UIDVALIDITY. The bodies stay on disk: they are made
+    /// searchable again and none is asked from Tuta.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_schema_4_cache_is_rebuilt_and_keeps_its_bodies() {
+        use crate::store::{FTS_BACKFILL_MARKER, FULL_METADATA_MARKER};
+        let open = |dir: &std::path::Path| {
+            let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[9; 32]).unwrap());
+            Arc::new(LocalStore::open(&dir.join("store.db"), &dir.join("mails"), key).unwrap())
+        };
+        let dir = std::env::temp_dir().join(format!("tb_schema4_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Oldest first. `moved` came from a bigger folder and kept its UID 50.
+        let old_uids = [("first", 1), ("twin_a", 2), ("twin_b", 2), ("moved", 50)];
+        let ls = open(&dir);
+        ls.allocate_folder_uids(FOLDER, &["first", "twin_a", "twin_b", "x"])
+            .unwrap();
+        for (i, (eid, uid)) in old_uids.iter().enumerate() {
+            let m = mail(eid, 1_000_000 + i as u64);
+            ls.upsert_mail_metadata(&mail_to_metadata(&m, FOLDER, *uid))
+                .unwrap();
+            let body = format!("Subject: s\r\nContent-Type: text/plain\r\n\r\nword{i} zanzibar");
+            ls.write_eml(eid, &body).unwrap();
+        }
+        // Only `first` was flagged as having its body, and only it was indexed.
+        ls.mark_has_details("first").unwrap();
+        ls.index_body("first", "word0 zanzibar").unwrap();
+        // A body file cut short by a power loss: it no longer decrypts.
+        std::fs::write(dir.join("mails").join("twin_b.eml.enc"), b"truncated").unwrap();
+        ls.set_event_bus_batch_id("group", "batch0").unwrap();
+        ls.set_meta(FULL_METADATA_MARKER, "1").unwrap();
+        ls.set_meta(FTS_BACKFILL_MARKER, "1").unwrap();
+        ls.set_meta("message_ids_backfilled_v1", "1").unwrap();
+        ls.set_meta("uid_validity", "1").unwrap();
+        ls.set_meta("schema_version", "4").unwrap();
+        drop(ls);
+
+        let ls = open(&dir);
+        let uid_validity = ls.uid_validity().unwrap();
+        assert!(uid_validity > 1);
+        let store = MailStore::new();
+        let listed = old_uids
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, (eid, _))| mail(eid, 1_000_000 + i as u64))
+            .collect();
+        let backend = Arc::new(OfflineBackend {
+            listed: Some(listed),
+            ..Default::default()
+        });
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (startup_tx, _startup_rx) = watch::channel(false);
+        let syncer = tokio::spawn(run_syncer(
+            store.clone(),
+            ls.clone(),
+            backend.clone(),
+            0,
+            startup_tx,
+            shutdown_rx,
+        ));
+        let t = Instant::now();
+        while ls.get_meta(FTS_BACKFILL_MARKER).is_none() {
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "the body index was never rebuilt"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Let the body prefetch, which follows, look at every mail.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = syncer.await;
+
+        let expected: Vec<(u32, String)> = old_uids
+            .iter()
+            .zip(1..)
+            .map(|((eid, _), uid)| (uid, eid.to_string()))
+            .collect();
+        let (mails, uid_next) = store.folder_with_uid_next(FOLDER).await;
+        let mut uids: Vec<(u32, String)> = mails
+            .iter()
+            .map(|m| (m.uid, m.mail._id.as_ref().unwrap().element_id.0.clone()))
+            .collect();
+        uids.sort();
+        assert_eq!(uids, expected);
+        assert_eq!(uid_next, 5);
+        assert_eq!(ls.folder_next_uid(FOLDER).unwrap(), 5);
+
+        // Every readable body is found again, flagged or not before.
+        let mut found = ls.search_body("zanzibar").unwrap();
+        found.sort();
+        assert_eq!(found, vec!["first", "moved", "twin_a"]);
+        assert_eq!(ls.search_body("word3").unwrap(), vec!["moved"]);
+        let asked = backend
+            .details_asked
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(asked, 0, "a body kept on disk was asked from Tuta");
+
+        // The next start is an ordinary one: nothing is dropped or renumbered.
+        drop((store, ls));
+        let ls = open(&dir);
+        assert_eq!(ls.uid_validity().unwrap(), uid_validity);
+        let rows = ls.load_folder_metadata(FOLDER).unwrap();
+        // The bodies read were flagged again in one go. Only `twin_b`, which
+        // does not decrypt, is left for the cache load to flag.
+        let mut unflagged: Vec<&str> = rows
+            .iter()
+            .filter(|m| !m.has_details)
+            .map(|m| m.element_id.as_str())
+            .collect();
+        unflagged.sort();
+        assert_eq!(unflagged, vec!["twin_b"]);
+        let mut on_disk: Vec<(u32, String)> = rows
+            .into_iter()
+            .map(|m| (m.uid as u32, m.element_id))
+            .collect();
+        on_disk.sort();
+        assert_eq!(on_disk, expected);
+        assert_eq!(ls.search_body("word3").unwrap(), vec!["moved"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The first start after a rebuild cannot list the folder (Tuta is
+    /// unreachable through every retry, which is what makes this test take
+    /// seconds). Nothing may then claim the cache is complete: the next
+    /// start lists the folder and indexes the body it kept on disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_folder_whose_rebuild_failed_is_listed_and_indexed_at_the_next_start() {
+        use crate::store::{FTS_BACKFILL_MARKER, FULL_METADATA_MARKER};
+        async fn start(ls: &Arc<LocalStore>, listed: Option<Vec<Mail>>) -> usize {
+            let listed_any = listed.is_some();
+            let store = MailStore::new();
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let (startup_tx, mut startup_rx) = watch::channel(false);
+            let syncer = tokio::spawn(run_syncer(
+                store.clone(),
+                ls.clone(),
+                Arc::new(OfflineBackend {
+                    listed,
+                    ..Default::default()
+                }),
+                0,
+                startup_tx,
+                shutdown_rx,
+            ));
+            while !*startup_rx.borrow() {
+                startup_rx.changed().await.unwrap();
+            }
+            // The body index is dealt with right after the startup signal.
+            // When the folder was listed, wait for it to be marked done; when
+            // it was not, give a wrong run the time to leave that marker.
+            let t = Instant::now();
+            while listed_any && ls.get_meta(FTS_BACKFILL_MARKER).is_none() {
+                assert!(
+                    t.elapsed() < Duration::from_secs(30),
+                    "the body index was never rebuilt"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if !listed_any {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let _ = shutdown_tx.send(true);
+            let _ = syncer.await;
+            store.get_folder(FOLDER).await.len()
+        }
+        let open = |dir: &std::path::Path| {
+            let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[9; 32]).unwrap());
+            Arc::new(LocalStore::open(&dir.join("store.db"), &dir.join("mails"), key).unwrap())
+        };
+        let dir = std::env::temp_dir().join(format!("tb_retry_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ls = open(&dir);
+        let kept = mail("kept", 1_000_000);
+        ls.upsert_mail_metadata(&mail_to_metadata(&kept, FOLDER, 1))
+            .unwrap();
+        ls.write_eml(
+            "kept",
+            "Content-Type: text/plain\r\n\r\nA word like zanzibar.",
+        )
+        .unwrap();
+        ls.set_event_bus_batch_id("group", "batch0").unwrap();
+        ls.set_meta(FULL_METADATA_MARKER, "1").unwrap();
+        ls.set_meta(FTS_BACKFILL_MARKER, "1").unwrap();
+        ls.set_meta("message_ids_backfilled_v1", "1").unwrap();
+        ls.set_meta("schema_version", "4").unwrap();
+        drop(ls);
+
+        let ls = open(&dir);
+        assert_eq!(start(&ls, None).await, 0);
+        assert_eq!(ls.get_meta(FULL_METADATA_MARKER), None);
+        assert_eq!(ls.get_meta(FTS_BACKFILL_MARKER), None);
+
+        // The event bus saves its cursor with the first batch it applies, so
+        // from here on only the missing markers say the cache is incomplete.
+        ls.set_event_bus_batch_id("group", "batch1").unwrap();
+        assert_eq!(start(&ls, Some(vec![kept])).await, 1);
+        assert_eq!(ls.search_body("zanzibar").unwrap(), vec!["kept"]);
+        assert!(ls.get_meta(FTS_BACKFILL_MARKER).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
