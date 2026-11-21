@@ -7,10 +7,20 @@ use crypto_primitives::randomizer_facade::RandomizerFacade;
 use log::{debug, warn};
 use rusqlite::{Connection, OptionalExtension};
 
-/// Bumped when the on-disk schema changes. A mismatch drops the cached tables
-/// (mails + sync_state + event_bus_state) and triggers a full re-sync;
-/// encrypted .eml files are keyed by element id and survive the migration.
-const SCHEMA_VERSION: &str = "4";
+/// Bumped when the on-disk schema changes, or when what an existing cache
+/// holds can no longer be trusted. A mismatch drops the cached tables
+/// (mails + sync_state + event_bus_state + mail_fts) and the markers that
+/// said they were complete, and triggers a full re-sync; encrypted .eml files
+/// are keyed by element id and survive the migration.
+///
+/// 5: up to 4, a mail moved to another folder kept the UID of the folder it
+/// left, so a folder could hold two mails on one UID.
+const SCHEMA_VERSION: &str = "5";
+
+/// Set once every folder's mail list has been synced in full.
+pub(crate) const FULL_METADATA_MARKER: &str = "full_metadata_synced_v1";
+/// Set once the cached bodies have been indexed for full-text search.
+pub(crate) const FTS_BACKFILL_MARKER: &str = "body_fts_indexed_v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -127,9 +137,17 @@ impl LocalStore {
                  DROP TABLE IF EXISTS event_bus_state;
                  DROP TABLE IF EXISTS mail_fts;",
             )?;
+            // These two say the tables just dropped are complete. Left set,
+            // a folder whose re-sync fails is never retried, and the bodies
+            // kept on disk are never indexed again.
+            conn.execute(
+                "DELETE FROM store_meta WHERE key IN (?1, ?2)",
+                [FULL_METADATA_MARKER, FTS_BACKFILL_MARKER],
+            )?;
             // The UID counters went with `sync_state`, so every UID is about
-            // to be handed out again. Renewed before the schema version is
-            // stamped below: if this fails, the next open comes back here.
+            // to be handed out again. All of this runs before the schema
+            // version is stamped below: if it fails, the next open comes back
+            // here.
             renew_uid_validity(&conn, stored_uid_validity(&conn)?)?;
         }
 
@@ -503,6 +521,21 @@ impl LocalStore {
             "UPDATE mails SET has_details = 1 WHERE element_id = ?1",
             [element_id],
         )?;
+        Ok(())
+    }
+
+    /// [`Self::mark_has_details`] for many mails, in one transaction.
+    pub fn mark_has_details_batch(&self, element_ids: &[&str]) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE mails SET has_details = 1 WHERE element_id = ?1")?;
+            for element_id in element_ids {
+                stmt.execute([element_id])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1448,5 +1481,40 @@ mod tests {
         assert_eq!(next_uid_validity(1, 0), 2);
         assert_eq!(next_uid_validity(1, u64::MAX), u32::MAX);
         assert_eq!(next_uid_validity(u32::MAX, 5), u32::MAX);
+    }
+
+    #[test]
+    fn a_schema_change_drops_the_cache_and_the_markers_that_vouched_for_it() {
+        let dir = fresh_dir();
+        let store = reopen(&dir, 3);
+        store.upsert_mail_metadata(&meta("m1", "inbox", 1)).unwrap();
+        store.allocate_folder_uids("inbox", &["m1"]).unwrap();
+        store.write_eml("m1", "Subject: s\r\n\r\nzanzibar").unwrap();
+        store.index_body("m1", "zanzibar").unwrap();
+        store.set_event_bus_batch_id("group", "batch0").unwrap();
+        store.set_meta(FULL_METADATA_MARKER, "1").unwrap();
+        store.set_meta(FTS_BACKFILL_MARKER, "1").unwrap();
+        store.set_meta("schema_version", "4").unwrap();
+        drop(store);
+
+        let store = reopen(&dir, 3);
+        assert!(store.load_folder_metadata("inbox").unwrap().is_empty());
+        assert_eq!(store.folder_next_uid("inbox").unwrap(), 1);
+        assert!(store.load_event_bus_state().unwrap().is_empty());
+        assert!(store.search_body("zanzibar").unwrap().is_empty());
+        // Left set, a start that follows a failed re-sync would skip the full
+        // sync, and the bodies still on disk would never be indexed again.
+        assert_eq!(store.get_meta(FULL_METADATA_MARKER), None);
+        assert_eq!(store.get_meta(FTS_BACKFILL_MARKER), None);
+        assert!(store.has_eml("m1"));
+
+        // Once on the current schema, opening drops nothing.
+        store.upsert_mail_metadata(&meta("m2", "inbox", 2)).unwrap();
+        store.set_meta(FULL_METADATA_MARKER, "1").unwrap();
+        drop(store);
+        let store = reopen(&dir, 3);
+        assert_eq!(store.load_folder_metadata("inbox").unwrap().len(), 1);
+        assert_eq!(store.get_meta(FULL_METADATA_MARKER).as_deref(), Some("1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

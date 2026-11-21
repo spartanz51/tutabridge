@@ -7,7 +7,7 @@ use tokio::sync::{watch, RwLock};
 use tutasdk::entities::generated::tutanota::{Mail, MailDetails, TutanotaFile};
 
 use crate::mail::{extract_body_text, header_message_id, mail_to_rfc2822, strip_html};
-use crate::store::{LocalStore, MailMetadata};
+use crate::store::{LocalStore, MailMetadata, FTS_BACKFILL_MARKER, FULL_METADATA_MARKER};
 use crate::tuta::{FolderInfo, MailBackend};
 
 const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
@@ -534,7 +534,6 @@ pub async fn run_syncer(
     //     under the old `sync_limit`-truncated model up to a complete mailbox.
     // After it runs once, the event bus keeps the list current; we don't
     // re-list every launch (the metadata is persisted + loaded in Phase 0).
-    const FULL_METADATA_MARKER: &str = "full_metadata_synced_v1";
     let needs_bootstrap = match local_store.load_event_bus_state() {
         Ok(s) => s.is_empty(),
         Err(e) => {
@@ -580,11 +579,11 @@ pub async fn run_syncer(
     // overwritten. Nothing below replaces a folder.
     let _ = startup_done.send(true);
 
-    // One-time backfill of the full-text body index from bodies that were
-    // already cached (downloaded before the index existed). Bodies fetched from
-    // here on are indexed inline by `prefetch_details`, so this only ever runs
-    // once per install.
-    const FTS_BACKFILL_MARKER: &str = "body_fts_indexed_v1";
+    // Backfill of the full-text body index from the bodies already on disk:
+    // those downloaded before the index existed, and every readable one after
+    // a rebuild of the cache tables, which drops the index and keeps the
+    // files. Bodies `prefetch_details` downloads from here on are indexed as
+    // they arrive.
     if local_store.get_meta(FTS_BACKFILL_MARKER).is_none() && !folders.is_empty() {
         info!("Backfilling full-text body index from cached messages…");
         let mut indexed = 0usize;
@@ -607,9 +606,16 @@ pub async fn run_syncer(
                     let mut ok = true;
                     match ls.load_folder_metadata(&fid) {
                         Ok(metas) => {
-                            for meta in metas.iter().filter(|m| m.has_details) {
+                            // Every row, not only those flagged `has_details`:
+                            // the flag is reset by a rebuild and by a move,
+                            // the file on disk is what says a body is there.
+                            let mut unflagged = Vec::new();
+                            for meta in &metas {
                                 match ls.read_eml(&meta.element_id) {
                                     Ok(Some(rfc)) => {
+                                        if !meta.has_details {
+                                            unflagged.push(meta.element_id.as_str());
+                                        }
                                         let text = extract_body_text(&rfc);
                                         if let Err(e) = ls.index_body(&meta.element_id, &text) {
                                             warn!(
@@ -622,6 +628,15 @@ pub async fn run_syncer(
                                         }
                                     }
                                     Ok(None) => {}
+                                    // A file that does not decrypt will not
+                                    // next time either: skip it, or the
+                                    // backfill would start over at every launch.
+                                    Err(e @ crate::store::StoreError::Crypto(_)) => {
+                                        warn!(
+                                            "FTS backfill: unreadable body {}: {e}",
+                                            meta.element_id
+                                        );
+                                    }
                                     Err(e) => {
                                         warn!(
                                             "FTS backfill read failed for {}: {e}",
@@ -630,6 +645,12 @@ pub async fn run_syncer(
                                         ok = false;
                                     }
                                 }
+                            }
+                            // Put the flag back in one go. Left to the next
+                            // cache load, it is repaired one write per mail
+                            // before the folder shows up.
+                            if let Err(e) = ls.mark_has_details_batch(&unflagged) {
+                                warn!("FTS backfill: could not flag bodies of {fpath}: {e}");
                             }
                         }
                         Err(e) => {
@@ -650,7 +671,11 @@ pub async fn run_syncer(
             }
         }
         // Only mark done if nothing errored, so a partial run retries next boot.
-        if all_ok {
+        // And only once every folder is listed: a body is found through its
+        // mail's row, so a folder that could not be listed has had none of
+        // its bodies indexed yet.
+        let mail_list_complete = local_store.get_meta(FULL_METADATA_MARKER).is_some();
+        if all_ok && mail_list_complete {
             if let Err(e) = local_store.set_meta(FTS_BACKFILL_MARKER, "1") {
                 warn!("Could not persist FTS backfill marker: {e}");
             }
