@@ -290,7 +290,7 @@ async fn refresh_folder_list(
     match backend.list_folders().await {
         Ok(folders) => {
             let known: HashSet<String> = folders.iter().map(|f| f.id.clone()).collect();
-            store.set_folder_list(folders).await;
+            crate::sync::publish_folder_list(store, local_store, folders).await;
             let removed = store.prune_unknown_folders(&known).await;
             for fid in &removed {
                 debug!("Event bus: folder {} removed", fid);

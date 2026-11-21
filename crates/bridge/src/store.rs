@@ -1239,4 +1239,33 @@ mod tests {
         store.mark_has_details("det").unwrap();
         assert!(store.load_folder_metadata("inbox").unwrap()[0].has_details);
     }
+
+    #[test]
+    fn clamp_uid_next_keeps_the_counter_a_valid_uid() {
+        assert_eq!(clamp_uid_next(i64::MIN), 1);
+        assert_eq!(clamp_uid_next(0), 1);
+        assert_eq!(clamp_uid_next(1), 1);
+        assert_eq!(clamp_uid_next(112), 112);
+        assert_eq!(clamp_uid_next(i64::from(u32::MAX)), u32::MAX);
+        assert_eq!(clamp_uid_next(i64::from(u32::MAX) + 1), u32::MAX);
+        assert_eq!(clamp_uid_next(i64::MAX), u32::MAX);
+
+        // And it is applied to what the counter row holds.
+        let store = open_memory_store();
+        let set_counter = |raw: i64| {
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT OR REPLACE INTO sync_state(folder_id, next_uid) VALUES ('f', ?1)",
+                    [raw],
+                )
+                .unwrap();
+        };
+        set_counter(0);
+        assert_eq!(store.folder_next_uid("f").unwrap(), 1);
+        set_counter(i64::from(u32::MAX) + 7);
+        assert_eq!(store.folder_next_uid("f").unwrap(), u32::MAX);
+    }
 }
