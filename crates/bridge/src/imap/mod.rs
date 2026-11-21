@@ -400,13 +400,13 @@ where
         } else {
             String::new()
         };
-        untagged + &append_draft_reply(&req.tag, &saved)
+        untagged + &append_draft_reply(&req.tag, session.uid_validity(), &saved)
     } else {
         let message_id = crate::mail::parser::parse_message_id(&literal);
         let copy = session
             .sent_copy(&req.mailbox, message_id.as_deref(), SENT_COPY_WAIT)
             .await;
-        append_sent_reply(&req.tag, &copy)
+        append_sent_reply(&req.tag, session.uid_validity(), &copy)
     };
     writer.write_all(resp.as_bytes()).await?;
     writer.flush().await?;
@@ -414,10 +414,11 @@ where
 }
 
 /// The tagged reply to an APPEND to Sent, given where Tuta's copy stands.
-fn append_sent_reply(tag: &str, copy: &session::SentCopy) -> String {
+fn append_sent_reply(tag: &str, uid_validity: u32, copy: &session::SentCopy) -> String {
     match copy {
-        // UIDVALIDITY is always 1 (see SELECT); UIDs are never reused.
-        session::SentCopy::Found(uid) => format!("{tag} OK [APPENDUID 1 {uid}] APPEND completed\r\n"),
+        session::SentCopy::Found(uid) => {
+            format!("{tag} OK [APPENDUID {uid_validity} {uid}] APPEND completed\r\n")
+        }
         session::SentCopy::Pending => format!("{tag} OK APPEND completed\r\n"),
         session::SentCopy::Unknown => format!(
             "{tag} NO [CANNOT] Only mail sent through the bridge can be saved to Sent; Tuta keeps it automatically\r\n"
@@ -427,9 +428,11 @@ fn append_sent_reply(tag: &str, copy: &session::SentCopy) -> String {
 
 /// The tagged reply to an APPEND to Drafts. The UID is offered only when the
 /// new draft has shown up: no APPENDUID beats a wrong one.
-fn append_draft_reply(tag: &str, saved: &Result<Option<u32>, String>) -> String {
+fn append_draft_reply(tag: &str, uid_validity: u32, saved: &Result<Option<u32>, String>) -> String {
     match saved {
-        Ok(Some(uid)) => format!("{tag} OK [APPENDUID 1 {uid}] APPEND completed\r\n"),
+        Ok(Some(uid)) => {
+            format!("{tag} OK [APPENDUID {uid_validity} {uid}] APPEND completed\r\n")
+        }
         Ok(None) => format!("{tag} OK APPEND completed\r\n"),
         Err(_) => format!("{tag} NO [SERVERBUG] The draft could not be saved\r\n"),
     }
@@ -894,14 +897,14 @@ mod tests {
     fn append_sent_reply_matches_where_the_copy_stands() {
         use session::SentCopy;
         assert_eq!(
-            append_sent_reply("a1", &SentCopy::Found(42)),
-            "a1 OK [APPENDUID 1 42] APPEND completed\r\n"
+            append_sent_reply("a1", 7, &SentCopy::Found(42)),
+            "a1 OK [APPENDUID 7 42] APPEND completed\r\n"
         );
         assert_eq!(
-            append_sent_reply("a2", &SentCopy::Pending),
+            append_sent_reply("a2", 7, &SentCopy::Pending),
             "a2 OK APPEND completed\r\n"
         );
-        assert!(append_sent_reply("a3", &SentCopy::Unknown).starts_with("a3 NO [CANNOT] "));
+        assert!(append_sent_reply("a3", 7, &SentCopy::Unknown).starts_with("a3 NO [CANNOT] "));
     }
 
     #[tokio::test]
@@ -928,6 +931,7 @@ mod tests {
                 },
             )
             .await;
+        store.set_uid_validity(77);
         let backend = NoopBackend {
             sent: Some(("abc@client".into(), "sent-1".into())),
             ..Default::default()
@@ -958,7 +962,7 @@ mod tests {
         let (res, resp) = tokio::join!(server_fut, client_fut);
         res.unwrap();
         assert!(
-            resp.contains("a1 OK [APPENDUID 1 9] APPEND completed"),
+            resp.contains("a1 OK [APPENDUID 77 9] APPEND completed"),
             "got {resp:?}"
         );
     }
@@ -1051,6 +1055,7 @@ mod tests {
     #[tokio::test]
     async fn append_to_the_selected_drafts_reports_the_new_draft() {
         let (mut session, _, store) = session_with_drafts(true).await;
+        store.set_uid_validity(77);
         store
             .upsert_mail_in_folder(
                 "drafts",
@@ -1103,7 +1108,7 @@ mod tests {
         res.unwrap();
         assert_eq!(
             resp,
-            "* 2 EXISTS\r\nd1 OK [APPENDUID 1 7] APPEND completed\r\n"
+            "* 2 EXISTS\r\nd1 OK [APPENDUID 77 7] APPEND completed\r\n"
         );
 
         session
@@ -1152,14 +1157,14 @@ mod tests {
     #[test]
     fn append_draft_reply_offers_the_uid_only_when_known() {
         assert_eq!(
-            append_draft_reply("d1", &Ok(Some(17))),
-            "d1 OK [APPENDUID 1 17] APPEND completed\r\n"
+            append_draft_reply("d1", 7, &Ok(Some(17))),
+            "d1 OK [APPENDUID 7 17] APPEND completed\r\n"
         );
         assert_eq!(
-            append_draft_reply("d2", &Ok(None)),
+            append_draft_reply("d2", 7, &Ok(None)),
             "d2 OK APPEND completed\r\n"
         );
-        assert!(append_draft_reply("d3", &Err("offline".into())).starts_with("d3 NO "));
+        assert!(append_draft_reply("d3", 7, &Err("offline".into())).starts_with("d3 NO "));
     }
 
     #[test]

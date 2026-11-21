@@ -290,7 +290,7 @@ async fn refresh_folder_list(
     match backend.list_folders().await {
         Ok(folders) => {
             let known: HashSet<String> = folders.iter().map(|f| f.id.clone()).collect();
-            store.set_folder_list(folders).await;
+            crate::sync::publish_folder_list(store, local_store, folders).await;
             let removed = store.prune_unknown_folders(&known).await;
             for fid in &removed {
                 debug!("Event bus: folder {} removed", fid);
@@ -660,6 +660,8 @@ async fn resolve_mail(
 
 /// Allocate a fresh UID in `target_folder`, stamp it on `stored`, then
 /// upsert both `MailStore` and the `LocalStore` metadata row in one step.
+/// A mail the folder already holds keeps its UID: an event applied twice
+/// (replayed batch, mail already listed by a sync) must not renumber it.
 async fn assign_uid_and_upsert(
     store: &MailStore,
     local_store: &LocalStore,
@@ -667,15 +669,23 @@ async fn assign_uid_and_upsert(
     mail_eid: &str,
     stored: &mut StoredMail,
 ) {
-    let uid = match local_store.allocate_folder_uids(&target_folder.id, &[mail_eid]) {
-        Ok(map) => map.get(mail_eid).copied().unwrap_or(0),
-        Err(e) => {
-            warn!(
-                "Failed to allocate UID for {} in {}: {e}",
-                mail_eid, target_folder.imap_path
-            );
-            0
-        }
+    let held = store
+        .mail_in_folder(&target_folder.id, mail_eid)
+        .await
+        .map(|m| m.uid)
+        .filter(|&uid| uid != 0);
+    let uid = match held {
+        Some(uid) => uid,
+        None => match local_store.allocate_folder_uids(&target_folder.id, &[mail_eid]) {
+            Ok(map) => map.get(mail_eid).copied().unwrap_or(0),
+            Err(e) => {
+                warn!(
+                    "Failed to allocate UID for {} in {}: {e}",
+                    mail_eid, target_folder.imap_path
+                );
+                0
+            }
+        },
     };
     stored.uid = uid;
 
@@ -1192,5 +1202,105 @@ mod startup_tests {
             .expect("the event handler kept waiting")
             .unwrap();
         assert!(!in_memory(&store, "m0000001").await);
+    }
+
+    /// A mail moved between two cached folders gets a fresh UID in the target.
+    /// The disk row is the same one, re-pointed at the new folder: it has to
+    /// take that UID too, or the mail comes back from a restart with the UID
+    /// it had in the folder it left.
+    #[tokio::test]
+    async fn a_moved_mail_keeps_its_new_uid_across_a_restart() {
+        fn folder(id: &str) -> FolderInfo {
+            FolderInfo {
+                id: id.to_string(),
+                list_id: "folders".to_string(),
+                entries_list_id: format!("{id}_entries"),
+                kind: MailSetKind::Custom,
+                imap_path: id.to_string(),
+                special_use: None,
+            }
+        }
+        async fn uids(store: &MailStore, folder_id: &str) -> Vec<(String, u32)> {
+            let (mails, _) = store.folder_with_uid_next(folder_id).await;
+            let mut uids: Vec<_> = mails
+                .iter()
+                .map(|m| (m.mail._id.as_ref().unwrap().element_id.0.clone(), m.uid))
+                .collect();
+            uids.sort();
+            uids
+        }
+        let open = |dir: &std::path::Path| {
+            let key = GenericAesKey::Aes256(Aes256Key::from_bytes(&[7; 32]).unwrap());
+            LocalStore::open(&dir.join("store.db"), &dir.join("mails"), key).unwrap()
+        };
+        let dir = std::env::temp_dir().join(format!("tb_moved_uid_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (big, small) = (folder("big"), folder("small"));
+
+        let ls = open(&dir);
+        let store = MailStore::new();
+        for (target, count) in [(&big, 50), (&small, 3)] {
+            for i in 1..=count {
+                let eid = format!("{}{i:02}", target.id);
+                let mut arriving = StoredMail {
+                    mail: mail(&eid, 1_000_000),
+                    body_loaded: false,
+                    uid: 0,
+                    attachments_pending: false,
+                };
+                assign_uid_and_upsert(&store, &ls, target, &eid, &mut arriving).await;
+            }
+        }
+        // big50 (UID 50 there) moves to `small`, as the event bus applies it:
+        // the cached mail is cloned into the target, then leaves the source.
+        let (_, mut moved) = store.find_mail_anywhere("big50").await.unwrap();
+        assign_uid_and_upsert(&store, &ls, &small, "big50", &mut moved).await;
+        store.remove_mail_from_folder(&big.id, "big50").await;
+        let running = uids(&store, "small").await;
+        assert_eq!(running.last().unwrap(), &("small03".to_string(), 3));
+        assert_eq!(running[0], ("big50".to_string(), 4));
+        assert_eq!(store.folder_with_uid_next("small").await.1, 5);
+
+        drop((store, ls));
+        let ls = Arc::new(open(&dir));
+        let store = MailStore::new();
+        crate::sync::load_cached_folder(&store, &ls, &small)
+            .await
+            .unwrap();
+        assert_eq!(uids(&store, "small").await, running);
+        assert_eq!(store.folder_with_uid_next("small").await.1, 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same arrival applied twice (a batch replayed after a crash, or a
+    /// mail the sync had already listed) leaves the mail on its UID.
+    #[tokio::test]
+    async fn an_arrival_applied_twice_keeps_the_uid() {
+        let ls = cache_of_a_previous_run();
+        let store = MailStore::new();
+        let folder = FolderInfo {
+            id: "target".to_string(),
+            list_id: "folders".to_string(),
+            entries_list_id: "target_entries".to_string(),
+            kind: MailSetKind::Custom,
+            imap_path: "target".to_string(),
+            special_use: None,
+        };
+        let mut arriving = StoredMail {
+            mail: mail("again", 1_000_000),
+            body_loaded: false,
+            uid: 0,
+            attachments_pending: false,
+        };
+        assign_uid_and_upsert(&store, &ls, &folder, "again", &mut arriving).await;
+        assert_eq!(arriving.uid, 1);
+
+        let (_, mut replayed) = store.find_mail_anywhere("again").await.unwrap();
+        assign_uid_and_upsert(&store, &ls, &folder, "again", &mut replayed).await;
+        assert_eq!(replayed.uid, 1);
+        let (mails, uid_next) = store.folder_with_uid_next("target").await;
+        assert_eq!((mails.len(), mails[0].uid, uid_next), (1, 1, 2));
+        assert_eq!(ls.folder_next_uid("target").unwrap(), 2);
     }
 }
