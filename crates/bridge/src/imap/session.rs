@@ -936,6 +936,9 @@ impl ImapSession {
         if self.state != State::Selected {
             return vec![format!("{} NO No mailbox selected\r\n", tag)];
         }
+        if self.examined {
+            return vec![format!("{} NO Mailbox is read-only\r\n", tag)];
+        }
         match self.expunge_deleted(None).await {
             Ok(mut responses) => {
                 responses.push(format!("{} OK EXPUNGE completed\r\n", tag));
@@ -951,9 +954,17 @@ impl ImapSession {
     /// UID EXPUNGE (RFC 4315, which UIDPLUS advertises): only the mails both
     /// flagged \Deleted and named in the set go.
     async fn cmd_uid_expunge(&mut self, tag: &str, args: &str) -> Vec<String> {
+        if self.state != State::Selected {
+            return vec![format!("{} NO No mailbox selected\r\n", tag)];
+        }
         let set = args.trim();
-        if set.is_empty() {
-            return vec![format!("{} BAD UID EXPUNGE needs a UID set\r\n", tag)];
+        // The set is checked whole first: a lenient read of `3:` would name
+        // every UID up to 3 and delete them.
+        if !is_sequence_set(set) {
+            return vec![format!("{} BAD UID EXPUNGE needs a valid UID set\r\n", tag)];
+        }
+        if self.examined {
+            return vec![format!("{} NO Mailbox is read-only\r\n", tag)];
         }
         let uids: std::collections::HashSet<u32> = self
             .resolve_sequence_set(set, true)
@@ -1031,16 +1042,6 @@ impl ImapSession {
     /// messages are then expunged from the source view.
     async fn cmd_move(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
         let label = if uid_mode { "UID MOVE" } else { "MOVE" };
-        self.move_messages(tag, args, uid_mode, label).await
-    }
-
-    async fn move_messages(
-        &mut self,
-        tag: &str,
-        args: &str,
-        uid_mode: bool,
-        label: &str,
-    ) -> Vec<String> {
         if self.state != State::Selected {
             return vec![format!("{} NO No mailbox selected\r\n", tag)];
         }
@@ -1104,16 +1105,16 @@ impl ImapSession {
     }
 
     /// Tuta folders are exclusive, so a mail cannot be in two of them and
-    /// COPY is refused, with one exception: UID COPY to Trash. Some clients
-    /// delete that way (UID COPY to Trash, flag \Deleted, UID EXPUNGE), so it
-    /// is done as a move and the mail leaves this mailbox at once. Only by
-    /// UID: a client that copies by sequence number and then flags the same
-    /// number would hit the mail that took its place.
+    /// COPY is refused, with one exception: UID COPY to Trash, answered OK
+    /// without touching the mail. Geary and its forks never send MOVE: they
+    /// delete with UID COPY to Trash, flag \Deleted, UID EXPUNGE, and that
+    /// expunge is what sends the mail to Trash. Refused from Trash and Spam,
+    /// where an expunge deletes for good and the mail would be lost.
     async fn cmd_copy(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
         if self.state != State::Selected {
             return vec![format!("{} NO No mailbox selected\r\n", tag)];
         }
-        let (_, rest) = args.trim().split_once(' ').unwrap_or((args.trim(), ""));
+        let (set, rest) = args.trim().split_once(' ').unwrap_or((args.trim(), ""));
         let (raw_name, _) = parse_imap_token(rest.trim());
         let folder_name = super::utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone());
         let to_trash = self
@@ -1121,13 +1122,15 @@ impl ImapSession {
             .folder_by_imap_path(&folder_name)
             .await
             .is_some_and(|f| f.kind == MailSetKind::Trash);
-        let from_trash = self
+        let from_bin = self
             .selected_folder
             .as_ref()
-            .is_some_and(|f| f.kind == MailSetKind::Trash);
-        if uid_mode && to_trash && !from_trash {
-            let label = if uid_mode { "UID COPY" } else { "COPY" };
-            return self.move_messages(tag, args, uid_mode, label).await;
+            .is_some_and(|f| matches!(f.kind, MailSetKind::Trash | MailSetKind::Spam));
+        if uid_mode && to_trash && !from_bin {
+            if !is_sequence_set(set) {
+                return vec![format!("{} BAD UID COPY needs a valid UID set\r\n", tag)];
+            }
+            return vec![format!("{} OK UID COPY completed\r\n", tag)];
         }
         vec![format!(
             "{} NO [CANNOT] COPY is not supported; use MOVE\r\n",
@@ -1578,6 +1581,19 @@ fn format_envelope_mailbox(name: &str, address: &str) -> String {
         imap_string(user),
         imap_string(domain)
     )
+}
+
+/// A sequence set as RFC 3501 writes it: comma-separated numbers or ranges,
+/// each bound a non-zero number or `*`.
+fn is_sequence_set(set: &str) -> bool {
+    let bound = |b: &str| {
+        b == "*" || (b.parse::<u32>().is_ok_and(|n| n > 0) && b.bytes().all(|c| c.is_ascii_digit()))
+    };
+    !set.is_empty()
+        && set.split(',').all(|item| match item.split_once(':') {
+            Some((lo, hi)) => bound(lo) && bound(hi),
+            None => bound(item),
+        })
 }
 
 fn parse_seq_num(s: &str, max: u32) -> u32 {
@@ -4906,7 +4922,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// INBOX holding three mails on UIDs 1 to 3, next to an empty Trash.
+    /// INBOX holding three mails on UIDs 1 to 3, next to an empty Trash and
+    /// an empty Spam.
     async fn inbox_and_trash(backend: Arc<MockBackend>) -> ImapSession {
         let store = MailStore::new();
         let trash = FolderInfo {
@@ -4917,7 +4934,17 @@ pub(crate) mod tests {
             imap_path: "Trash".into(),
             special_use: Some("\\Trash".into()),
         };
-        store.set_folder_list(vec![inbox_folder(), trash]).await;
+        let spam = FolderInfo {
+            id: "spam".into(),
+            list_id: "folders".into(),
+            entries_list_id: "spam_entries".into(),
+            kind: MailSetKind::Spam,
+            imap_path: "Spam".into(),
+            special_use: Some("\\Junk".into()),
+        };
+        store
+            .set_folder_list(vec![inbox_folder(), trash, spam])
+            .await;
         let mails = (1..=3)
             .map(|uid| StoredMail {
                 mail: make_mail(&format!("m{uid}"), "s", false),
@@ -4928,6 +4955,7 @@ pub(crate) mod tests {
             .collect();
         store.set_folder("inbox", mails).await;
         store.set_folder("trash", vec![]).await;
+        store.set_folder("spam", vec![]).await;
         let mut session = ImapSession::new(store, backend, None, None);
         session.handle_command("a LOGIN u p").await;
         session
@@ -4937,50 +4965,101 @@ pub(crate) mod tests {
         list.iter().map(|id| id.element_id.to_string()).collect()
     }
 
-    /// Convey deletes with COPY to Trash, flag \Deleted, UID EXPUNGE (#135).
-    /// The copy moves the mail; the rest then finds nothing left to remove.
+    /// Convey deletes as Geary does: UID COPY to Trash, flag \Deleted, UID
+    /// EXPUNGE (#135), in lower case as its log shows. The copy changes
+    /// nothing; the expunge sends the mail to Trash.
     #[tokio::test]
-    async fn convey_delete_moves_the_mail_to_trash() {
+    async fn convey_delete_sends_the_mail_to_trash_at_the_expunge() {
         let backend = Arc::new(MockBackend::new());
         let mut session = inbox_and_trash(backend.clone()).await;
         session.handle_command("b SELECT INBOX").await;
 
-        let r = session.handle_command("a014 UID COPY 2 Trash").await;
-        assert_eq!(r, vec!["* 2 EXPUNGE\r\n", "a014 OK UID COPY completed\r\n"]);
-        let moved = backend.moved.lock().unwrap().clone();
-        assert_eq!(moved.len(), 1);
-        assert_eq!(
-            (ids(&moved[0].0), moved[0].1.as_str()),
-            (vec!["m2".to_string()], "trash")
-        );
+        let r = session.handle_command("a014 uid copy 2 Trash").await;
+        assert_eq!(r, vec!["a014 OK UID COPY completed\r\n"]);
+        assert!(backend.moved.lock().unwrap().is_empty());
+        assert_eq!(session.mails.len(), 3);
 
         let r = session
-            .handle_command("a015 UID STORE 2 +FLAGS.SILENT (\\Deleted)")
+            .handle_command("a015 uid store 2 +FLAGS.SILENT (\\Deleted)")
             .await;
-        assert_eq!(r.last().unwrap(), "a015 OK UID STORE completed\r\n");
-        let r = session.handle_command("a016 UID EXPUNGE 2").await;
-        assert_eq!(r, vec!["a016 OK UID EXPUNGE completed\r\n"]);
-        assert!(backend.trashed.lock().unwrap().is_empty());
+        assert_eq!(r, vec!["a015 OK UID STORE completed\r\n"]);
+        let r = session.handle_command("a016 uid expunge 2").await;
+        assert_eq!(
+            r,
+            vec!["* 2 EXPUNGE\r\n", "a016 OK UID EXPUNGE completed\r\n"]
+        );
+        assert_eq!(ids(&backend.trashed.lock().unwrap()), vec!["m2"]);
         assert!(backend.deleted.lock().unwrap().is_empty());
-
-        // By sequence number it stays refused: see `cmd_copy`.
-        let r = session.handle_command("a017 COPY 1 Trash").await;
-        assert!(r[0].starts_with("a017 NO [CANNOT]"), "{r:?}");
-        assert_eq!(backend.moved.lock().unwrap().len(), 1);
+        assert!(backend.moved.lock().unwrap().is_empty());
     }
 
-    /// A copy anywhere else would have to leave the mail in two folders.
+    /// COPY stays refused by sequence number, to another folder, and from
+    /// Trash or Spam, where the expunge that follows would delete for good.
     #[tokio::test]
-    async fn copy_outside_trash_is_still_refused() {
+    async fn copy_is_refused_unless_it_is_a_delete() {
         let backend = Arc::new(MockBackend::new());
         let mut session = inbox_and_trash(backend.clone()).await;
-        session.handle_command("b SELECT Trash").await;
-        let r = session.handle_command("c UID COPY 1 Trash").await;
+        session.handle_command("a SELECT INBOX").await;
+        let r = session.handle_command("b COPY 1 Trash").await;
+        assert!(r[0].starts_with("b NO [CANNOT]"), "{r:?}");
+        let r = session.handle_command("c UID COPY 1 Spam").await;
         assert!(r[0].starts_with("c NO [CANNOT]"), "{r:?}");
-        session.handle_command("d SELECT INBOX").await;
-        let r = session.handle_command("e UID COPY 1 Nowhere").await;
-        assert!(r[0].starts_with("e NO [CANNOT]"), "{r:?}");
+        let r = session.handle_command("d UID COPY 1 Nowhere").await;
+        assert!(r[0].starts_with("d NO [CANNOT]"), "{r:?}");
+        let r = session.handle_command("e UID COPY 3: Trash").await;
+        assert!(r[0].starts_with("e BAD"), "{r:?}");
+        for bin in ["Trash", "Spam"] {
+            session.handle_command(&format!("f SELECT {bin}")).await;
+            let r = session.handle_command("g UID COPY 1 Trash").await;
+            assert!(r[0].starts_with("g NO [CANNOT]"), "{bin}: {r:?}");
+        }
         assert!(backend.moved.lock().unwrap().is_empty());
+    }
+
+    /// After EXAMINE nothing goes: EXPUNGE and UID EXPUNGE answer NO.
+    #[tokio::test]
+    async fn an_examined_mailbox_expunges_nothing() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        let mails = session.store.get_folder("inbox").await;
+        session.store.set_folder("trash", mails).await;
+        session.handle_command("a EXAMINE Trash").await;
+        session
+            .handle_command("b UID STORE 2 +FLAGS (\\Deleted)")
+            .await;
+        let r = session.handle_command("c UID EXPUNGE 2").await;
+        assert_eq!(r, vec!["c NO Mailbox is read-only\r\n"]);
+        let r = session.handle_command("d EXPUNGE").await;
+        assert_eq!(r, vec!["d NO Mailbox is read-only\r\n"]);
+        let r = session.handle_command("e UID COPY 2 Trash").await;
+        assert!(r[0].starts_with("e NO [CANNOT]"), "{r:?}");
+        assert!(backend.deleted.lock().unwrap().is_empty());
+        assert!(backend.moved.lock().unwrap().is_empty());
+        assert_eq!(session.mails.len(), 3);
+    }
+
+    /// A malformed UID set is refused whole, before anything is removed.
+    #[tokio::test]
+    async fn a_malformed_uid_set_expunges_nothing() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        let mails = session.store.get_folder("inbox").await;
+        session.store.set_folder("trash", mails).await;
+        session.handle_command("a SELECT Trash").await;
+        session
+            .handle_command("b UID STORE 1:3 +FLAGS (\\Deleted)")
+            .await;
+        for set in ["3:", ":3", "0", "0:2", "1,,2", "x", "1:x", "+1", "1 2"] {
+            let r = session
+                .handle_command(&format!("c UID EXPUNGE {set}"))
+                .await;
+            assert!(r[0].starts_with("c BAD"), "{set}: {r:?}");
+        }
+        assert!(backend.deleted.lock().unwrap().is_empty());
+        assert_eq!(session.mails.len(), 3);
+        let r = session.handle_command("d UID EXPUNGE 2,3:*").await;
+        assert_eq!(r.last().unwrap(), "d OK UID EXPUNGE completed\r\n");
+        assert_eq!(ids(&backend.deleted.lock().unwrap()[0].0), vec!["m2", "m3"]);
     }
 
     /// UID EXPUNGE removes only the flagged mails it names; the other flagged
