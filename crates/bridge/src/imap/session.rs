@@ -44,6 +44,8 @@ pub struct ImapSession {
     local_store: Option<Arc<LocalStore>>,
     state: State,
     selected_folder: Option<FolderInfo>,
+    /// Selected with EXAMINE: CLOSE then removes nothing (RFC 3501 6.4.2).
+    examined: bool,
     mails: Vec<CachedMail>,
     idle_tag: Option<String>,
     auth_tag: Option<String>,
@@ -76,6 +78,7 @@ impl ImapSession {
             local_store,
             state: State::NotAuthenticated,
             selected_folder: None,
+            examined: false,
             mails: Vec::new(),
             idle_tag: None,
             auth_tag: None,
@@ -294,17 +297,18 @@ impl ImapSession {
             }
             "LIST" => self.cmd_list(&tag, args, "LIST").await,
             "LSUB" => self.cmd_list(&tag, args, "LSUB").await,
-            "SELECT" => self.cmd_select(&tag, args).await,
-            "EXAMINE" => self.cmd_select(&tag, args).await,
+            "SELECT" => self.cmd_select(&tag, args, false).await,
+            "EXAMINE" => self.cmd_select(&tag, args, true).await,
             "STATUS" => self.cmd_status(&tag, args).await,
             "FETCH" => return self.cmd_fetch(&tag, args, false).await,
             "UID" => return self.cmd_uid(&tag, args).await,
-            "CLOSE" => self.cmd_close(&tag),
+            "CLOSE" => self.cmd_close(&tag).await,
+            "UNSELECT" => self.cmd_unselect(&tag),
             "EXPUNGE" => self.cmd_expunge(&tag).await,
             "SEARCH" => self.cmd_search(&tag, args, false),
             "STORE" => self.cmd_store(&tag, args, false).await,
             "MOVE" => self.cmd_move(&tag, args, false).await,
-            "COPY" => self.cmd_copy(&tag),
+            "COPY" => self.cmd_copy(&tag, args, false).await,
             "IDLE" => {
                 self.idle_tag = Some(tag.clone());
                 vec!["+ idling\r\n".to_string()]
@@ -392,7 +396,7 @@ impl ImapSession {
 
     fn cmd_capability(&self, tag: &str) -> Vec<String> {
         vec![
-            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE ID CHILDREN\r\n"
+            "* CAPABILITY IMAP4rev1 AUTH=PLAIN IDLE NAMESPACE UIDPLUS MOVE UNSELECT ID CHILDREN\r\n"
                 .to_string(),
             format!("{} OK CAPABILITY completed\r\n", tag),
         ]
@@ -491,7 +495,7 @@ impl ImapSession {
         responses
     }
 
-    async fn cmd_select(&mut self, tag: &str, args: &str) -> Vec<String> {
+    async fn cmd_select(&mut self, tag: &str, args: &str, examine: bool) -> Vec<String> {
         if self.state == State::NotAuthenticated {
             return vec![format!("{} NO Not authenticated\r\n", tag)];
         }
@@ -510,6 +514,7 @@ impl ImapSession {
         let folder_id = folder.id.clone();
         self.report_folder(Some(folder.imap_path.clone()));
         self.selected_folder = Some(folder);
+        self.examined = examine;
         self.state = State::Selected;
 
         match self.refresh_mails(&folder_id).await {
@@ -888,48 +893,116 @@ impl ImapSession {
             "SEARCH" => self.cmd_search(tag, subargs, true),
             "STORE" => self.cmd_store(tag, subargs, true).await,
             "MOVE" => self.cmd_move(tag, subargs, true).await,
-            "COPY" => self.cmd_copy(tag),
+            "COPY" => self.cmd_copy(tag, subargs, true).await,
+            "EXPUNGE" => self.cmd_uid_expunge(tag, subargs).await,
             _ => vec![format!("{} BAD Unknown UID subcommand\r\n", tag)],
         };
         responses.into_iter().map(String::into_bytes).collect()
     }
 
-    fn cmd_close(&mut self, tag: &str) -> Vec<String> {
+    /// CLOSE removes the mails flagged \Deleted, without telling the client
+    /// (RFC 3501 6.4.2), unless the mailbox was opened with EXAMINE. It has
+    /// no NO answer: clients take it as "left the mailbox" whatever happens,
+    /// so a failed removal is logged and the mails stay where they are.
+    async fn cmd_close(&mut self, tag: &str) -> Vec<String> {
+        if self.state == State::Selected && !self.examined {
+            if let Err(e) = self.expunge_deleted(None).await {
+                log::warn!("CLOSE could not remove deleted mails: {e}");
+            }
+        }
+        self.leave_mailbox();
+        vec![format!("{} OK CLOSE completed\r\n", tag)]
+    }
+
+    /// UNSELECT (RFC 3691): leave the mailbox without removing anything, for
+    /// clients that keep mails flagged \Deleted.
+    fn cmd_unselect(&mut self, tag: &str) -> Vec<String> {
+        if self.state != State::Selected {
+            return vec![format!("{} NO No mailbox selected\r\n", tag)];
+        }
+        self.leave_mailbox();
+        vec![format!("{} OK UNSELECT completed\r\n", tag)]
+    }
+
+    fn leave_mailbox(&mut self) {
         self.report_folder(None);
         self.state = State::Authenticated;
         self.selected_folder = None;
+        self.examined = false;
         self.mails.clear();
-        vec![format!("{} OK CLOSE completed\r\n", tag)]
     }
 
     async fn cmd_expunge(&mut self, tag: &str) -> Vec<String> {
         if self.state != State::Selected {
             return vec![format!("{} NO No mailbox selected\r\n", tag)];
         }
+        match self.expunge_deleted(None).await {
+            Ok(mut responses) => {
+                responses.push(format!("{} OK EXPUNGE completed\r\n", tag));
+                responses
+            }
+            Err(e) => {
+                log::warn!("EXPUNGE failed: {e}");
+                vec![format!("{} NO EXPUNGE failed\r\n", tag)]
+            }
+        }
+    }
 
+    /// UID EXPUNGE (RFC 4315, which UIDPLUS advertises): only the mails both
+    /// flagged \Deleted and named in the set go.
+    async fn cmd_uid_expunge(&mut self, tag: &str, args: &str) -> Vec<String> {
+        let set = args.trim();
+        if set.is_empty() {
+            return vec![format!("{} BAD UID EXPUNGE needs a UID set\r\n", tag)];
+        }
+        let uids: std::collections::HashSet<u32> = self
+            .resolve_sequence_set(set, true)
+            .into_iter()
+            .map(|i| self.mails[i].uid)
+            .collect();
+        match self.expunge_deleted(Some(&uids)).await {
+            Ok(mut responses) => {
+                responses.push(format!("{} OK UID EXPUNGE completed\r\n", tag));
+                responses
+            }
+            Err(e) => {
+                log::warn!("UID EXPUNGE failed: {e}");
+                vec![format!("{} NO UID EXPUNGE failed\r\n", tag)]
+            }
+        }
+    }
+
+    /// Remove the mails flagged \Deleted (all of them, or those whose UID is
+    /// in `only`) on Tuta, then from this session's view. Returns the
+    /// untagged EXPUNGE lines. On failure nothing is removed from the view.
+    async fn expunge_deleted(
+        &mut self,
+        only: Option<&std::collections::HashSet<u32>>,
+    ) -> Result<Vec<String>, String> {
+        let goes = |m: &CachedMail| m.deleted && only.is_none_or(|uids| uids.contains(&m.uid));
         let deleted_ids: Vec<_> = self
             .mails
             .iter()
-            .filter(|m| m.deleted)
+            .filter(|m| goes(m))
             .filter_map(|m| m.mail._id.clone())
             .collect();
 
         let deleted_count = deleted_ids.len();
         if !deleted_ids.is_empty() {
             // Trash and Spam are where Tuta deletes permanently; anywhere else
-            // an expunged mail goes to Trash, as before.
+            // an expunged mail goes to Trash.
             match self.selected_folder.as_ref() {
                 Some(folder) if matches!(folder.kind, MailSetKind::Trash | MailSetKind::Spam) => {
-                    if let Err(e) = self.backend.delete_mails(deleted_ids, folder).await {
-                        log::warn!("Failed to delete mails from {}: {}", folder.imap_path, e);
-                        return vec![format!("{} NO EXPUNGE failed\r\n", tag)];
-                    }
+                    self.backend
+                        .delete_mails(deleted_ids, folder)
+                        .await
+                        .map_err(|e| format!("delete from {}: {e}", folder.imap_path))?;
                 }
                 _ => {
-                    if let Err(e) = self.backend.trash_mails(deleted_ids).await {
-                        log::warn!("Failed to trash mails: {}", e);
-                        return vec![format!("{} NO EXPUNGE failed\r\n", tag)];
-                    }
+                    self.backend
+                        .trash_mails(deleted_ids)
+                        .await
+                        .map_err(|e| format!("trash: {e}"))?;
                 }
             }
             self.report(ActivityEvent::Deleted {
@@ -942,7 +1015,7 @@ impl ImapSession {
         let mut seq = 1u32;
         let mut i = 0;
         while i < self.mails.len() {
-            if self.mails[i].deleted {
+            if goes(&self.mails[i]) {
                 responses.push(format!("* {} EXPUNGE\r\n", seq));
                 self.mails.remove(i);
             } else {
@@ -950,9 +1023,7 @@ impl ImapSession {
                 i += 1;
             }
         }
-
-        responses.push(format!("{} OK EXPUNGE completed\r\n", tag));
-        responses
+        Ok(responses)
     }
 
     /// MOVE / UID MOVE (RFC 6851): move messages to another mailbox. Tuta
@@ -960,6 +1031,16 @@ impl ImapSession {
     /// messages are then expunged from the source view.
     async fn cmd_move(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
         let label = if uid_mode { "UID MOVE" } else { "MOVE" };
+        self.move_messages(tag, args, uid_mode, label).await
+    }
+
+    async fn move_messages(
+        &mut self,
+        tag: &str,
+        args: &str,
+        uid_mode: bool,
+        label: &str,
+    ) -> Vec<String> {
         if self.state != State::Selected {
             return vec![format!("{} NO No mailbox selected\r\n", tag)];
         }
@@ -1022,9 +1103,32 @@ impl ImapSession {
         responses
     }
 
-    /// COPY is not supported: Tuta folders are exclusive (no duplication).
-    /// Clients should use MOVE, which we advertise.
-    fn cmd_copy(&self, tag: &str) -> Vec<String> {
+    /// Tuta folders are exclusive, so a mail cannot be in two of them and
+    /// COPY is refused, with one exception: UID COPY to Trash. Some clients
+    /// delete that way (UID COPY to Trash, flag \Deleted, UID EXPUNGE), so it
+    /// is done as a move and the mail leaves this mailbox at once. Only by
+    /// UID: a client that copies by sequence number and then flags the same
+    /// number would hit the mail that took its place.
+    async fn cmd_copy(&mut self, tag: &str, args: &str, uid_mode: bool) -> Vec<String> {
+        if self.state != State::Selected {
+            return vec![format!("{} NO No mailbox selected\r\n", tag)];
+        }
+        let (_, rest) = args.trim().split_once(' ').unwrap_or((args.trim(), ""));
+        let (raw_name, _) = parse_imap_token(rest.trim());
+        let folder_name = super::utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone());
+        let to_trash = self
+            .store
+            .folder_by_imap_path(&folder_name)
+            .await
+            .is_some_and(|f| f.kind == MailSetKind::Trash);
+        let from_trash = self
+            .selected_folder
+            .as_ref()
+            .is_some_and(|f| f.kind == MailSetKind::Trash);
+        if uid_mode && to_trash && !from_trash {
+            let label = if uid_mode { "UID COPY" } else { "COPY" };
+            return self.move_messages(tag, args, uid_mode, label).await;
+        }
         vec![format!(
             "{} NO [CANNOT] COPY is not supported; use MOVE\r\n",
             tag
@@ -4800,5 +4904,196 @@ pub(crate) mod tests {
             r.iter().any(|l| l.contains("[UIDVALIDITY 1700000000]")),
             "got {r:?}"
         );
+    }
+
+    /// INBOX holding three mails on UIDs 1 to 3, next to an empty Trash.
+    async fn inbox_and_trash(backend: Arc<MockBackend>) -> ImapSession {
+        let store = MailStore::new();
+        let trash = FolderInfo {
+            id: "trash".into(),
+            list_id: "folders".into(),
+            entries_list_id: "trash_entries".into(),
+            kind: MailSetKind::Trash,
+            imap_path: "Trash".into(),
+            special_use: Some("\\Trash".into()),
+        };
+        store.set_folder_list(vec![inbox_folder(), trash]).await;
+        let mails = (1..=3)
+            .map(|uid| StoredMail {
+                mail: make_mail(&format!("m{uid}"), "s", false),
+                body_loaded: false,
+                uid,
+                attachments_pending: false,
+            })
+            .collect();
+        store.set_folder("inbox", mails).await;
+        store.set_folder("trash", vec![]).await;
+        let mut session = ImapSession::new(store, backend, None, None);
+        session.handle_command("a LOGIN u p").await;
+        session
+    }
+
+    fn ids(list: &[IdTupleGenerated]) -> Vec<String> {
+        list.iter().map(|id| id.element_id.to_string()).collect()
+    }
+
+    /// Convey deletes with COPY to Trash, flag \Deleted, UID EXPUNGE (#135).
+    /// The copy moves the mail; the rest then finds nothing left to remove.
+    #[tokio::test]
+    async fn convey_delete_moves_the_mail_to_trash() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        session.handle_command("b SELECT INBOX").await;
+
+        let r = session.handle_command("a014 UID COPY 2 Trash").await;
+        assert_eq!(r, vec!["* 2 EXPUNGE\r\n", "a014 OK UID COPY completed\r\n"]);
+        let moved = backend.moved.lock().unwrap().clone();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(
+            (ids(&moved[0].0), moved[0].1.as_str()),
+            (vec!["m2".to_string()], "trash")
+        );
+
+        let r = session
+            .handle_command("a015 UID STORE 2 +FLAGS.SILENT (\\Deleted)")
+            .await;
+        assert_eq!(r.last().unwrap(), "a015 OK UID STORE completed\r\n");
+        let r = session.handle_command("a016 UID EXPUNGE 2").await;
+        assert_eq!(r, vec!["a016 OK UID EXPUNGE completed\r\n"]);
+        assert!(backend.trashed.lock().unwrap().is_empty());
+        assert!(backend.deleted.lock().unwrap().is_empty());
+
+        // By sequence number it stays refused: see `cmd_copy`.
+        let r = session.handle_command("a017 COPY 1 Trash").await;
+        assert!(r[0].starts_with("a017 NO [CANNOT]"), "{r:?}");
+        assert_eq!(backend.moved.lock().unwrap().len(), 1);
+    }
+
+    /// A copy anywhere else would have to leave the mail in two folders.
+    #[tokio::test]
+    async fn copy_outside_trash_is_still_refused() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        session.handle_command("b SELECT Trash").await;
+        let r = session.handle_command("c UID COPY 1 Trash").await;
+        assert!(r[0].starts_with("c NO [CANNOT]"), "{r:?}");
+        session.handle_command("d SELECT INBOX").await;
+        let r = session.handle_command("e UID COPY 1 Nowhere").await;
+        assert!(r[0].starts_with("e NO [CANNOT]"), "{r:?}");
+        assert!(backend.moved.lock().unwrap().is_empty());
+    }
+
+    /// UID EXPUNGE removes only the flagged mails it names; the other flagged
+    /// one stays, flagged, for a later EXPUNGE.
+    #[tokio::test]
+    async fn uid_expunge_removes_only_the_flagged_mails_it_names() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        session.handle_command("b SELECT INBOX").await;
+        session
+            .handle_command("c UID STORE 1,3 +FLAGS (\\Deleted)")
+            .await;
+
+        let r = session.handle_command("a015 UID EXPUNGE 2:3").await;
+        assert_eq!(
+            r,
+            vec!["* 3 EXPUNGE\r\n", "a015 OK UID EXPUNGE completed\r\n"]
+        );
+        assert_eq!(ids(&backend.trashed.lock().unwrap()), vec!["m3"]);
+
+        let r = session.handle_command("d EXPUNGE").await;
+        assert_eq!(r, vec!["* 1 EXPUNGE\r\n", "d OK EXPUNGE completed\r\n"]);
+
+        let r = session.handle_command("e UID EXPUNGE").await;
+        assert!(r[0].starts_with("e BAD"), "{r:?}");
+        // Named but not flagged: stays.
+        let r = session.handle_command("f UID EXPUNGE 1:*").await;
+        assert_eq!(r, vec!["f OK UID EXPUNGE completed\r\n"]);
+        assert_eq!(session.mails.len(), 1);
+    }
+
+    /// In Trash, UID EXPUNGE deletes for good, and a failure removes nothing.
+    #[tokio::test]
+    async fn uid_expunge_in_trash_deletes_permanently_or_not_at_all() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        session.handle_command("b SELECT INBOX").await;
+        session.handle_command("c UID MOVE 1:3 Trash").await;
+        let store = session.store.clone();
+        let moved: Vec<StoredMail> = (1..=3)
+            .map(|uid| StoredMail {
+                mail: make_mail(&format!("m{uid}"), "s", false),
+                body_loaded: false,
+                uid,
+                attachments_pending: false,
+            })
+            .collect();
+        store.set_folder("trash", moved).await;
+        session.handle_command("d SELECT Trash").await;
+        session
+            .handle_command("e UID STORE 2 +FLAGS (\\Deleted)")
+            .await;
+
+        *backend.fail_expunge.lock().unwrap() = true;
+        let r = session.handle_command("f UID EXPUNGE 2").await;
+        assert_eq!(r, vec!["f NO UID EXPUNGE failed\r\n"]);
+        assert_eq!(session.mails.len(), 3);
+
+        *backend.fail_expunge.lock().unwrap() = false;
+        let r = session.handle_command("g UID EXPUNGE 2").await;
+        assert_eq!(r, vec!["* 2 EXPUNGE\r\n", "g OK UID EXPUNGE completed\r\n"]);
+        let deleted = backend.deleted.lock().unwrap();
+        assert_eq!(
+            (ids(&deleted[0].0), deleted[0].1.as_str()),
+            (vec!["m2".to_string()], "trash")
+        );
+    }
+
+    /// CLOSE removes the flagged mails without a word (RFC 3501 6.4.2), but
+    /// not after EXAMINE, which is read-only.
+    #[tokio::test]
+    async fn close_removes_flagged_mails_unless_examined() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        session.handle_command("b EXAMINE INBOX").await;
+        session.handle_command("c STORE 1 +FLAGS (\\Deleted)").await;
+        let r = session.handle_command("d CLOSE").await;
+        assert_eq!(r, vec!["d OK CLOSE completed\r\n"]);
+        assert!(backend.trashed.lock().unwrap().is_empty());
+
+        // A failed removal still leaves the mailbox, and removes nothing.
+        session.handle_command("e SELECT INBOX").await;
+        session.handle_command("f STORE 2 +FLAGS (\\Deleted)").await;
+        *backend.fail_expunge.lock().unwrap() = true;
+        let r = session.handle_command("g CLOSE").await;
+        assert_eq!(r, vec!["g OK CLOSE completed\r\n"]);
+        assert_eq!(session.state, State::Authenticated);
+        assert!(backend.trashed.lock().unwrap().is_empty());
+
+        *backend.fail_expunge.lock().unwrap() = false;
+        session.handle_command("h SELECT INBOX").await;
+        session.handle_command("i STORE 2 +FLAGS (\\Deleted)").await;
+        let r = session.handle_command("j CLOSE").await;
+        assert_eq!(r, vec!["j OK CLOSE completed\r\n"]);
+        assert_eq!(ids(&backend.trashed.lock().unwrap()), vec!["m2"]);
+        assert_eq!(session.state, State::Authenticated);
+    }
+
+    /// UNSELECT leaves the mailbox and keeps the flagged mails.
+    #[tokio::test]
+    async fn unselect_leaves_without_removing_anything() {
+        let backend = Arc::new(MockBackend::new());
+        let mut session = inbox_and_trash(backend.clone()).await;
+        let r = session.handle_command("a CAPABILITY").await;
+        assert!(r[0].contains(" UNSELECT "), "{r:?}");
+        let r = session.handle_command("b UNSELECT").await;
+        assert!(r[0].starts_with("b NO"), "{r:?}");
+
+        session.handle_command("c SELECT INBOX").await;
+        session.handle_command("d STORE 1 +FLAGS (\\Deleted)").await;
+        let r = session.handle_command("e UNSELECT").await;
+        assert_eq!(r, vec!["e OK UNSELECT completed\r\n"]);
+        assert_eq!(session.state, State::Authenticated);
+        assert!(backend.trashed.lock().unwrap().is_empty());
     }
 }
